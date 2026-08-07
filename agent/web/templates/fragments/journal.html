@@ -27,7 +27,7 @@
           <td>{{ 'Взвешивание' if row.record.operation.value == 'weighing' else 'Тарирование' }}</td>
           <td class="num cell-gross">{{ row.gross | fmt_kg }}</td>
           <td class="num">{{ row.tare | fmt_kg }}</td>
-          <td class="num cell-netto">{% if row.record.operation.value == 'weighing' %}{{ row.netto | fmt_kg if row.netto is not none else 'нет тары' }}{% else %}—{% endif %}</td>
+          <td class="num cell-netto">{{ row.netto | fmt_kg }}</td>
           <td>
             {% if row.record.source.value == 'ais' %}
             <span class="pill pill-info"><span class="dot"></span>АИС</span>

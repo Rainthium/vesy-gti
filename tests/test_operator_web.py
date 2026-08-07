@@ -6,7 +6,8 @@
 - правило режимов №3: при связи с центром ручные операции заблокированы,
   в автономном режиме доступны; manual_allowed в /ws/state инвертирует
   center_online;
-- экраны: главная (данные объекта, журнал, «нет тары», источник «Вручную
+- экраны: главная (данные объекта, журнал, прочерк вместо нетто без тары,
+  источник «Вручную
   (офлайн)»), «Оборудование», HTMX-фрагменты, баннер «НЕТ ДАННЫХ»;
 - камеры: отдача JPEG с Cache-Control: no-store, 502 при сбое камеры,
   404 для неизвестной и ненастроенной роли;
@@ -348,10 +349,11 @@ class TestScreens:
         # данные объекта берутся из info, а не захардкожены
         assert services.info.site_name in page.text
         assert services.info.scale_name in page.text
-        # журнал: номер ТС, брутто с узким пробелом, «нет тары», источник
+        # журнал: номер ТС, брутто с узким пробелом, прочерк без тары, источник
         assert "01KG777AAA" in page.text
         assert f"43{NNBSP}310" in page.text
-        assert "нет тары" in page.text
+        # запись без действующей тары: в колонке нетто прочерк, а не текст
+        assert "нет тары" not in page.text
         assert "Вручную (офлайн)" in page.text
 
     def test_equipment_page(self, services: FakeServices, operator_client: TestClient) -> None:
