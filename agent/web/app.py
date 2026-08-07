@@ -235,7 +235,8 @@ def create_app(services: AgentServices, *, session_secret: str) -> FastAPI:
         operation = manual_operation_or_404(op)
         require_manual_mode()
         try:
-            preview = services.manual_prepare(
+            # одношагово (как в ВесыСофт): нажатие кнопки = фиксация + запись
+            preview = services.manual_capture(
                 operation,
                 vehicle_number=vehicle_number,
                 trailer_number=trailer_number or None,
@@ -251,6 +252,7 @@ def create_app(services: AgentServices, *, session_secret: str) -> FastAPI:
                 vehicle_number=vehicle_number,
                 trailer_number=trailer_number,
             )
+        logger.info("оператор %s записал операцию %s", operator, preview.record.uuid)
         return render("manual_result.html", request, operator=operator, preview=preview)
 
     @app.get("/manual-fragments/tare-hint", response_class=HTMLResponse)
@@ -261,25 +263,6 @@ def create_app(services: AgentServices, *, session_secret: str) -> FastAPI:
         if number:
             tare = services.find_active_tare(number)
         return render("fragments/tare_hint.html", request, operator=operator, tare=tare)
-
-    @app.post("/manual/actions/commit")
-    def manual_commit(
-        request: Request, operator: Operator, preview_id: Annotated[str, Form()]
-    ) -> Response:
-        require_manual_mode()
-        try:
-            record = services.manual_commit(preview_id)
-        except ManualFlowError:
-            return RedirectResponse("/", status_code=303)
-        logger.info("оператор %s зафиксировал операцию %s", operator, record.uuid)
-        return RedirectResponse("/", status_code=303)
-
-    @app.post("/manual/actions/discard")
-    def manual_discard(
-        request: Request, operator: Operator, preview_id: Annotated[str, Form()]
-    ) -> Response:
-        services.manual_discard(preview_id)
-        return RedirectResponse("/", status_code=303)
 
     # --- живой вес ---
 

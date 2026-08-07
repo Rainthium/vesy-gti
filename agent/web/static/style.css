@@ -62,10 +62,10 @@ a:hover { color: #1f7fbb; }
 /* ---------- Каркас операторских экранов ---------- */
 
 body.app {
-  height: 100vh;
+  /* страница прокручивается как обычно; журнал скроллится внутри себя */
+  min-height: 100vh;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
 }
 
 .app-header {
@@ -140,13 +140,10 @@ body.app {
 /* ---------- Главный экран ---------- */
 
 .dashboard {
-  flex: 1;
-  min-height: 0;
   padding: 22px 24px;
   display: flex;
   flex-direction: column;
   gap: 18px;
-  overflow: hidden;
 }
 
 .top-row {
@@ -307,8 +304,6 @@ body.app {
 /* ---------- Журнал объекта ---------- */
 
 .journal-card {
-  flex: 1;
-  min-height: 0;
   background: #fff;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
@@ -326,7 +321,8 @@ body.app {
 }
 .journal-title { font-size: 16px; font-weight: 700; }
 .journal-meta { font-size: 13px; color: var(--muted); }
-.journal-scroll { flex: 1; min-height: 0; overflow: auto; }
+/* видно ~10 строк; остальное — прокрутка внутри списка */
+.journal-scroll { max-height: 452px; overflow: auto; }
 
 table.journal { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 table.journal th {
@@ -639,7 +635,7 @@ table.journal .cell-sync { text-align: center; font-size: 16px; }
 
 /* поля номеров */
 #manual-form { display: flex; flex-direction: column; gap: 18px; }
-.field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.field-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
 .field-grid label {
   display: flex;
   flex-direction: column;
@@ -649,6 +645,9 @@ table.journal .cell-sync { text-align: center; font-size: 16px; }
   color: var(--muted);
 }
 .field-grid input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   height: 52px;
   background: var(--surface-2);
   border: 1.5px solid transparent;

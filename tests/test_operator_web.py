@@ -103,9 +103,7 @@ class FakeServices:
         self.manual_ready_flag = False
         self.manual_error: str | None = None
         self.manual_preview: ManualPreview | None = None
-        self.manual_prepare_args: tuple[Operation, str, str | None, str] | None = None
-        self.manual_committed: str | None = None
-        self.manual_discarded: str | None = None
+        self.manual_capture_args: tuple[Operation, str, str | None, str] | None = None
         self.tare_hint: TareRecord | None = None
         self.reopen_called = False
         self.info = AgentInfo(
@@ -157,7 +155,7 @@ class FakeServices:
     def manual_ready(self) -> bool:
         return self.manual_ready_flag
 
-    def manual_prepare(
+    def manual_capture(
         self,
         operation: Operation,
         *,
@@ -165,23 +163,12 @@ class FakeServices:
         trailer_number: str | None,
         operator: str,
     ) -> ManualPreview:
+        # одношагово: успешный вызов означает, что операция уже «записана»
         if self.manual_error is not None:
             raise ManualFlowError(self.manual_error)
         assert self.manual_preview is not None, "тест не задал manual_preview"
-        self.manual_prepare_args = (operation, vehicle_number, trailer_number, operator)
+        self.manual_capture_args = (operation, vehicle_number, trailer_number, operator)
         return self.manual_preview
-
-    def manual_pending(self) -> ManualPreview | None:
-        return self.manual_preview
-
-    def manual_commit(self, preview_id: str) -> WeighingRecord:
-        if self.manual_preview is None or self.manual_preview.preview_id != preview_id:
-            raise ManualFlowError("операция устарела")
-        self.manual_committed = preview_id
-        return self.manual_preview.record
-
-    def manual_discard(self, preview_id: str) -> None:
-        self.manual_discarded = preview_id
 
     def find_active_tare(self, vehicle_number: str) -> TareRecord | None:
         return self.tare_hint
@@ -512,7 +499,7 @@ class TestManualRoutes:
         self, services: FakeServices, operator_client: TestClient, path: str
     ) -> None:
         """POST при связи с центром тоже блокируется: кнопкам не доверяем,
-        manual_prepare не вызывается."""
+        manual_capture не вызывается."""
         services.online = True
         services.manual_preview = make_preview()
         response = operator_client.post(
@@ -522,7 +509,7 @@ class TestManualRoutes:
         )
         assert response.status_code == 303
         assert response.headers["Location"] == "/"
-        assert services.manual_prepare_args is None
+        assert services.manual_capture_args is None
 
     def test_unknown_operation_404(
         self, services: FakeServices, operator_client: TestClient
@@ -558,8 +545,8 @@ class TestManualRoutes:
         path: str,
         operation: Operation,
     ) -> None:
-        """Успешная фиксация: страница результата с preview_id и кнопками;
-        в сервис ушли операция, номера как введены и имя оператора."""
+        """Успешная фиксация (одношаговая, как в ВесыСофт): операция уже
+        записана, карточка результата информационная — без кнопок подтверждения."""
         services.online = False
         services.manual_preview = make_preview(operation=operation)
         response = operator_client.post(
@@ -567,13 +554,13 @@ class TestManualRoutes:
             data={"vehicle_number": "01kg777aaa", "trailer_number": "BD123"},
         )
         assert response.status_code == 200
-        assert 'value="pv-test-1"' in response.text
-        assert "Зафиксировать" in response.text
-        assert "Отмена" in response.text
-        assert 'action="/manual/actions/commit"' in response.text
-        assert 'action="/manual/actions/discard"' in response.text
+        assert "Записано в журнал" in response.text
+        assert "Новая операция" in response.text
+        assert "На главную" in response.text
+        # кнопок подтверждения больше нет — запись уже сделана
+        assert "/manual/actions/" not in response.text
         # нормализация номеров — дело слоя логики, веб передаёт как введено
-        assert services.manual_prepare_args == (operation, "01kg777aaa", "BD123", OPERATOR_NAME)
+        assert services.manual_capture_args == (operation, "01kg777aaa", "BD123", OPERATOR_NAME)
 
     def test_post_empty_trailer_becomes_none(
         self, services: FakeServices, operator_client: TestClient
@@ -585,8 +572,8 @@ class TestManualRoutes:
             "/manual/weighing",
             data={"vehicle_number": "01KG777AAA", "trailer_number": ""},
         )
-        assert services.manual_prepare_args is not None
-        assert services.manual_prepare_args[2] is None
+        assert services.manual_capture_args is not None
+        assert services.manual_capture_args[2] is None
 
     def test_post_error_returns_form_with_message(
         self, services: FakeServices, operator_client: TestClient
@@ -602,47 +589,6 @@ class TestManualRoutes:
         assert "АТС не на весах — дождитесь заезда" in response.text
         assert 'name="vehicle_number"' in response.text
         assert 'value="01KG777AAA"' in response.text  # введённое не пропало
-
-    def test_commit_valid_id(self, services: FakeServices, operator_client: TestClient) -> None:
-        """Подтверждение с верным preview_id: 303 на главную, commit вызван."""
-        services.online = False
-        services.manual_preview = make_preview()
-        response = operator_client.post(
-            "/manual/actions/commit",
-            data={"preview_id": "pv-test-1"},
-            follow_redirects=False,
-        )
-        assert response.status_code == 303
-        assert response.headers["Location"] == "/"
-        assert services.manual_committed == "pv-test-1"
-
-    def test_commit_stale_id_redirects_without_error(
-        self, services: FakeServices, operator_client: TestClient
-    ) -> None:
-        """Устаревший preview_id: без падения, 303 на главную, записи нет."""
-        services.online = False
-        services.manual_preview = make_preview()
-        response = operator_client.post(
-            "/manual/actions/commit",
-            data={"preview_id": "stale-id"},
-            follow_redirects=False,
-        )
-        assert response.status_code == 303
-        assert response.headers["Location"] == "/"
-        assert services.manual_committed is None
-
-    def test_discard(self, services: FakeServices, operator_client: TestClient) -> None:
-        """Отмена превью: 303 на главную, discard вызван с preview_id."""
-        services.online = False
-        services.manual_preview = make_preview()
-        response = operator_client.post(
-            "/manual/actions/discard",
-            data={"preview_id": "pv-test-1"},
-            follow_redirects=False,
-        )
-        assert response.status_code == 303
-        assert response.headers["Location"] == "/"
-        assert services.manual_discarded == "pv-test-1"
 
     def test_tare_hint_found(self, services: FakeServices, operator_client: TestClient) -> None:
         """По известному номеру фрагмент показывает найденную тару."""

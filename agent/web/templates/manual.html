@@ -70,7 +70,7 @@
           : data.overload ? 'ПЕРЕГРУЗ' : data.stable ? 'СТАБИЛЬНО' : 'НЕСТАБИЛЬНО';
         state.dataset.kind = data.status !== 'ok' ? 'nodata' : data.overload ? 'overload' : data.stable ? 'stable' : 'unstable';
         button.disabled = !data.manual_ready;  // серверное решение, кнопка лишь отражает
-        hint.textContent = data.manual_ready ? 'Фиксация веса и снимки двух камер'
+        hint.textContent = data.manual_ready ? 'Нажатие зафиксирует вес, снимки и запишет операцию'
           : 'Станет активной после заезда и стабилизации массы';
         if (!data.manual_allowed) { location.href = '/'; }  // связь с центром вернулась
       };

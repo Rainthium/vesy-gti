@@ -76,7 +76,7 @@ class AgentServices(Protocol):
         """Можно ли фиксировать вес сейчас (офлайн + стабильная масса ≥ порога)."""
         ...
 
-    def manual_prepare(
+    def manual_capture(
         self,
         operation: Operation,
         *,
@@ -84,19 +84,8 @@ class AgentServices(Protocol):
         trailer_number: str | None,
         operator: str,
     ) -> ManualPreview:
-        """Зафиксировать вес и снимки; ManualFlowError — текст для формы."""
-        ...
-
-    def manual_pending(self) -> ManualPreview | None:
-        """Неподтверждённое превью, если есть."""
-        ...
-
-    def manual_commit(self, preview_id: str) -> WeighingRecord:
-        """Записать превью в журнал (далее запись неизменяема)."""
-        ...
-
-    def manual_discard(self, preview_id: str) -> None:
-        """Отменить превью (снимки удаляются, записи нет)."""
+        """Одношаговая операция (как в ВесыСофт): фиксация массы и снимков
+        с немедленной записью в журнал. ManualFlowError — текст для формы."""
         ...
 
     def find_active_tare(self, vehicle_number: str) -> TareRecord | None:

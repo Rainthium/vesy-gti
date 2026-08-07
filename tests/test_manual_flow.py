@@ -514,3 +514,17 @@ def test_commit_survives_storage_failure(env: FlowEnv, monkeypatch: pytest.Monke
     assert record.uuid == preview.record.uuid
     assert env.storage.get_weighing(preview.record.uuid) is not None
     assert flow.pending() is None
+
+
+def test_capture_and_save_writes_immediately(env: FlowEnv) -> None:
+    """Одношаговая операция (как в ВесыСофт): нажатие = фиксация + запись сразу."""
+    put_tare(env.storage)
+    flow = env.make_flow()
+    result = flow.capture_and_save(
+        Operation.WEIGHING, vehicle_number=VEHICLE, trailer_number=None, operator=OPERATOR
+    )
+    saved = env.storage.get_weighing(result.record.uuid)
+    assert saved is not None
+    assert saved.massa is not None
+    assert saved.netto == saved.massa - 15300.0
+    assert flow.pending() is None  # подтверждать нечего — уже записано

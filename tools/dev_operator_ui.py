@@ -187,7 +187,7 @@ class DemoServices:
     def manual_ready(self) -> bool:
         return self._flow.ready()
 
-    def manual_prepare(
+    def manual_capture(
         self,
         operation: Operation,
         *,
@@ -195,21 +195,12 @@ class DemoServices:
         trailer_number: str | None,
         operator: str,
     ) -> ManualPreview:
-        return self._flow.prepare(
+        return self._flow.capture_and_save(
             operation,
             vehicle_number=vehicle_number,
             trailer_number=trailer_number,
             operator=operator,
         )
-
-    def manual_pending(self) -> ManualPreview | None:
-        return self._flow.pending()
-
-    def manual_commit(self, preview_id: str) -> WeighingRecord:
-        return self._flow.commit(preview_id)
-
-    def manual_discard(self, preview_id: str) -> None:
-        self._flow.discard(preview_id)
 
     def find_active_tare(self, vehicle_number: str) -> TareRecord | None:
         return self._storage.find_active_tare(vehicle_number, datetime.now(UTC))

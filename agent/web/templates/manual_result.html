@@ -12,7 +12,7 @@
           {% if preview.photos | length == 2 %}снимки двух камер получены{% elif preview.photos %}получен {{ preview.photos | length }} снимок{% else %}снимков нет{% endif %}
         </p>
       </div>
-      <span class="pill pill-ok"><span class="dot"></span>Вес зафиксирован</span>
+      <span class="pill pill-ok"><span class="dot"></span>Записано в журнал</span>
     </header>
 
     <div class="manual-body">
@@ -29,7 +29,7 @@
         {% endif %}
         {% if preview.no_valid_tare %}
         <div class="warn"><b>Нет тарирования за последние 3 месяца</b>
-          <p>Нетто не рассчитано; запись будет сохранена с признаком «нет тары»;
+          <p>Нетто не рассчитано; запись сохранена с признаком «нет тары»;
             тара подставится, если ТС пройдёт тарирование позже.</p></div>
         {% endif %}
       {% else %}
@@ -40,18 +40,13 @@
 
       {% if preview.record.code.value == 'ERR_CAMERA' %}
       <div class="warn"><b>Часть снимков не получена (ERR_CAMERA)</b>
-        <p>Вес сохраняется с предупреждением.</p></div>
+        <p>Вес сохранён с предупреждением.</p></div>
       {% endif %}
 
+      {# операция уже записана (одношагово, как в ВесыСофт) — только навигация #}
       <div class="result-actions">
-        <form method="post" action="/manual/actions/commit">
-          <input type="hidden" name="preview_id" value="{{ preview.preview_id }}">
-          <button type="submit" class="btn-primary">Зафиксировать</button>
-        </form>
-        <form method="post" action="/manual/actions/discard">
-          <input type="hidden" name="preview_id" value="{{ preview.preview_id }}">
-          <button type="submit" class="btn-secondary">Отмена</button>
-        </form>
+        <a class="btn-primary" href="/manual/{{ preview.record.operation.value }}">Новая операция</a>
+        <a class="btn-secondary" href="/">На главную</a>
       </div>
     </div>
   </section>
