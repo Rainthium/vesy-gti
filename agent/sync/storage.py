@@ -16,6 +16,9 @@
 поток цикла взвешивания и поток синхронизации).
 """
 
+import hashlib
+import hmac
+import secrets
 import sqlite3
 import threading
 from collections.abc import Iterable
@@ -67,6 +70,14 @@ CREATE TABLE IF NOT EXISTS tare_registry_replica (
     tare_value REAL NOT NULL,
     tared_at TEXT NOT NULL,
     weighing_uuid TEXT NOT NULL
+);
+
+-- Локальные операторы (architecture §3.4: список синхронизируется с центром;
+-- пока центр не готов — заводятся из конфига агента при старте)
+CREATE TABLE IF NOT EXISTS local_users (
+    login TEXT PRIMARY KEY,
+    pw_hash TEXT NOT NULL,
+    full_name TEXT NOT NULL DEFAULT ''
 );
 
 -- Правило №2: запись неизменяема. Разрешён только переход synced 0 -> 1;
@@ -143,6 +154,32 @@ def three_months_before(moment: datetime) -> datetime:
 
 def _iso(moment: datetime | None) -> str | None:
     return moment.isoformat() if moment is not None else None
+
+
+# --- пароли операторов (PBKDF2-HMAC-SHA256, соль на пользователя) ---
+
+_PBKDF2_ITERATIONS = 200_000
+
+
+def hash_password(password: str) -> str:
+    """Хеш пароля в самодостаточном формате ``pbkdf2$<iters>$<salt>$<hash>``."""
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, _PBKDF2_ITERATIONS)
+    return f"pbkdf2${_PBKDF2_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """Проверить пароль против сохранённого хеша (постоянное время сравнения)."""
+    try:
+        scheme, iterations_s, salt_hex, digest_hex = stored.split("$")
+        if scheme != "pbkdf2":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), bytes.fromhex(salt_hex), int(iterations_s)
+        )
+        return hmac.compare_digest(digest.hex(), digest_hex)
+    except (ValueError, TypeError):
+        return False
 
 
 class AgentStorage:
@@ -248,12 +285,16 @@ class AgentStorage:
 
     def recent_weighings(self, limit: int = 50) -> list[WeighingRecord]:
         """Последние операции для журнала локального интерфейса."""
+        return [record for record, _ in self.recent_weighings_synced(limit)]
+
+    def recent_weighings_synced(self, limit: int = 50) -> list[tuple[WeighingRecord, bool]]:
+        """Последние операции с флагом досылки (для колонки «Синхр.» журнала)."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM weighings_local ORDER BY created_at DESC, uuid LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [self._row_to_record(row) for row in rows]
+        return [(self._row_to_record(row), bool(row["synced"])) for row in rows]
 
     def photos_for(self, uuid: UUID) -> list[StoredPhoto]:
         with self._lock:
@@ -326,6 +367,31 @@ class AgentStorage:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) AS n FROM tare_registry_replica").fetchone()
         return int(row["n"])
+
+    # --- локальные операторы ---
+
+    def upsert_operator(self, login: str, password: str, full_name: str = "") -> None:
+        """Создать или обновить оператора (пароль хранится хешем PBKDF2)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO local_users (login, pw_hash, full_name) VALUES (?, ?, ?)"
+                " ON CONFLICT (login) DO UPDATE SET pw_hash = excluded.pw_hash,"
+                " full_name = excluded.full_name",
+                (login, hash_password(password), full_name),
+            )
+
+    def verify_operator(self, login: str, password: str) -> str | None:
+        """Проверить пароль; вернуть отображаемое имя оператора или None.
+
+        Возвращаемое имя — full_name, а при его отсутствии сам login.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT pw_hash, full_name FROM local_users WHERE login = ?", (login,)
+            ).fetchone()
+        if row is None or not verify_password(password, row["pw_hash"]):
+            return None
+        return str(row["full_name"]) or login
 
     # --- внутреннее ---
 

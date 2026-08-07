@@ -1,0 +1,569 @@
+/* Стили интерфейса оператора — перенесены из макетов design/operator-*.dc.html.
+   Токены дизайн-системы ГТИ: Inter, primary #0E8A5B, поверхности #F6F8FA/#EEF1F4,
+   радиусы 8/12/16, статусные пилюли. Шрифт Inter локально не грузим — системный стек. */
+
+:root {
+  --primary: #0E8A5B;
+  --primary-dark: #0B5E43;
+  --surface: #F6F8FA;
+  --surface-2: #EEF1F4;
+  --border: #E2E6EA;
+  --text: #1A1F2B;
+  --muted: #6B7280;
+  --faint: #9AA1AB;
+  --green-soft: #EAF3EF;
+  --green-border: #CFE6DB;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, .05);
+  --shadow-pop: 0 8px 24px -12px rgba(16, 24, 40, .18);
+  --shadow-btn: 0 10px 22px -10px rgba(14, 138, 91, .55);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--surface);
+  color: var(--text);
+  font-family: Inter, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: #2E97D4; text-decoration: none; }
+a:hover { color: #1f7fbb; }
+
+/* ---------- Пилюли статусов ---------- */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+.pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
+.pill-ok { background: rgba(31, 163, 111, .12); color: #16855a; }
+.pill-ok .dot { background: #1FA36F; }
+.pill-warn { background: rgba(232, 163, 61, .16); color: #b5780f; }
+.pill-warn .dot { background: #E8A33D; }
+.pill-err { background: rgba(217, 67, 78, .12); color: #c2333e; }
+.pill-err .dot { background: #D9434E; }
+.pill-info { background: rgba(46, 151, 212, .12); color: #1f7fbb; }
+.pill-info .dot { background: #2E97D4; }
+.pill-big { font-size: 14px; padding: 8px 16px; }
+
+/* ---------- Каркас операторских экранов ---------- */
+
+body.app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.app-header {
+  height: 64px;
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 0 28px;
+  flex: none;
+}
+.brand { display: flex; align-items: center; gap: 11px; }
+.brand img { width: 38px; height: 40px; object-fit: contain; flex: none; }
+.brand-title { font-size: 14.5px; font-weight: 800; color: var(--primary-dark); line-height: 1.2; }
+.brand-sub { font-size: 11.5px; color: var(--muted); }
+
+.tabs { display: flex; gap: 4px; margin-left: 10px; align-self: stretch; }
+.tabs a {
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+}
+.tabs a.active { font-weight: 700; color: var(--primary); border-bottom-color: var(--primary); }
+.header-spacer { flex: 1; }
+
+#header-status { display: flex; align-items: center; gap: 10px; }
+
+.operator-box {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-left: 16px;
+  border-left: 1px solid var(--border);
+}
+.operator-name { font-size: 13px; font-weight: 700; line-height: 1.2; }
+.operator-role { font-size: 11.5px; color: var(--muted); }
+.clock { font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.logout-btn {
+  height: 32px;
+  padding: 0 12px;
+  border: 1.5px solid var(--green-border);
+  border-radius: var(--r-sm);
+  background: #fff;
+  color: var(--primary);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.logout-btn:hover { background: var(--green-soft); }
+
+/* ---------- Режимные баннеры ---------- */
+
+.banner {
+  min-height: 54px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 6px 28px;
+}
+.banner-title { font-size: 17px; font-weight: 800; letter-spacing: .5px; }
+.banner-sub { font-size: 14px; font-weight: 500; opacity: .9; }
+.banner-offline { background: rgba(232, 163, 61, .18); border-bottom: 1px solid #E8A33D; color: #7a5308; }
+.banner-error { background: rgba(217, 67, 78, .12); border-bottom: 1px solid #D9434E; color: #8f2530; }
+
+/* ---------- Главный экран ---------- */
+
+.dashboard {
+  flex: 1;
+  min-height: 0;
+  padding: 22px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  overflow: hidden;
+}
+
+.top-row {
+  display: grid;
+  grid-template-columns: minmax(380px, 660px) 1fr 1fr;
+  gap: 18px;
+  flex: none;
+  height: min(396px, 42vh);
+}
+
+/* дисплей веса */
+.weight-display {
+  background: #10231B;
+  border-radius: var(--r-lg);
+  padding: 26px 30px;
+  display: flex;
+  flex-direction: column;
+  color: #fff;
+  min-width: 0;
+}
+.weight-head { display: flex; align-items: center; justify-content: space-between; }
+.weight-label {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: #9fb8ad;
+}
+
+/* пилюля стабильности: JS пишет в #weight-state textContent и data-kind,
+   поэтому точка — псевдоэлементом, а не вложенным span */
+#weight-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+#weight-state::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
+#weight-state[data-kind="stable"] { background: rgba(31, 163, 111, .12); color: #16855a; }
+#weight-state[data-kind="stable"]::before { background: #1FA36F; }
+#weight-state[data-kind="unstable"] { background: rgba(232, 163, 61, .16); color: #b5780f; }
+#weight-state[data-kind="unstable"]::before { background: #E8A33D; }
+#weight-state[data-kind="nodata"],
+#weight-state[data-kind="overload"] { background: rgba(217, 67, 78, .12); color: #c2333e; }
+#weight-state[data-kind="nodata"]::before,
+#weight-state[data-kind="overload"]::before { background: #D9434E; }
+
+.weight-value-row {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  min-height: 0;
+}
+#weight-value {
+  font-size: 150px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -3px;
+  line-height: 1;
+  color: #fff;
+}
+.weight-unit { font-size: 38px; font-weight: 700; color: #9fb8ad; align-self: flex-end; padding-bottom: 22px; }
+.weight-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.weight-caption { font-size: 17px; color: #cfe0d8; font-weight: 600; min-height: 1em; }
+.weight-hw { font-size: 12.5px; color: #9fb8ad; opacity: .7; font-variant-numeric: tabular-nums; }
+
+/* подпись состояния и приглушение цифры выводим из data-kind пилюли (без доп. JS) */
+.weight-display:has(#weight-state[data-kind="nodata"]) #weight-value { color: rgba(255, 255, 255, .28); }
+.weight-display:has(#weight-state[data-kind="stable"]) .weight-caption::after { content: "Вес стабилен"; }
+.weight-display:has(#weight-state[data-kind="unstable"]) .weight-caption::after { content: "Идёт взвешивание…"; }
+.weight-display:has(#weight-state[data-kind="nodata"]) .weight-caption::after { content: "Нет данных с индикатора"; }
+.weight-display:has(#weight-state[data-kind="overload"]) .weight-caption::after { content: "Перегруз весов"; }
+
+/* карточки камер на главном экране */
+.camera {
+  margin: 0;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+.camera-frame {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: repeating-linear-gradient(135deg, #E7ECF0 0 14px, #EEF1F4 14px 28px);
+  display: grid;
+  place-items: center;
+}
+.camera-frame img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.camera-frame img.failed { display: none; }
+.no-signal { font-size: 14px; font-weight: 700; color: #c2333e; display: none; }
+.camera-caption {
+  height: 52px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 16px;
+  border-top: 1px solid var(--border);
+  font-size: 14px;
+  font-weight: 700;
+}
+.cam-fail { display: none; }
+.camera:has(img.failed) .no-signal { display: block; }
+.camera:has(img.failed) .cam-ok { display: none; }
+.camera:has(img.failed) .cam-fail { display: inline-flex; }
+
+/* панель ручных операций */
+.manual-actions {
+  min-height: 96px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-card);
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 14px 24px;
+  flex: none;
+}
+.manual-actions p { font-size: 15px; color: var(--muted); margin: 0; }
+.hint-error { font-weight: 600; color: #c2333e; }
+
+.btn {
+  height: 56px;
+  padding: 0 34px;
+  border: none;
+  border-radius: var(--r-sm);
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  background: var(--surface-2);
+  color: var(--faint);
+  white-space: nowrap;
+}
+.btn[disabled] { cursor: default; }
+.btn-primary { background: var(--primary); color: #fff; box-shadow: var(--shadow-btn); }
+.btn-secondary { background: var(--primary-dark); color: #fff; }
+
+/* ---------- Журнал объекта ---------- */
+
+.journal-card {
+  flex: 1;
+  min-height: 0;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+#journal { height: 100%; display: flex; flex-direction: column; }
+.journal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.journal-title { font-size: 16px; font-weight: 700; }
+.journal-meta { font-size: 13px; color: var(--muted); }
+.journal-scroll { flex: 1; min-height: 0; overflow: auto; }
+
+table.journal { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+table.journal th {
+  position: sticky;
+  top: 0;
+  background: var(--green-soft);
+  text-align: left;
+  padding: 11px 16px;
+  font-weight: 700;
+  color: var(--primary-dark);
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--green-border);
+  white-space: nowrap;
+}
+table.journal td {
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--surface-2);
+  font-size: 14px;
+  white-space: nowrap;
+}
+table.journal .num { text-align: right; }
+table.journal td.cell-time { color: var(--muted); }
+table.journal td.cell-vehicle { font-weight: 700; }
+table.journal td.cell-gross { font-weight: 600; }
+table.journal td.cell-netto { font-weight: 700; }
+table.journal .cell-sync { text-align: center; font-size: 16px; }
+.sync-ok { color: #1FA36F; font-weight: 800; }
+.sync-wait { color: #E8A33D; }
+.journal-empty td { text-align: center; color: var(--muted); padding: 24px; }
+
+/* ---------- Экран «Оборудование» ---------- */
+
+.equipment-grid {
+  flex: 1;
+  min-height: 0;
+  padding: 26px 28px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-auto-rows: minmax(300px, 1fr);
+  gap: 20px;
+  overflow: auto;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-card);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.card h2 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 17px;
+  font-weight: 800;
+  margin: 0;
+}
+.card dl { display: grid; grid-template-columns: auto 1fr; gap: 8px 18px; font-size: 14.5px; margin: 0; }
+.card dt { color: var(--muted); }
+.card dd { margin: 0; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.btn-outline {
+  margin-top: auto;
+  align-self: flex-start;
+  height: 40px;
+  padding: 0 16px;
+  border: 1.5px solid var(--green-border);
+  border-radius: var(--r-sm);
+  background: #fff;
+  color: var(--primary);
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.btn-outline:hover { background: var(--green-soft); }
+
+.camera-card .cam-frame {
+  aspect-ratio: 16 / 9;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: repeating-linear-gradient(135deg, #E7ECF0 0 12px, #EEF1F4 12px 24px);
+  position: relative;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+.camera-card .cam-frame img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.camera-card .cam-frame img.failed { display: none; }
+.camera-card:has(img.failed) { border-color: #D9434E; }
+.camera-card:has(img.failed) .no-signal { display: block; }
+.camera-card:has(img.failed) .cam-ok { display: none; }
+.camera-card:has(img.failed) .cam-fail { display: inline-flex; }
+
+/* ---------- Экран входа ---------- */
+
+.login {
+  height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(380px, 600px) 1fr;
+}
+.login-brand {
+  background: linear-gradient(135deg, #1F9E74 0%, #0B5A41 100%);
+  color: #fff;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 48px 56px;
+}
+.login-brand::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(135deg, rgba(255, 255, 255, .04) 0 2px, transparent 2px 24px);
+}
+.login-org { display: flex; align-items: center; gap: 16px; position: relative; }
+.login-org img { width: 52px; height: 60px; object-fit: contain; flex: none; }
+.login-org div { font-size: 15px; font-weight: 700; line-height: 1.35; max-width: 320px; }
+.login-hero {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  position: relative;
+  gap: 14px;
+}
+.login-kicker { font-size: 12px; font-weight: 800; letter-spacing: 2px; text-transform: uppercase; color: #E4C77E; }
+.login-hero h1 { font-size: 44px; font-weight: 800; letter-spacing: -.5px; line-height: 1.1; margin: 0; }
+.login-hero p { font-size: 16px; color: rgba(255, 255, 255, .85); max-width: 400px; line-height: 1.55; margin: 0; }
+.login-copy { font-size: 13px; color: rgba(255, 255, 255, .65); position: relative; }
+
+.login-side { background: var(--surface); display: grid; place-items: center; padding: 24px; }
+.login-card {
+  width: 420px;
+  max-width: 100%;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-pop);
+  padding: 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.login-card h2 { font-size: 24px; font-weight: 800; letter-spacing: -.2px; margin: 0; }
+.login-subtitle { font-size: 13.5px; color: var(--muted); margin: 6px 0 0; }
+
+.site-box {
+  background: var(--green-soft);
+  border: 1px solid var(--green-border);
+  border-radius: var(--r-md);
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.site-name { font-size: 14px; font-weight: 700; color: var(--primary-dark); }
+.site-sub { font-size: 12px; color: var(--muted); }
+
+.login-card form { display: flex; flex-direction: column; gap: 14px; }
+.login-card label { display: flex; flex-direction: column; gap: 7px; font-size: 13px; font-weight: 700; }
+.login-card input {
+  height: 50px;
+  background: var(--surface-2);
+  border: 1.5px solid transparent;
+  border-radius: var(--r-sm);
+  padding: 0 14px;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.login-card input:focus { outline: none; background: #fff; border-color: var(--primary); }
+.login-submit {
+  height: 50px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: var(--primary);
+  color: #fff;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: var(--shadow-btn);
+}
+.login-help { font-size: 13px; color: var(--muted); text-align: center; }
+.login-foot {
+  font-size: 12px;
+  color: var(--faint);
+  text-align: center;
+  border-top: 1px solid var(--surface-2);
+  padding-top: 14px;
+}
+
+/* состояния, которых нет в макете: ошибка входа — собрана из danger-токенов пилюль */
+.form-error {
+  background: rgba(217, 67, 78, .12);
+  border: 1px solid rgba(217, 67, 78, .35);
+  color: #c2333e;
+  border-radius: var(--r-sm);
+  padding: 10px 14px;
+  font-size: 13.5px;
+  font-weight: 600;
+  margin: 0;
+}
+
+/* ---------- Узкие/низкие операторские мониторы (1366×768) ---------- */
+
+@media (max-width: 1600px) {
+  #weight-value { font-size: 104px; letter-spacing: -2px; }
+  .weight-unit { font-size: 28px; padding-bottom: 12px; }
+  .top-row { grid-template-columns: minmax(340px, 480px) 1fr 1fr; }
+}
+
+@media (max-height: 820px) {
+  .dashboard { padding: 16px 18px; gap: 14px; }
+  .top-row { height: 38vh; gap: 14px; }
+  .weight-display { padding: 18px 22px; }
+  .manual-actions { min-height: 76px; }
+  .btn { height: 48px; padding: 0 26px; font-size: 15px; }
+  .banner { min-height: 46px; }
+  .banner-title { font-size: 15px; }
+  .equipment-grid { padding: 18px 20px; gap: 14px; }
+  .card { padding: 18px; }
+  table.journal th, table.journal td { padding: 8px 14px; }
+}
+
+@media (max-width: 1440px) {
+  .app-header { gap: 14px; padding: 0 18px; }
+  .login-brand { padding: 36px 40px; }
+  .login-hero h1 { font-size: 36px; }
+}

@@ -1,0 +1,12 @@
+{# Пилюли статуса в шапке: центр, индикатор, очередь. Обновляется HTMX-опросом. #}
+<div id="header-status" hx-get="/fragments/status" hx-trigger="every 5s" hx-swap="outerHTML">
+  <span class="pill {{ 'pill-ok' if center_online else 'pill-warn pill-big' }}" data-status="center">
+    <span class="dot"></span>{{ 'Центр: онлайн' if center_online else 'АВТОНОМНЫЙ РЕЖИМ' }}
+  </span>
+  <span class="pill {{ 'pill-ok' if scale_ok else 'pill-err' }}" data-status="scale">
+    <span class="dot"></span>{{ 'Индикатор: поток данных' if scale_ok else 'Нет данных с весов' }}
+  </span>
+  <span class="pill {{ 'pill-warn' if pending_count else '' }}" data-status="pending">
+    <span class="dot"></span>Очередь: {{ pending_count }}
+  </span>
+</div>

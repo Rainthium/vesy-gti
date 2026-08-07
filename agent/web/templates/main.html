@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Главная — Весовая система{% endblock %}
+{% block body_class %}app{% endblock %}
+{% block body %}
+{% set active_tab = 'main' %}
+{% include "_header.html" %}
+
+{% if not center_online %}
+<div class="banner banner-offline">
+  <span class="banner-title">АВТОНОМНЫЙ РЕЖИМ</span>
+  <span class="banner-sub">Ручное взвешивание и тарирование разрешены{% if pending_count %} · записей ждут отправки: {{ pending_count }}{% endif %}</span>
+</div>
+{% endif %}
+{% if not scale_ok %}
+<div class="banner banner-error">
+  <span class="banner-title">НЕТ ДАННЫХ С ВЕСОВОГО ИНДИКАТОРА</span>
+  <span class="banner-sub">Выполняется автопереоткрытие порта</span>
+</div>
+{% endif %}
+
+<main class="dashboard">
+  <div class="top-row">
+    <section class="weight-display" id="weight-display">
+      <div class="weight-head">
+        <span class="weight-label">Текущий вес</span>
+        <span class="state" id="weight-state">—</span>
+      </div>
+      <div class="weight-value-row">
+        <span class="value" id="weight-value">—</span>
+        <span class="weight-unit">kg</span>
+      </div>
+      <div class="weight-foot">
+        <span class="weight-caption"></span>
+        <span class="weight-hw">{{ info.indicator_model }} · {{ info.port_label }}</span>
+      </div>
+    </section>
+
+    {% for role in ['front', 'rear'] %}
+    <figure class="camera">
+      <div class="camera-frame">
+        <img src="/cameras/{{ role }}.jpg" alt="Камера {{ 'ПЕРЕД' if role == 'front' else 'ЗАД' }}"
+             onerror="this.classList.add('failed')">
+        <span class="no-signal">Нет сигнала</span>
+      </div>
+      <figcaption class="camera-caption">
+        <span>Камера · {{ 'ПЕРЕД' if role == 'front' else 'ЗАД' }}</span>
+        <span class="pill pill-ok cam-ok"><span class="dot"></span>Ок</span>
+        <span class="pill pill-err cam-fail"><span class="dot"></span>Нет сигнала</span>
+      </figcaption>
+    </figure>
+    {% endfor %}
+  </div>
+
+  <section class="manual-actions">
+    {% if manual_allowed %}
+      <a class="btn btn-primary" href="/manual/weighing">Взвешивание</a>
+      <a class="btn btn-secondary" href="/manual/taring">Тарирование</a>
+      <p>Операции сохраняются локально и будут отправлены в центр автоматически после восстановления связи.</p>
+    {% else %}
+      <button class="btn" disabled>Взвешивание</button>
+      {% if not scale_ok %}
+        <p class="hint-error">Операции невозможны: нет данных с весового индикатора. Проверьте подключение или откройте вкладку «Оборудование».</p>
+      {% else %}
+        <p>Взвешивание проводится через АИС «СВХ». Ручной режим активируется автоматически при потере связи с центром.</p>
+      {% endif %}
+    {% endif %}
+  </section>
+
+  <section class="journal-card">
+    {% include "fragments/journal.html" %}
+  </section>
+</main>
+<script>
+  // живой вес: WebSocket /ws/state, обновление дисплея и снимков камер
+  (function () {
+    var value = document.getElementById('weight-value');
+    var state = document.getElementById('weight-state');
+    var initialManualAllowed = {{ 'true' if manual_allowed else 'false' }};
+    function connect() {
+      var ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/state');
+      ws.onmessage = function (event) {
+        var data = JSON.parse(event.data);
+        value.textContent = data.status === 'ok' ? data.weight_text : '—';
+        state.textContent = data.status !== 'ok' ? 'НЕТ ДАННЫХ'
+          : data.overload ? 'ПЕРЕГРУЗ' : data.stable ? 'СТАБИЛЬНО' : 'НЕСТАБИЛЬНО';
+        state.dataset.kind = data.status !== 'ok' ? 'nodata' : data.overload ? 'overload' : data.stable ? 'stable' : 'unstable';
+        // режим сменился (связь с центром появилась/пропала) — страница
+        // перерисовывается сервером: кнопки ручного режима нельзя решать на клиенте
+        if (data.manual_allowed !== initialManualAllowed) { location.reload(); }
+      };
+      ws.onclose = function () { setTimeout(connect, 1000); };
+    }
+    connect();
+    setInterval(function () {
+      document.querySelectorAll('.camera img').forEach(function (img) {
+        img.src = img.src.split('?')[0] + '?t=' + Date.now();
+      });
+    }, 2000);
+  })();
+</script>
+{% endblock %}

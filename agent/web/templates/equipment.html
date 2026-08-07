@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Оборудование — Весовая система{% endblock %}
+{% block body_class %}app{% endblock %}
+{% block body %}
+{% set active_tab = 'equipment' %}
+{% include "_header.html" %}
+<main class="equipment-grid">
+  <section class="card" id="card-indicator">
+    <h2>
+      <span>Весовой индикатор</span>
+      <span class="pill {{ 'pill-ok' if scale_ok else 'pill-err' }}"><span class="dot"></span>{{ 'Поток данных' if scale_ok else 'Нет данных' }}</span>
+    </h2>
+    <dl>
+      <dt>Модель</dt><dd>{{ info.indicator_model }}</dd>
+      <dt>Протокол</dt><dd>{{ info.driver_name }}</dd>
+      <dt>Порт</dt><dd>{{ info.port_label }}</dd>
+      <dt>Текущий вес</dt><dd>{{ scale.weight_kg | fmt_kg }} kg{% if scale_ok %} · {{ 'стабильно' if scale.stable else 'нестабильно' }}{% endif %}</dd>
+      {% if scale.error %}<dt>Ошибка</dt><dd class="hint-error">{{ scale.error }}</dd>{% endif %}
+    </dl>
+    <button class="btn-outline" hx-post="/equipment/reopen-port" hx-target="#header-status" hx-swap="outerHTML">Переоткрыть порт</button>
+  </section>
+
+  {% for role in camera_roles %}
+  <section class="card camera-card">
+    <h2>
+      <span>Камера · {{ 'ПЕРЕД' if role.value == 'front' else 'ЗАД' }}</span>
+      <span class="pill pill-ok cam-ok"><span class="dot"></span>Ок</span>
+      <span class="pill pill-err cam-fail"><span class="dot"></span>Нет сигнала</span>
+    </h2>
+    <div class="cam-frame">
+      <img src="/cameras/{{ role.value }}.jpg" alt="Камера {{ role.value }}" onerror="this.classList.add('failed')">
+      <span class="no-signal">Поток недоступен</span>
+    </div>
+  </section>
+  {% endfor %}
+
+  <section class="card">
+    <h2>
+      <span>Связь с центром</span>
+      <span class="pill {{ 'pill-ok' if center_online else 'pill-warn' }}"><span class="dot"></span>{{ 'Онлайн' if center_online else 'Офлайн' }}</span>
+    </h2>
+    <dl><dt>Сервер</dt><dd>{{ info.center_url }}</dd></dl>
+  </section>
+
+  <section class="card">
+    <h2><span>Агент</span></h2>
+    <dl><dt>Версия</dt><dd>{{ info.agent_version }}</dd></dl>
+  </section>
+
+  <section class="card">
+    <h2>
+      <span>Очередь досылки</span>
+      <span class="pill {{ 'pill-ok' if pending_count == 0 else 'pill-warn' }}"><span class="dot"></span>{{ 'Всё отправлено' if pending_count == 0 else pending_count }}</span>
+    </h2>
+    <dl>
+      <dt>Недосланных записей</dt><dd>{{ pending_count }}</dd>
+      <dt>Реестр тарирований</dt><dd>{{ tare_registry_size }} ТС</dd>
+    </dl>
+  </section>
+</main>
+{% endblock %}

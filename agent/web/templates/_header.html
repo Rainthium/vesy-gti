@@ -1,0 +1,26 @@
+{# Шапка операторских экранов: бренд, вкладки, пилюли статуса, оператор.
+   Ожидает: info, operator, now и контекст fragments/status.html;
+   активная вкладка — через {% set active_tab = 'main'|'equipment' %} перед include. #}
+<header class="app-header">
+  <div class="brand">
+    <img src="/static/gti-emblem.png" alt="Герб ГТИ">
+    <div>
+      <div class="brand-title">Весовая система</div>
+      <div class="brand-sub">{{ info.site_name }} · {{ info.scale_name }}</div>
+    </div>
+  </div>
+  <nav class="tabs">
+    <a href="/" class="{{ 'active' if active_tab == 'main' else '' }}">Главная</a>
+    <a href="/equipment" class="{{ 'active' if active_tab == 'equipment' else '' }}">Оборудование</a>
+  </nav>
+  <div class="header-spacer"></div>
+  {% include "fragments/status.html" %}
+  <div class="operator-box">
+    <div>
+      <div class="operator-name">{{ operator }}</div>
+      <div class="operator-role">оператор</div>
+    </div>
+    <div class="clock">{{ now | fmt_time }}</div>
+    <form method="post" action="/logout"><button class="logout-btn">Выйти</button></form>
+  </div>
+</header>

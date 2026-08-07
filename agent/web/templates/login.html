@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Вход оператора — Весовая система{% endblock %}
+{% block body %}
+<main class="login">
+  <section class="login-brand">
+    <div class="login-org">
+      <img src="/static/gti-emblem.png" alt="Герб ГТИ">
+      <div>ОАО «Государственная таможенная инфраструктура»</div>
+    </div>
+    <div class="login-hero">
+      <div class="login-kicker">Внутренняя система</div>
+      <h1>Весовая система</h1>
+      <p>Текущий вес с индикатора, трансляции камер и журнал объекта. Взвешивание — через АИС «СВХ», в автономном режиме — вручную.</p>
+    </div>
+    <div class="login-copy">© {{ now.year }} ОАО «Государственная таможенная инфраструктура» · gti.kg</div>
+  </section>
+  <section class="login-side">
+    <div class="login-card">
+      <div>
+        <h2>Вход в систему</h2>
+        <p class="login-subtitle">Используйте учётную запись, выданную администратором</p>
+      </div>
+      <div class="site-box">
+        <div>
+          <div class="site-name">{{ info.site_name }}</div>
+          <div class="site-sub">{{ info.scale_name }} · {{ info.indicator_model }}</div>
+        </div>
+        <span class="pill {{ 'pill-ok' if center_online else 'pill-warn' }}">
+          <span class="dot"></span>{{ 'Агент онлайн' if center_online else 'Автономный режим' }}
+        </span>
+      </div>
+      {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+      <form method="post" action="/login">
+        <label>Логин <input name="login" autocomplete="username" required></label>
+        <label>Пароль <input name="password" type="password" autocomplete="current-password" required></label>
+        <button type="submit" class="login-submit">Войти</button>
+      </form>
+      <div class="login-help">Забыли пароль? Обратитесь к администратору</div>
+      <div class="login-foot">Локальный вход · агент v{{ info.agent_version }} · доступ только из сети объекта</div>
+    </div>
+  </section>
+</main>
+{% endblock %}
