@@ -8,6 +8,22 @@ on:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ves
+          POSTGRES_PASSWORD: ves
+          POSTGRES_DB: ves
+        ports:
+          - 5443:5432
+        options: >-
+          --health-cmd "pg_isready -U ves -d ves"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://ves:ves@localhost:5443/ves
     steps:
       - uses: actions/checkout@v4
 

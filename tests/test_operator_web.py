@@ -114,7 +114,7 @@ class FakeServices:
             driver_name="cas22 · пакет 22 байта",
             port_label="COM3 · 9600 · 8-N-1",
             agent_version="0.1.0-test",
-            center_url="wss://ves.gti.kg",
+            center_url="wss://vesy.gti.kg",
         )
 
     def scale_state(self) -> ScaleState:

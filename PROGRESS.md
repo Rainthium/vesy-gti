@@ -30,7 +30,8 @@
 - [ ] Упаковка: PyInstaller exe + конфиг + установка службой (nssm), инструкция установки
 
 ### Центр
-- [ ] БД PostgreSQL: схема по architecture §5 (+ alembic-миграции)
+- [x] БД PostgreSQL: схема по architecture §5 (+ alembic-миграции) (08.08.2026; center/db/: 10 таблиц, триггеры неизменяемости weighings/weighing_photos, частичный уникальный индекс legacy-маршрута NULLS NOT DISTINCT, контрольная сумма записи sha256, TIMESTAMPTZ везде; docker-compose dev-postgres:5443; postgres в CI; 43 теста)
+- [ ] При развёртывании центра: отозвать привилегию TRUNCATE на weighings/weighing_photos у рабочей роли БД (строчные триггеры неизменяемости TRUNCATE не ловят)
 - [ ] WebSocket-сервер агентов: регистрация по токену, heartbeat → статусы, приём результатов и офлайн-досылки, раздача реестра тарирований
 - [ ] API v1 (совместимый с АИС): маршрутизация по legacy ip/autoscale, поле operation, ответ с tare/netto, коды ошибок; тайм-аут всей операции; все даты — ISO 8601 с поясом +06:00 (решение 07.08.2026)
 - [ ] `tools/ais_client.py`: имитатор АИС «СВХ» — шлёт запросы v1 (weighing/taring) и печатает ответ; реальную АИС на этапе разработки и пилота НЕ трогаем (решение 07.08.2026, см. docs/uniserver-kyzylkia.md §3)

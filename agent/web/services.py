@@ -25,7 +25,7 @@ class AgentInfo:
     driver_name: str  # cas22
     port_label: str  # COM3 · 9600 · 8-N-1
     agent_version: str
-    center_url: str  # wss://ves.gti.kg (для экрана «Оборудование»)
+    center_url: str  # wss://vesy.gti.kg (для экрана «Оборудование»)
 
 
 class AgentServices(Protocol):

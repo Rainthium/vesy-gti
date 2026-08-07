@@ -1,0 +1,23 @@
+# Дев-окружение центра. Продовый compose (app + nginx) появится к развёртыванию.
+# Порт 5443 — чтобы не конфликтовать с другими локальными postgres.
+services:
+  postgres:
+    image: postgres:16
+    container_name: ves-postgres
+    environment:
+      POSTGRES_USER: ves
+      # dev-пароль; боевой задаётся через .env (правило проекта №7)
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ves}
+      POSTGRES_DB: ves
+    ports:
+      - "5443:5432"
+    volumes:
+      - ves_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ves -d ves"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  ves_pgdata:
