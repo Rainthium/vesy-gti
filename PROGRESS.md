@@ -8,7 +8,7 @@
 
 ## Этап 0 — фундамент 🔵
 
-- [ ] Скелет репозитория: `agent/`, `center/`, `shared/`, `tools/`, `docs/`; pyproject, ruff, mypy, pytest, pre-commit
+- [x] Скелет репозитория: `agent/`, `center/`, `shared/`, `tools/`, `docs/`; pyproject, ruff, mypy, pytest, pre-commit (07.08.2026, менеджер пакетов — uv, Python 3.12.13)
 - [ ] `shared/`: модели сообщений агент↔центр (pydantic), перечисления статусов и кодов ошибок (architecture §4.1)
 - [ ] `tools/cas22_emulator.py`: эмулятор индикатора CAS 22 byte — виртуальный COM-порт/TCP, режимы: пустые весы, заезд, стабилизация, нестабильность, обрыв потока, мусор в потоке (для теста ресинхронизации)
 - [ ] CI: GitHub Actions — ruff + mypy + pytest на push
