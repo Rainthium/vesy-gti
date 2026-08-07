@@ -298,6 +298,15 @@ body.app {
   white-space: nowrap;
 }
 .btn[disabled] { cursor: default; }
+/* кнопки ручных операций на главном экране: сплошные, при наведении темнее;
+   текст всегда белый (перебивает браузерные цвета ссылок) */
+a.btn { text-decoration: none; }
+.btn-weigh { background: var(--primary); color: #fff; box-shadow: var(--shadow-btn); }
+.btn-weigh:hover, .btn-weigh:visited:hover { background: var(--primary-dark); color: #fff; }
+.btn-weigh:visited { color: #fff; }
+.btn-tare { background: #E8A33D; color: #fff; box-shadow: var(--shadow-btn); }
+.btn-tare:hover, .btn-tare:visited:hover { background: #C9882A; color: #fff; }
+.btn-tare:visited { color: #fff; }
 .btn-primary { background: var(--primary); color: #fff; box-shadow: var(--shadow-btn); }
 .btn-secondary { background: var(--primary-dark); color: #fff; }
 
