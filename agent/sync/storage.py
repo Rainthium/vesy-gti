@@ -1,0 +1,352 @@
+"""Локальная БД агента (SQLite): журнал операций и реплика реестра тарирований.
+
+Назначение (architecture §2 п.2, §3.3а):
+- **Журнал операций** — каждая завершённая операция пишется сюда до отправки
+  в центр; флаг ``synced`` отмечает досланные записи. Взвешивания не теряются
+  никогда: буфер переживает перезапуск агента и офлайн любой длительности.
+- **Реплика реестра тарирований** — полный снимок единого реестра центра,
+  заменяется целиком при каждой синхронизации. Благодаря ей агент в офлайне
+  сам подставляет действующую тару и считает нетто (правило проекта №4).
+
+Неизменяемость (правило №2): записанная операция не редактируется и не
+удаляется — API даёт только вставку и пометку synced, а триггеры БД
+блокируют UPDATE/DELETE даже при прямом доступе к файлу базы.
+
+Потокобезопасность: одно соединение под локом (у агента к БД обращаются
+поток цикла взвешивания и поток синхронизации).
+"""
+
+import sqlite3
+import threading
+from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import UUID
+
+from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
+from shared.messages import TareRecord, WeighingRecord
+
+TARE_VALIDITY_MONTHS = 3  # тара действует 3 месяца (правило проекта №4)
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS weighings_local (
+    uuid TEXT PRIMARY KEY,
+    operation TEXT NOT NULL,
+    code TEXT NOT NULL,
+    massa REAL,
+    unit TEXT NOT NULL,
+    stable INTEGER NOT NULL,
+    weighed_at TEXT,
+    vehicle_number TEXT,
+    trailer_number TEXT,
+    tare_value REAL,
+    tare_weighing_uuid TEXT,
+    netto REAL,
+    source TEXT NOT NULL,
+    operator TEXT,
+    message TEXT,
+    synced INTEGER NOT NULL DEFAULT 0 CHECK (synced IN (0, 1)),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_weighings_local_pending
+    ON weighings_local (synced, created_at);
+
+CREATE TABLE IF NOT EXISTS weighing_photos_local (
+    weighing_uuid TEXT NOT NULL REFERENCES weighings_local (uuid),
+    role TEXT NOT NULL,
+    path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    PRIMARY KEY (weighing_uuid, role)
+);
+
+CREATE TABLE IF NOT EXISTS tare_registry_replica (
+    vehicle_number TEXT PRIMARY KEY,
+    tare_value REAL NOT NULL,
+    tared_at TEXT NOT NULL,
+    weighing_uuid TEXT NOT NULL
+);
+
+-- Правило №2: запись неизменяема. Разрешён только переход synced 0 -> 1;
+-- любое другое изменение и любое удаление блокируются на уровне БД.
+CREATE TRIGGER IF NOT EXISTS weighings_local_no_delete
+    BEFORE DELETE ON weighings_local
+BEGIN
+    SELECT RAISE(ABORT, 'взвешивания не удаляются (правило неизменяемости)');
+END;
+
+CREATE TRIGGER IF NOT EXISTS weighings_local_no_update
+    BEFORE UPDATE ON weighings_local
+    WHEN NOT (
+        NEW.uuid = OLD.uuid AND NEW.operation = OLD.operation
+        AND NEW.code = OLD.code AND NEW.massa IS OLD.massa
+        AND NEW.unit = OLD.unit AND NEW.stable = OLD.stable
+        AND NEW.weighed_at IS OLD.weighed_at
+        AND NEW.vehicle_number IS OLD.vehicle_number
+        AND NEW.trailer_number IS OLD.trailer_number
+        AND NEW.tare_value IS OLD.tare_value
+        AND NEW.tare_weighing_uuid IS OLD.tare_weighing_uuid
+        AND NEW.netto IS OLD.netto AND NEW.source = OLD.source
+        AND NEW.operator IS OLD.operator AND NEW.message IS OLD.message
+        AND NEW.created_at = OLD.created_at
+        AND (NEW.synced = OLD.synced OR (OLD.synced = 0 AND NEW.synced = 1))
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'взвешивания не редактируются (правило неизменяемости)');
+END;
+
+CREATE TRIGGER IF NOT EXISTS weighing_photos_local_no_delete
+    BEFORE DELETE ON weighing_photos_local
+BEGIN
+    SELECT RAISE(ABORT, 'фото не удаляются (правило неизменяемости)');
+END;
+
+CREATE TRIGGER IF NOT EXISTS weighing_photos_local_no_update
+    BEFORE UPDATE ON weighing_photos_local
+BEGIN
+    SELECT RAISE(ABORT, 'фото не редактируются (правило неизменяемости)');
+END;
+"""
+
+
+@dataclass(frozen=True)
+class StoredPhoto:
+    """Снимок, лежащий файлом на диске агента до досылки в центр."""
+
+    role: CameraRole
+    path: str
+    sha256: str
+    size_bytes: int
+
+
+def three_months_before(moment: datetime) -> datetime:
+    """Момент ровно на 3 календарных месяца раньше (с поджатием дня месяца).
+
+    Правило №4 сформулировано в месяцах, а не в днях: «последняя тара этого
+    номера ТС не старше 3 месяцев». 31 мая → 28/29 февраля.
+    """
+    month = moment.month - TARE_VALIDITY_MONTHS
+    year = moment.year
+    if month < 1:
+        month += 12
+        year -= 1
+    # последний день целевого месяца (переход к 1-му числу следующего минус день)
+    if month == 12:
+        next_month_first = datetime(year + 1, 1, 1, tzinfo=moment.tzinfo)
+    else:
+        next_month_first = datetime(year, month + 1, 1, tzinfo=moment.tzinfo)
+    last_day = (next_month_first - next_month_first.resolution).day
+    return moment.replace(year=year, month=month, day=min(moment.day, last_day))
+
+
+def _iso(moment: datetime | None) -> str | None:
+    return moment.isoformat() if moment is not None else None
+
+
+class AgentStorage:
+    """Локальное хранилище агента поверх одного файла SQLite.
+
+    ``db_path=":memory:"`` — для тестов. Все методы потокобезопасны.
+    """
+
+    def __init__(self, db_path: str | Path) -> None:
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        with self._lock, self._conn:
+            self._conn.execute("PRAGMA journal_mode = WAL")
+            self._conn.execute("PRAGMA foreign_keys = ON")
+            self._conn.executescript(_SCHEMA)
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    # --- журнал операций ---
+
+    def save_weighing(self, record: WeighingRecord, photos: Iterable[StoredPhoto] = ()) -> None:
+        """Записать завершённую операцию (однократно; запись неизменяема).
+
+        Повторная вставка того же uuid → sqlite3.IntegrityError: журнал
+        не перезаписывается.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO weighings_local (
+                    uuid, operation, code, massa, unit, stable, weighed_at,
+                    vehicle_number, trailer_number, tare_value,
+                    tare_weighing_uuid, netto, source, operator, message,
+                    synced, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                """,
+                (
+                    str(record.uuid),
+                    record.operation.value,
+                    record.code.value,
+                    record.massa,
+                    record.unit,
+                    int(record.stable),
+                    _iso(record.weighed_at),
+                    record.vehicle_number,
+                    record.trailer_number,
+                    record.tare_value,
+                    str(record.tare_weighing_uuid) if record.tare_weighing_uuid else None,
+                    record.netto,
+                    record.source.value,
+                    record.operator,
+                    record.message,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            self._conn.executemany(
+                """
+                INSERT INTO weighing_photos_local
+                    (weighing_uuid, role, path, sha256, size_bytes)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [(str(record.uuid), p.role.value, p.path, p.sha256, p.size_bytes) for p in photos],
+            )
+
+    def mark_synced(self, uuids: Iterable[UUID]) -> int:
+        """Пометить записи как досланные в центр; вернуть число помеченных."""
+        keys = [(str(u),) for u in uuids]
+        if not keys:
+            return 0
+        with self._lock, self._conn:
+            cursor = self._conn.executemany(
+                "UPDATE weighings_local SET synced = 1 WHERE uuid = ? AND synced = 0",
+                keys,
+            )
+            return cursor.rowcount
+
+    def pending_records(self, limit: int = 100) -> list[WeighingRecord]:
+        """Недосланные записи, старые первыми (для offline_sync)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM weighings_local WHERE synced = 0 ORDER BY created_at, uuid LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    def pending_count(self) -> int:
+        """Размер очереди досылки (для heartbeat и локального интерфейса)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM weighings_local WHERE synced = 0"
+            ).fetchone()
+        return int(row["n"])
+
+    def get_weighing(self, uuid: UUID) -> WeighingRecord | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM weighings_local WHERE uuid = ?", (str(uuid),)
+            ).fetchone()
+        return self._row_to_record(row) if row is not None else None
+
+    def recent_weighings(self, limit: int = 50) -> list[WeighingRecord]:
+        """Последние операции для журнала локального интерфейса."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM weighings_local ORDER BY created_at DESC, uuid LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    def photos_for(self, uuid: UUID) -> list[StoredPhoto]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT role, path, sha256, size_bytes FROM weighing_photos_local"
+                " WHERE weighing_uuid = ? ORDER BY role",
+                (str(uuid),),
+            ).fetchall()
+        return [
+            StoredPhoto(
+                role=CameraRole(row["role"]),
+                path=row["path"],
+                sha256=row["sha256"],
+                size_bytes=row["size_bytes"],
+            )
+            for row in rows
+        ]
+
+    # --- реплика реестра тарирований ---
+
+    def replace_tare_registry(self, records: Iterable[TareRecord]) -> int:
+        """Заменить реплику целиком (реестр реплицируется полным снимком).
+
+        Возвращает размер новой реплики.
+        """
+        rows = [
+            (r.vehicle_number, r.tare_value, r.tared_at.isoformat(), str(r.weighing_uuid))
+            for r in records
+        ]
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM tare_registry_replica")
+            self._conn.executemany(
+                "INSERT INTO tare_registry_replica"
+                " (vehicle_number, tare_value, tared_at, weighing_uuid)"
+                " VALUES (?, ?, ?, ?)",
+                rows,
+            )
+        return len(rows)
+
+    def find_active_tare(self, vehicle_number: str, at: datetime) -> TareRecord | None:
+        """Действующая тара номера ТС: не старше 3 месяцев от момента ``at``.
+
+        None — действующей тары нет (нетто не считается, правило №4).
+        Naive-даты (без пояса) трактуются как UTC.
+        """
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=UTC)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM tare_registry_replica WHERE vehicle_number = ?",
+                (vehicle_number,),
+            ).fetchone()
+        if row is None:
+            return None
+        tared_at = datetime.fromisoformat(row["tared_at"])
+        if tared_at.tzinfo is None:
+            # дата без пояса (не должна приходить, но протокол её не запрещает) —
+            # трактуем как UTC, чтобы сравнение не падало TypeError
+            tared_at = tared_at.replace(tzinfo=UTC)
+        if tared_at < three_months_before(at):
+            return None
+        return TareRecord(
+            vehicle_number=row["vehicle_number"],
+            tare_value=row["tare_value"],
+            tared_at=tared_at,
+            weighing_uuid=UUID(row["weighing_uuid"]),
+        )
+
+    def tare_registry_size(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM tare_registry_replica").fetchone()
+        return int(row["n"])
+
+    # --- внутреннее ---
+
+    @staticmethod
+    def _row_to_record(row: sqlite3.Row) -> WeighingRecord:
+        return WeighingRecord(
+            uuid=UUID(row["uuid"]),
+            operation=Operation(row["operation"]),
+            code=ErrorCode(row["code"]),
+            massa=row["massa"],
+            unit=row["unit"],
+            stable=bool(row["stable"]),
+            weighed_at=(datetime.fromisoformat(row["weighed_at"]) if row["weighed_at"] else None),
+            vehicle_number=row["vehicle_number"],
+            trailer_number=row["trailer_number"],
+            tare_value=row["tare_value"],
+            tare_weighing_uuid=(
+                UUID(row["tare_weighing_uuid"]) if row["tare_weighing_uuid"] else None
+            ),
+            netto=row["netto"],
+            source=WeighingSource(row["source"]),
+            operator=row["operator"],
+            message=row["message"],
+        )
