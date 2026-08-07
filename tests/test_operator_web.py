@@ -13,6 +13,9 @@
 - действия: переоткрытие порта вызывает сервис и возвращает фрагмент;
 - живой вес: формат weight_text с узким пробелом, отражение смены
   состояния фейка в следующих кадрах;
+- ручной режим (/manual/*): серверная блокировка при связи с центром,
+  форма и страница результата, ошибки prepare, commit/discard,
+  подсказка тары, manual_ready в /ws/state;
 - пароли операторов (agent/sync/storage.py): upsert/verify, замена пароля,
   соль в hash_password, устойчивость verify_password к мусору, отсутствие
   открытого пароля в файле БД.
@@ -35,8 +38,9 @@ from agent.drivers.base import ScaleState
 from agent.sync.storage import AgentStorage, hash_password, verify_password
 from agent.web.app import create_app
 from agent.web.services import AgentInfo
+from agent.weighing.manual import ManualFlowError, ManualPreview
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
-from shared.messages import WeighingRecord
+from shared.messages import TareRecord, WeighingRecord
 
 # узкий неразрывный пробел — разделитель тысяч в весе (как в макетах)
 NNBSP = " "
@@ -72,6 +76,16 @@ def make_record(**overrides: Any) -> WeighingRecord:
     return WeighingRecord(**fields)
 
 
+def make_preview(**record_overrides: Any) -> ManualPreview:
+    """Готовое превью ручной операции для заглушки manual_prepare."""
+    record = make_record(
+        source=WeighingSource.LOCAL_OFFLINE,
+        operator=OPERATOR_NAME,
+        **record_overrides,
+    )
+    return ManualPreview(preview_id="pv-test-1", record=record, photos=[], tare=None)
+
+
 class FakeServices:
     """Управляемый фейк AgentServices: переключатели online/scale/snapshot."""
 
@@ -86,6 +100,13 @@ class FakeServices:
         self.roles = [CameraRole.FRONT, CameraRole.REAR]
         self.journal: list[WeighingRecord] = []
         self.journal_synced = True  # флаг «дослано» для всех записей фейка
+        self.manual_ready_flag = False
+        self.manual_error: str | None = None
+        self.manual_preview: ManualPreview | None = None
+        self.manual_prepare_args: tuple[Operation, str, str | None, str] | None = None
+        self.manual_committed: str | None = None
+        self.manual_discarded: str | None = None
+        self.tare_hint: TareRecord | None = None
         self.reopen_called = False
         self.info = AgentInfo(
             site_name="СВХ «Тест-Терминал»",
@@ -130,6 +151,40 @@ class FakeServices:
 
     def reopen_port(self) -> None:
         self.reopen_called = True
+
+    # --- ручной режим: управляемые заглушки ---
+
+    def manual_ready(self) -> bool:
+        return self.manual_ready_flag
+
+    def manual_prepare(
+        self,
+        operation: Operation,
+        *,
+        vehicle_number: str,
+        trailer_number: str | None,
+        operator: str,
+    ) -> ManualPreview:
+        if self.manual_error is not None:
+            raise ManualFlowError(self.manual_error)
+        assert self.manual_preview is not None, "тест не задал manual_preview"
+        self.manual_prepare_args = (operation, vehicle_number, trailer_number, operator)
+        return self.manual_preview
+
+    def manual_pending(self) -> ManualPreview | None:
+        return self.manual_preview
+
+    def manual_commit(self, preview_id: str) -> WeighingRecord:
+        if self.manual_preview is None or self.manual_preview.preview_id != preview_id:
+            raise ManualFlowError("операция устарела")
+        self.manual_committed = preview_id
+        return self.manual_preview.record
+
+    def manual_discard(self, preview_id: str) -> None:
+        self.manual_discarded = preview_id
+
+    def find_active_tare(self, vehicle_number: str) -> TareRecord | None:
+        return self.tare_hint
 
 
 @pytest.fixture
@@ -436,6 +491,213 @@ class TestWebSocketState:
             assert frame["weight_kg"] == 43310.0
             assert frame["weight_text"] == f"43{NNBSP}310"
             assert frame["stable"] is False
+
+
+# --- ручной режим: маршруты /manual/* ---
+
+
+class TestManualRoutes:
+    @pytest.mark.parametrize("path", ["/manual/weighing", "/manual/taring"])
+    def test_online_get_redirects_to_main(
+        self, services: FakeServices, operator_client: TestClient, path: str
+    ) -> None:
+        """Правило №3 серверно: при связи с центром форма недоступна — 303 на /."""
+        services.online = True
+        response = operator_client.get(path, follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["Location"] == "/"
+
+    @pytest.mark.parametrize("path", ["/manual/weighing", "/manual/taring"])
+    def test_online_post_redirects_without_prepare(
+        self, services: FakeServices, operator_client: TestClient, path: str
+    ) -> None:
+        """POST при связи с центром тоже блокируется: кнопкам не доверяем,
+        manual_prepare не вызывается."""
+        services.online = True
+        services.manual_preview = make_preview()
+        response = operator_client.post(
+            path,
+            data={"vehicle_number": "01KG777AAA"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["Location"] == "/"
+        assert services.manual_prepare_args is None
+
+    def test_unknown_operation_404(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Операция вне weighing/taring — 404 даже в автономном режиме."""
+        services.online = False
+        assert operator_client.get("/manual/unknown", follow_redirects=False).status_code == 404
+
+    def test_offline_form_renders(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """В офлайне форма открывается: переключатель операций и поле номера."""
+        services.online = False
+        page = operator_client.get("/manual/weighing")
+        assert page.status_code == 200
+        assert 'href="/manual/weighing"' in page.text
+        assert 'href="/manual/taring"' in page.text
+        assert 'name="vehicle_number"' in page.text
+        assert "Взвесить" in page.text
+
+        taring = operator_client.get("/manual/taring")
+        assert taring.status_code == 200
+        assert "Тарировать" in taring.text
+
+    @pytest.mark.parametrize(
+        ("path", "operation"),
+        [("/manual/weighing", Operation.WEIGHING), ("/manual/taring", Operation.TARING)],
+    )
+    def test_post_success_shows_result_page(
+        self,
+        services: FakeServices,
+        operator_client: TestClient,
+        path: str,
+        operation: Operation,
+    ) -> None:
+        """Успешная фиксация: страница результата с preview_id и кнопками;
+        в сервис ушли операция, номера как введены и имя оператора."""
+        services.online = False
+        services.manual_preview = make_preview(operation=operation)
+        response = operator_client.post(
+            path,
+            data={"vehicle_number": "01kg777aaa", "trailer_number": "BD123"},
+        )
+        assert response.status_code == 200
+        assert 'value="pv-test-1"' in response.text
+        assert "Зафиксировать" in response.text
+        assert "Отмена" in response.text
+        assert 'action="/manual/actions/commit"' in response.text
+        assert 'action="/manual/actions/discard"' in response.text
+        # нормализация номеров — дело слоя логики, веб передаёт как введено
+        assert services.manual_prepare_args == (operation, "01kg777aaa", "BD123", OPERATOR_NAME)
+
+    def test_post_empty_trailer_becomes_none(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Пустое поле прицепа уходит в сервис как None, а не пустая строка."""
+        services.online = False
+        services.manual_preview = make_preview()
+        operator_client.post(
+            "/manual/weighing",
+            data={"vehicle_number": "01KG777AAA", "trailer_number": ""},
+        )
+        assert services.manual_prepare_args is not None
+        assert services.manual_prepare_args[2] is None
+
+    def test_post_error_returns_form_with_message(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Отказ prepare: снова форма с текстом ошибки и введённым номером."""
+        services.online = False
+        services.manual_error = "АТС не на весах — дождитесь заезда"
+        response = operator_client.post(
+            "/manual/weighing",
+            data={"vehicle_number": "01KG777AAA"},
+        )
+        assert response.status_code == 200
+        assert "АТС не на весах — дождитесь заезда" in response.text
+        assert 'name="vehicle_number"' in response.text
+        assert 'value="01KG777AAA"' in response.text  # введённое не пропало
+
+    def test_commit_valid_id(self, services: FakeServices, operator_client: TestClient) -> None:
+        """Подтверждение с верным preview_id: 303 на главную, commit вызван."""
+        services.online = False
+        services.manual_preview = make_preview()
+        response = operator_client.post(
+            "/manual/actions/commit",
+            data={"preview_id": "pv-test-1"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["Location"] == "/"
+        assert services.manual_committed == "pv-test-1"
+
+    def test_commit_stale_id_redirects_without_error(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Устаревший preview_id: без падения, 303 на главную, записи нет."""
+        services.online = False
+        services.manual_preview = make_preview()
+        response = operator_client.post(
+            "/manual/actions/commit",
+            data={"preview_id": "stale-id"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["Location"] == "/"
+        assert services.manual_committed is None
+
+    def test_discard(self, services: FakeServices, operator_client: TestClient) -> None:
+        """Отмена превью: 303 на главную, discard вызван с preview_id."""
+        services.online = False
+        services.manual_preview = make_preview()
+        response = operator_client.post(
+            "/manual/actions/discard",
+            data={"preview_id": "pv-test-1"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["Location"] == "/"
+        assert services.manual_discarded == "pv-test-1"
+
+    def test_tare_hint_found(self, services: FakeServices, operator_client: TestClient) -> None:
+        """По известному номеру фрагмент показывает найденную тару."""
+        services.tare_hint = TareRecord(
+            vehicle_number="01KG777AAA",
+            tare_value=15300.0,
+            tared_at=datetime(2026, 7, 1, tzinfo=UTC),
+            weighing_uuid=uuid4(),
+        )
+        response = operator_client.get(
+            "/manual-fragments/tare-hint", params={"vehicle_number": "01KG777AAA"}
+        )
+        assert response.status_code == 200
+        assert "найдена тара" in response.text
+        assert f"15{NNBSP}300" in response.text
+
+    def test_tare_hint_empty_number_is_empty_fragment(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Пустой номер: реестр не опрашивается, фрагмент пустой."""
+        services.tare_hint = TareRecord(  # даже если бы реестр что-то вернул
+            vehicle_number="01KG777AAA",
+            tare_value=15300.0,
+            tared_at=datetime(2026, 7, 1, tzinfo=UTC),
+            weighing_uuid=uuid4(),
+        )
+        response = operator_client.get(
+            "/manual-fragments/tare-hint", params={"vehicle_number": "   "}
+        )
+        assert response.status_code == 200
+        assert 'id="tare-hint"' in response.text
+        assert "найдена тара" not in response.text
+
+    def test_tare_hint_requires_login(self, client: TestClient) -> None:
+        """Без сессии фрагмент недоступен — 303 на /login."""
+        response = client.get(
+            "/manual-fragments/tare-hint",
+            params={"vehicle_number": "01KG777AAA"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+
+    def test_ws_state_has_manual_ready(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Кадр /ws/state содержит manual_ready и отражает флаг сервиса."""
+        services.manual_ready_flag = False
+        with operator_client.websocket_connect("/ws/state") as ws:
+            frame = ws.receive_json()
+        assert frame["manual_ready"] is False
+
+        services.manual_ready_flag = True
+        with operator_client.websocket_connect("/ws/state") as ws:
+            frame = ws.receive_json()
+        assert frame["manual_ready"] is True
 
 
 # --- пароли операторов (agent/sync/storage.py) ---

@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Ручная операция — Весовая система{% endblock %}
+{% block body %}
+<main class="manual">
+  <section class="manual-card">
+    <header class="manual-head">
+      <div>
+        <h1>Ручная операция</h1>
+        <p>Автономный режим · {{ info.site_name }} · {{ info.scale_name }}</p>
+      </div>
+      <a class="close" href="/" aria-label="Закрыть">✕</a>
+    </header>
+
+    <div class="manual-body">
+      <nav class="op-switch">
+        <a href="/manual/weighing" class="{{ 'active' if operation.value == 'weighing' else '' }}">Взвешивание</a>
+        <a href="/manual/taring" class="{{ 'active' if operation.value == 'taring' else '' }}">Тарирование</a>
+      </nav>
+
+      <section class="weight-display small" id="weight-display">
+        <div class="weight-head">
+          <span class="weight-label">Текущий вес</span>
+          <span class="state" id="weight-state">—</span>
+        </div>
+        <div class="weight-value-row">
+          <span class="value" id="weight-value">—</span>
+          <span class="weight-unit">kg</span>
+        </div>
+        <div class="weight-caption"></div>
+      </section>
+
+      {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+
+      <form method="post" action="/manual/{{ operation.value }}" id="manual-form">
+        <div class="field-grid">
+          <label>Номер головы
+            <input name="vehicle_number" value="{{ vehicle_number }}" required autofocus
+                   hx-get="/manual-fragments/tare-hint" hx-trigger="keyup changed delay:400ms"
+                   hx-target="#tare-hint" hx-swap="outerHTML" hx-include="this">
+          </label>
+          <label>Номер прицепа
+            <input name="trailer_number" value="{{ trailer_number }}">
+          </label>
+        </div>
+        {% include "fragments/tare_hint.html" %}
+        <div class="actions">
+          <button type="submit" id="capture-btn" disabled>
+            {{ 'Взвесить' if operation.value == 'weighing' else 'Тарировать' }}
+          </button>
+          <span id="capture-hint">Станет активной после заезда и стабилизации массы</span>
+          <a class="btn-secondary" href="/">Отмена</a>
+        </div>
+      </form>
+    </div>
+  </section>
+</main>
+<script>
+  // живой вес + активация кнопки по manual_ready с сервера
+  (function () {
+    var value = document.getElementById('weight-value');
+    var state = document.getElementById('weight-state');
+    var button = document.getElementById('capture-btn');
+    var hint = document.getElementById('capture-hint');
+    function connect() {
+      var ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/state');
+      ws.onmessage = function (event) {
+        var data = JSON.parse(event.data);
+        value.textContent = data.status === 'ok' ? data.weight_text : '—';
+        state.textContent = data.status !== 'ok' ? 'НЕТ ДАННЫХ'
+          : data.overload ? 'ПЕРЕГРУЗ' : data.stable ? 'СТАБИЛЬНО' : 'НЕСТАБИЛЬНО';
+        state.dataset.kind = data.status !== 'ok' ? 'nodata' : data.overload ? 'overload' : data.stable ? 'stable' : 'unstable';
+        button.disabled = !data.manual_ready;  // серверное решение, кнопка лишь отражает
+        hint.textContent = data.manual_ready ? 'Фиксация веса и снимки двух камер'
+          : 'Станет активной после заезда и стабилизации массы';
+        if (!data.manual_allowed) { location.href = '/'; }  // связь с центром вернулась
+      };
+      ws.onclose = function () { setTimeout(connect, 1000); };
+    }
+    connect();
+  })();
+</script>
+{% endblock %}

@@ -541,6 +541,224 @@ table.journal .cell-sync { text-align: center; font-size: 16px; }
   margin: 0;
 }
 
+/* ---------- Ручная операция (operator-manual.dc.html) ---------- */
+
+.manual {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.manual-card {
+  width: 560px;
+  max-width: 100%;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+}
+.manual-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border);
+}
+.manual-head h1 { font-size: 19px; font-weight: 800; margin: 0; }
+.manual-head p { font-size: 13px; color: var(--muted); margin: 2px 0 0; }
+.manual-head .close {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  font-weight: 700;
+}
+.manual-head .close:hover { background: var(--border); color: var(--text); }
+
+.manual-body {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* переключатель операции */
+.op-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.op-switch a {
+  height: 52px;
+  border-radius: var(--r-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 700;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+.op-switch a:hover { color: var(--text); }
+.op-switch a.active { background: var(--primary); color: #fff; box-shadow: var(--shadow-btn); }
+.op-switch a.active:hover { color: #fff; }
+
+/* компактный дисплей веса внутри карточки */
+.weight-display.small { border-radius: var(--r-md); padding: 16px 22px; gap: 8px; }
+.weight-display.small .weight-label { letter-spacing: 1.4px; }
+.weight-display.small .weight-value-row { flex: none; align-items: baseline; gap: 10px; }
+.weight-display.small #weight-value { font-size: 56px; letter-spacing: -1px; }
+.weight-display.small .weight-unit { font-size: 20px; align-self: baseline; padding: 0; }
+.weight-display.small .weight-caption {
+  font-size: 13px;
+  color: #cfe0d8;
+  text-align: center;
+  font-weight: 600;
+  min-height: 1em;
+}
+
+/* подписи состояний ручного режима (перекрывают общие правила главного экрана);
+   «весы пусты» выводим CSS-ом из сочетания «стабильно + кнопка неактивна» — JS не трогаем */
+.manual .weight-display:has(#weight-state[data-kind="stable"]) .weight-caption::after { content: "Масса стабильна — можно взвешивать"; }
+.manual .weight-display:has(#weight-state[data-kind="unstable"]) .weight-caption::after { content: "АТС на платформе — ожидание стабилизации массы…"; }
+.manual-body:has(#capture-btn:disabled) .weight-display:has(#weight-state[data-kind="stable"]) .weight-caption::after { content: "Весы пусты — ожидание заезда АТС на платформу"; }
+.manual-body:has(#capture-btn:disabled) .weight-display:has(#weight-state[data-kind="stable"]) #weight-value { color: rgba(255, 255, 255, .45); }
+.manual-body:has(#capture-btn:disabled) #weight-state[data-kind="stable"] {
+  font-size: 0;
+  background: rgba(255, 255, 255, .1);
+}
+.manual-body:has(#capture-btn:disabled) #weight-state[data-kind="stable"]::before { background: #9AA1AB; }
+.manual-body:has(#capture-btn:disabled) #weight-state[data-kind="stable"]::after {
+  content: "ОЖИДАНИЕ ЗАЕЗДА";
+  font-size: 11.5px;
+  color: #9fb8ad;
+}
+
+/* поля номеров */
+#manual-form { display: flex; flex-direction: column; gap: 18px; }
+.field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.field-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.field-grid input {
+  height: 52px;
+  background: var(--surface-2);
+  border: 1.5px solid transparent;
+  border-radius: var(--r-sm);
+  padding: 0 14px;
+  font-family: inherit;
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  font-variant-numeric: tabular-nums;
+  text-transform: uppercase;
+  color: var(--text);
+  min-width: 0;
+}
+.field-grid input:focus { outline: none; background: #fff; border-color: var(--primary); }
+
+/* подсказка «найдена тара» — пустой контейнер не должен занимать слот в flex-колонке */
+#tare-hint { display: contents; }
+.tare-found { font-size: 12.5px; color: var(--muted); margin: -8px 0 0; }
+
+/* нижняя полоса действий (общая для формы и результата) */
+.manual .actions,
+.manual .result-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 6px -24px -24px;
+  padding: 20px 24px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+#capture-btn,
+.manual .btn-primary,
+.manual .btn-secondary {
+  height: 56px;
+  border: none;
+  border-radius: var(--r-sm);
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+#capture-btn { padding: 0 36px; background: var(--primary); color: #fff; box-shadow: var(--shadow-btn); cursor: pointer; }
+#capture-btn:disabled { background: var(--surface-2); color: var(--faint); box-shadow: none; cursor: not-allowed; }
+#capture-hint { font-size: 12.5px; color: var(--muted); flex: 1; }
+.manual .btn-secondary { padding: 0 24px; background: var(--surface-2); color: var(--text); cursor: pointer; }
+.manual .btn-secondary:hover { background: var(--border); color: var(--text); }
+
+/* карточка результата */
+.result-values { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.result-values .value-box:only-child { grid-column: 1 / -1; }
+.value-box {
+  background: var(--surface-2);
+  border-radius: var(--r-md);
+  padding: 14px 18px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.value-box span {
+  display: block;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.value-box b {
+  font-size: 28px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  margin-top: 4px;
+  display: inline-block;
+}
+.result-values .value-box:only-child b { font-size: 36px; }
+.value-box small { display: block; font-size: 12px; font-weight: 400; color: var(--muted); margin-top: 4px; }
+
+.netto-box {
+  background: var(--green-soft);
+  border: 1px solid var(--green-border);
+  border-radius: var(--r-md);
+  padding: 18px 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.netto-box span { font-size: 14px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; color: var(--primary-dark); }
+.netto-box b { font-size: 44px; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--primary-dark); line-height: 1; }
+.netto-box b small { font-size: 20px; font-weight: 700; }
+
+/* предупреждение «нет тары» — warning-токены пилюль */
+.warn {
+  background: rgba(232, 163, 61, .16);
+  border: 1px solid #E8A33D;
+  border-radius: var(--r-md);
+  padding: 16px 20px;
+}
+.warn b { font-size: 15px; font-weight: 800; color: #b5780f; }
+.warn p { font-size: 13.5px; color: #7a5308; margin: 4px 0 0; }
+
+.manual .result-actions form { display: contents; }
+.manual .result-actions form:first-child button { width: 100%; }
+.manual .result-actions form:first-child { display: block; flex: 1; }
+.manual .btn-primary { padding: 0 28px; background: var(--primary); color: #fff; box-shadow: var(--shadow-btn); cursor: pointer; border: none; }
+
 /* ---------- Узкие/низкие операторские мониторы (1366×768) ---------- */
 
 @media (max-width: 1600px) {

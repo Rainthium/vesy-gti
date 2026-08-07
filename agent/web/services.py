@@ -10,8 +10,9 @@ from typing import Protocol
 
 from agent.cameras.capture import CameraShot
 from agent.drivers.base import ScaleState
-from shared.enums import CameraRole
-from shared.messages import WeighingRecord
+from agent.weighing.manual import ManualPreview
+from shared.enums import CameraRole, Operation
+from shared.messages import TareRecord, WeighingRecord
 
 
 @dataclass(frozen=True)
@@ -67,4 +68,37 @@ class AgentServices(Protocol):
 
     def reopen_port(self) -> None:
         """Принудительно переоткрыть порт индикатора (кнопка на «Оборудовании»)."""
+        ...
+
+    # --- ручной режим (автономный, правило №3; поток agent/weighing/manual.py) ---
+
+    def manual_ready(self) -> bool:
+        """Можно ли фиксировать вес сейчас (офлайн + стабильная масса ≥ порога)."""
+        ...
+
+    def manual_prepare(
+        self,
+        operation: Operation,
+        *,
+        vehicle_number: str,
+        trailer_number: str | None,
+        operator: str,
+    ) -> ManualPreview:
+        """Зафиксировать вес и снимки; ManualFlowError — текст для формы."""
+        ...
+
+    def manual_pending(self) -> ManualPreview | None:
+        """Неподтверждённое превью, если есть."""
+        ...
+
+    def manual_commit(self, preview_id: str) -> WeighingRecord:
+        """Записать превью в журнал (далее запись неизменяема)."""
+        ...
+
+    def manual_discard(self, preview_id: str) -> None:
+        """Отменить превью (снимки удаляются, записи нет)."""
+        ...
+
+    def find_active_tare(self, vehicle_number: str) -> TareRecord | None:
+        """Действующая тара номера ТС из локальной реплики (подсказка в форме)."""
         ...

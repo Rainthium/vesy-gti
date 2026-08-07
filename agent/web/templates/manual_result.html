@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Результат — Весовая система{% endblock %}
+{% block body %}
+<main class="manual">
+  <section class="manual-card result">
+    <header class="manual-head">
+      <div>
+        <h1>{{ 'Взвешивание' if preview.record.operation.value == 'weighing' else 'Тарирование' }} · {{ preview.record.vehicle_number }}</h1>
+        <p>
+          {% if preview.record.trailer_number %}Прицеп {{ preview.record.trailer_number }} · {% endif %}
+          {{ preview.record.weighed_at | fmt_time }} ·
+          {% if preview.photos | length == 2 %}снимки двух камер получены{% elif preview.photos %}получен {{ preview.photos | length }} снимок{% else %}снимков нет{% endif %}
+        </p>
+      </div>
+      <span class="pill pill-ok"><span class="dot"></span>Вес зафиксирован</span>
+    </header>
+
+    <div class="manual-body">
+      {% if preview.record.operation.value == 'weighing' %}
+        <div class="result-values">
+          <div class="value-box"><span>Брутто</span><b>{{ preview.record.massa | fmt_kg }}</b> kg</div>
+          {% if preview.tare %}
+          <div class="value-box"><span>Тара</span><b>{{ preview.record.tare_value | fmt_kg }}</b> kg
+            <small>тарирование от {{ preview.tare.tared_at.strftime('%d.%m.%Y') }}</small></div>
+          {% endif %}
+        </div>
+        {% if preview.tare %}
+        <div class="netto-box"><span>Нетто</span><b>{{ preview.record.netto | fmt_kg }} <small>kg</small></b></div>
+        {% endif %}
+        {% if preview.no_valid_tare %}
+        <div class="warn"><b>Нет тарирования за последние 3 месяца</b>
+          <p>Нетто не рассчитано; запись будет сохранена с признаком «нет тары»;
+            тара подставится, если ТС пройдёт тарирование позже.</p></div>
+        {% endif %}
+      {% else %}
+        <div class="result-values">
+          <div class="value-box"><span>Тара</span><b>{{ preview.record.massa | fmt_kg }}</b> kg</div>
+        </div>
+      {% endif %}
+
+      {% if preview.record.code.value == 'ERR_CAMERA' %}
+      <div class="warn"><b>Часть снимков не получена (ERR_CAMERA)</b>
+        <p>Вес сохраняется с предупреждением.</p></div>
+      {% endif %}
+
+      <div class="result-actions">
+        <form method="post" action="/manual/actions/commit">
+          <input type="hidden" name="preview_id" value="{{ preview.preview_id }}">
+          <button type="submit" class="btn-primary">Зафиксировать</button>
+        </form>
+        <form method="post" action="/manual/actions/discard">
+          <input type="hidden" name="preview_id" value="{{ preview.preview_id }}">
+          <button type="submit" class="btn-secondary">Отмена</button>
+        </form>
+      </div>
+    </div>
+  </section>
+</main>
+{% endblock %}

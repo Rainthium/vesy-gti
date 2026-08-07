@@ -26,6 +26,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.websockets import WebSocketDisconnect
 
 from agent.web.services import AgentServices
+from agent.weighing.manual import ManualFlowError
 from shared.enums import CameraRole, Operation, ScaleStatus
 
 logger = logging.getLogger(__name__)
@@ -191,6 +192,95 @@ def create_app(services: AgentServices, *, session_secret: str) -> FastAPI:
         services.reopen_port()
         return render("fragments/status.html", request, operator=operator)
 
+    # --- ручной режим (автономный) ---
+
+    _MANUAL_OPERATIONS = {"weighing": Operation.WEIGHING, "taring": Operation.TARING}
+
+    def manual_operation_or_404(op: str) -> Operation:
+        operation = _MANUAL_OPERATIONS.get(op)
+        if operation is None:
+            raise HTTPException(status_code=404, detail="нет такой операции")
+        return operation
+
+    def require_manual_mode() -> None:
+        """Правило №3: при живой связи с центром ручной режим запрещён.
+
+        Проверка серверная — кнопкам в браузере не доверяем.
+        """
+        if services.center_connected():
+            raise HTTPException(status_code=303, headers={"Location": "/"})
+
+    @app.get("/manual/{op}", response_class=HTMLResponse)
+    def manual_form(op: str, request: Request, operator: Operator) -> HTMLResponse:
+        operation = manual_operation_or_404(op)
+        require_manual_mode()
+        return render(
+            "manual.html",
+            request,
+            operator=operator,
+            operation=operation,
+            error=None,
+            vehicle_number="",
+            trailer_number="",
+        )
+
+    @app.post("/manual/{op}", response_class=HTMLResponse)
+    def manual_capture(
+        op: str,
+        request: Request,
+        operator: Operator,
+        vehicle_number: Annotated[str, Form()],
+        trailer_number: Annotated[str, Form()] = "",
+    ) -> HTMLResponse:
+        operation = manual_operation_or_404(op)
+        require_manual_mode()
+        try:
+            preview = services.manual_prepare(
+                operation,
+                vehicle_number=vehicle_number,
+                trailer_number=trailer_number or None,
+                operator=operator,
+            )
+        except ManualFlowError as exc:
+            return render(
+                "manual.html",
+                request,
+                operator=operator,
+                operation=operation,
+                error=str(exc),
+                vehicle_number=vehicle_number,
+                trailer_number=trailer_number,
+            )
+        return render("manual_result.html", request, operator=operator, preview=preview)
+
+    @app.get("/manual-fragments/tare-hint", response_class=HTMLResponse)
+    def tare_hint(request: Request, operator: Operator, vehicle_number: str = "") -> HTMLResponse:
+        """Подсказка «по номеру головы найдена тара …» (HTMX по вводу номера)."""
+        tare = None
+        number = vehicle_number.strip().upper()
+        if number:
+            tare = services.find_active_tare(number)
+        return render("fragments/tare_hint.html", request, operator=operator, tare=tare)
+
+    @app.post("/manual/actions/commit")
+    def manual_commit(
+        request: Request, operator: Operator, preview_id: Annotated[str, Form()]
+    ) -> Response:
+        require_manual_mode()
+        try:
+            record = services.manual_commit(preview_id)
+        except ManualFlowError:
+            return RedirectResponse("/", status_code=303)
+        logger.info("оператор %s зафиксировал операцию %s", operator, record.uuid)
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/manual/actions/discard")
+    def manual_discard(
+        request: Request, operator: Operator, preview_id: Annotated[str, Form()]
+    ) -> Response:
+        services.manual_discard(preview_id)
+        return RedirectResponse("/", status_code=303)
+
     # --- живой вес ---
 
     @app.websocket("/ws/state")
@@ -211,6 +301,7 @@ def create_app(services: AgentServices, *, session_secret: str) -> FastAPI:
                         "overload": scale.overload,
                         "center_online": services.center_connected(),
                         "manual_allowed": not services.center_connected(),
+                        "manual_ready": services.manual_ready(),
                         "pending_count": services.pending_count(),
                     }
                 )

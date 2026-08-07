@@ -11,18 +11,22 @@
 
 import argparse
 import math
+import tempfile
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import uvicorn
 
 from agent.cameras.capture import CameraShot
 from agent.drivers.base import ScaleState
+from agent.sync.storage import AgentStorage
 from agent.web.app import create_app
 from agent.web.services import AgentInfo
+from agent.weighing.manual import ManualOperationFlow, ManualPreview
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
-from shared.messages import WeighingRecord
+from shared.messages import TareRecord, WeighingRecord
 
 # однотонный серый JPEG 32×24 — заглушка кадра камеры
 _GRAY_JPEG = bytes.fromhex(
@@ -114,6 +118,25 @@ class DemoServices:
         self._offline = offline
         self._no_data = no_data
         self._journal = _demo_journal()
+        # настоящий поток ручной операции поверх БД в памяти (камер в демо нет)
+        self._storage = AgentStorage(":memory:")
+        self._storage.replace_tare_registry(
+            [
+                TareRecord(
+                    vehicle_number="01KG777AAA",
+                    tare_value=15300.0,
+                    tared_at=datetime(2026, 6, 12, tzinfo=UTC),
+                    weighing_uuid=uuid4(),
+                )
+            ]
+        )
+        self._flow = ManualOperationFlow(
+            scale_state=self.scale_state,
+            manual_allowed=lambda: self._offline,
+            storage=self._storage,
+            cameras=[],
+            photos_dir=Path(tempfile.mkdtemp(prefix="ves-demo-photos-")),
+        )
         self.info = AgentInfo(
             site_name="СВХ «Кызыл-Кыя»",
             scale_name="Весы SCS-80",
@@ -155,8 +178,41 @@ class DemoServices:
         return 1812
 
     def recent_weighings(self, limit: int = 50) -> list[tuple[WeighingRecord, bool]]:
-        # офлайн-записи показываем как недосланные (⧗), остальные — как синхронизированные
-        return [(r, r.source is not WeighingSource.LOCAL_OFFLINE) for r in self._journal[:limit]]
+        # сначала записи, сделанные вручную в демо, затем статичный журнал макета;
+        # офлайн-записи показываются как недосланные (⧗)
+        saved = self._storage.recent_weighings_synced(limit)
+        demo = [(r, r.source is not WeighingSource.LOCAL_OFFLINE) for r in self._journal]
+        return (saved + demo)[:limit]
+
+    def manual_ready(self) -> bool:
+        return self._flow.ready()
+
+    def manual_prepare(
+        self,
+        operation: Operation,
+        *,
+        vehicle_number: str,
+        trailer_number: str | None,
+        operator: str,
+    ) -> ManualPreview:
+        return self._flow.prepare(
+            operation,
+            vehicle_number=vehicle_number,
+            trailer_number=trailer_number,
+            operator=operator,
+        )
+
+    def manual_pending(self) -> ManualPreview | None:
+        return self._flow.pending()
+
+    def manual_commit(self, preview_id: str) -> WeighingRecord:
+        return self._flow.commit(preview_id)
+
+    def manual_discard(self, preview_id: str) -> None:
+        self._flow.discard(preview_id)
+
+    def find_active_tare(self, vehicle_number: str) -> TareRecord | None:
+        return self._storage.find_active_tare(vehicle_number, datetime.now(UTC))
 
     def camera_roles(self) -> list[CameraRole]:
         return [CameraRole.FRONT, CameraRole.REAR]
