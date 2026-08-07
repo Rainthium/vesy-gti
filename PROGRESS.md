@@ -18,7 +18,7 @@
 ### Агент
 - [x] Драйвер `agent/drivers/cas22.py` по `docs/protocols/cas22.md` (основа — рабочий прототип cas22_reader.py): чтение потока, ресинхронизация, флаг стабильности, автопереоткрытие порта (ошибка 31/CH340), без DTR/RTS (07.08.2026; + интерфейс ScaleDriver/ScaleState в agent/drivers/base.py)
 - [x] Юнит-тесты драйвера на эмуляторе: все режимы, включая обрыв и мусор (07.08.2026; 60 тестов: разбор, ресинхронизация, NO_DATA по таймауту, автопереоткрытие через socket://)
-- [ ] Конечный автомат взвешивания (architecture §3.3): IDLE→WAIT_ZERO→WAIT_VEHICLE→WAIT_STABLE→CAPTURE→DONE, параметры из конфига, коды ошибок ERR_*
+- [x] Конечный автомат взвешивания (architecture §3.3): IDLE→WAIT_ZERO→WAIT_VEHICLE→WAIT_STABLE→CAPTURE→DONE, параметры из конфига, коды ошибок ERR_* (07.08.2026; agent/weighing/cycle.py, детерминирован инъекцией часов, 43 кейса; съёмка камер — через CAPTURE/complete_capture вызывающим кодом)
 - [ ] Модуль камер: снимок из RTSP (ffmpeg) и HTTP-snapshot, две камеры, таймауты, ERR_CAMERA (вес возвращается с предупреждением)
 - [ ] Локальная БД SQLite: журнал операций, флаг synced, реплика реестра тарирований
 - [ ] WebSocket-клиент к центру: hello/heartbeat/weigh_request/weigh_result/offline_sync, реконнект с backoff
