@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Секреты и локальные конфиги
+.env
+*.local.yaml
+config.local.*
+secrets/
+
+# Сборки
+build/
+dist/
+*.spec
+
+# Данные
+*.sqlite3
+*.db
+photos/
+logs/
+*.log
+
+# ОС/редакторы
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
