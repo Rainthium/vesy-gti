@@ -1,1 +1,53 @@
 """Общие модели сообщений агент↔центр и перечисления."""
+
+from shared.enums import (
+    CameraRole,
+    ErrorCode,
+    Operation,
+    ScaleStatus,
+    WeighingSource,
+)
+from shared.messages import (
+    PROTOCOL_VERSION,
+    AgentMessage,
+    CameraStatus,
+    CenterMessage,
+    EquipmentStatus,
+    Heartbeat,
+    Hello,
+    OfflineSync,
+    OfflineSyncAck,
+    PhotoMeta,
+    TareRecord,
+    TareRegistryUpdate,
+    WeighingRecord,
+    WeighRequest,
+    WeighResult,
+    parse_agent_message,
+    parse_center_message,
+)
+
+__all__ = [
+    "PROTOCOL_VERSION",
+    "AgentMessage",
+    "CameraRole",
+    "CameraStatus",
+    "CenterMessage",
+    "EquipmentStatus",
+    "ErrorCode",
+    "Heartbeat",
+    "Hello",
+    "OfflineSync",
+    "OfflineSyncAck",
+    "Operation",
+    "PhotoMeta",
+    "ScaleStatus",
+    "TareRecord",
+    "TareRegistryUpdate",
+    "WeighRequest",
+    "WeighResult",
+    "WeighingRecord",
+    "WeighingSource",
+    "parse_agent_message",
+    "parse_center_message",
+]
