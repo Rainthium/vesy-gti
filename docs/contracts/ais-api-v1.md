@@ -29,18 +29,18 @@
 {
   "code": "OK",
   "massa": 43310.0,
-  "weighing_datetime": "2026-08-07T15:59:26",
+  "weighing_datetime": "2026-08-07T15:59:26+06:00",
   "unit_meas": "kg",
   "front_image": "/vesy/2026/08/07/913cb979ae034d0eb4748278d9f4cfcf_photo1.jpeg",
   "rear_image": "/vesy/2026/08/07/913cb979ae034d0eb4748278d9f4cfcf_photo2.jpeg",
   "tare": 15300.0,
-  "tare_datetime": "2026-06-12T10:21:00",
+  "tare_datetime": "2026-06-12T10:21:00+06:00",
   "netto": 28010.0
 }
 ```
 
-- Базовые шесть полей — байт-в-байт как в текущей системе (формат даты ISO без зоны, вес числом в кг).
-- `tare`/`tare_datetime`/`netto` — НОВЫЕ, только для `operation=weighing`; если действующей тары нет (>3 мес) — `"tare": null, "netto": null, "no_valid_tare": true`.
+- Базовые шесть полей — как в текущей системе, с одним СОГЛАСОВАННЫМ отличием: все даты-времена теперь **ISO 8601 с явным поясом** `+06:00` (Бишкек). Отсутствие пояса в старом контракте признано ошибкой (решение Игоря, 07.08.2026); в БД время хранится в UTC. АИС должна подтвердить парсинг даты с поясом.
+- `tare`/`tare_datetime`/`netto` — НОВЫЕ, только для `operation=weighing`; если действующей тары нет (>3 месяцев) — `"tare": null, "netto": null, "no_valid_tare": true`. Единственный источник тары — тарирования в системе (справочников тары нет).
 
 Ошибки: `code` из перечня `ERR_AGENT_OFFLINE | ERR_SCALE_OFFLINE | ERR_NOT_ZERO | ERR_VEHICLE_TIMEOUT | ERR_UNSTABLE | ERR_CAMERA | ERR_BUSY | ERR_INTERNAL` + человекочитаемое `message` на русском. Семантику см. architecture §4.1. При `ERR_CAMERA` вес возвращается (поля успеха заполнены), code сигнализирует отсутствие снимка.
 
