@@ -33,6 +33,15 @@
 
 «CAS 22 byte» (индикаторы CAS CI-серии, напр. CI-201A): непрерывный поток, 22-байтовый пакет, 9600 8-N-1, без CRC. Разбор: `docs/protocols/cas22.md` + рабочий прототип `../docs/справка/cas22_reader.py` (проверен на СВХ «Кызыл-Кыя» 06.08.2026 — вес и фиксация совпали с табло). Использовать его логику как основу драйвера `agent/drivers/cas22.py`.
 
+## Окружение разработки (важно для новой сессии)
+
+- Пакеты — **uv** (`uv sync`, `uv run ...`); Python 3.12 уже установлен через uv.
+- Dev-PostgreSQL — докер: `docker compose up -d postgres` (порт **5443**, ves/ves; на маке есть чужой parking-postgres на 5442 — не трогать). Миграции: `uv run alembic upgrade head`. Тесты сами создают временные БД `ves_test_*`.
+- Проверки перед коммитом: `uv run ruff format . && uv run ruff check . && uv run mypy . && uv run pytest -q` (все должны быть зелёными; mypy strict на shared/ и agent/drivers/).
+- Запуск стендов и CLI — раздел «Запуск в разработке» в README.md.
+- Git push по SSH работает; статус CI смотреть: `curl -s 'https://api.github.com/repos/Rainthium/vesy-gti/actions/runs?per_page=1'` (gh не авторизован).
+- Субагенты проекта: reviewer (перед каждым коммитом), qa-tester (тесты ядра), ui-maketchik (вёрстка по макетам), protocol-analyst (новые индикаторы, этап 2).
+
 ## Рабочий цикл (обязательно)
 
 1. Перед началом работы: прочитай `PROGRESS.md` → возьми первую незакрытую задачу текущего этапа.
