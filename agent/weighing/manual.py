@@ -19,7 +19,6 @@
 """
 
 import contextlib
-import hashlib
 import logging
 import secrets
 import threading
@@ -32,6 +31,7 @@ from uuid import UUID, uuid4
 from agent.cameras.capture import CameraConfig, CameraShot, capture_all
 from agent.drivers.base import ScaleState
 from agent.sync.storage import AgentStorage, StoredPhoto
+from agent.weighing.shots import store_shots
 from shared.enums import ErrorCode, Operation, ScaleStatus, WeighingSource
 from shared.messages import TareRecord, WeighingRecord
 
@@ -244,26 +244,8 @@ class ManualOperationFlow:
         weighed_at: datetime,
         shots: list[CameraShot],
     ) -> tuple[list[StoredPhoto], list[str]]:
-        """Сохранить удачные снимки файлами (байты как есть), собрать ошибки."""
-        photos: list[StoredPhoto] = []
-        errors: list[str] = []
-        day_dir = self._photos_dir / weighed_at.strftime("%Y/%m/%d")
-        for index, shot in enumerate(shots, start=1):
-            if not shot.ok or shot.jpeg is None:
-                errors.append(shot.error or "камера недоступна")
-                continue
-            day_dir.mkdir(parents=True, exist_ok=True)
-            path = day_dir / f"{record_uuid.hex}_photo{index}.jpeg"
-            path.write_bytes(shot.jpeg)
-            photos.append(
-                StoredPhoto(
-                    role=shot.role,
-                    path=str(path),
-                    sha256=hashlib.sha256(shot.jpeg).hexdigest(),
-                    size_bytes=len(shot.jpeg),
-                )
-            )
-        return photos, errors
+        """Сохранить удачные снимки файлами (общий кирпич — shots.store_shots)."""
+        return store_shots(self._photos_dir, record_uuid, weighed_at, shots)
 
     @staticmethod
     def _remove_files(preview: ManualPreview) -> None:

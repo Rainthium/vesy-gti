@@ -288,14 +288,22 @@ async def serve(
 
     Сценарий проигрывается с начала для каждого клиента; по окончании —
     повторяется (непрерывная передача, как у настоящего индикатора).
+
+    Остановка (отмена задачи) корректна и при живых клиентах: обработчики
+    видят флаг ``stopping`` и выходят в течение одного шага сценария —
+    иначе ``wait_closed()`` (Python 3.12: ждёт завершения обработчиков)
+    висел бы, пока клиент держит соединение.
     """
+    stopping = asyncio.Event()
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = writer.get_extra_info("peername")
         print(f"Клиент подключился: {peer}")
         try:
-            while True:
+            while not stopping.is_set():
                 for step in scenario_factory():
+                    if stopping.is_set():
+                        return
                     if step.payload:
                         writer.write(step.payload)
                         await writer.drain()
@@ -310,8 +318,14 @@ async def serve(
 
     server = await asyncio.start_server(handle, host, port)
     print(f"Эмулятор CAS 22 byte слушает {host}:{port} (pyserial: socket://{host}:{port})")
-    async with server:
+    try:
         await server.serve_forever()
+    finally:
+        # порядок важен: сперва флаг (обработчики выйдут за один шаг),
+        # затем wait_closed — он ждёт завершения обработчиков
+        stopping.set()
+        server.close()
+        await server.wait_closed()
 
 
 def main() -> None:
