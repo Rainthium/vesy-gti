@@ -26,6 +26,7 @@ dev/
 ├── shared/     # модели сообщений, перечисления, правило тары, пароли
 ├── tools/      # cas22_emulator, ais_client (имитатор АИС), center_admin (CLI),
 │               # dev_operator_ui и seed_demo_center (демо-стенды)
+├── deploy/     # боевое развёртывание центра: Dockerfile, compose, nginx, README
 └── docs/       # документация разработки
 ```
 
@@ -51,7 +52,14 @@ uv run python -m tools.center_admin --help
 ```
 
 Конфигурация центра — env: `DATABASE_URL`, `PANEL_SECRET`, `V1_USERNAME/V1_PASSWORD`,
-`AIS_PHOTO_TOKEN`, `AIS_ALLOWED_IPS`, `PHOTOS_DIR` (у всех есть dev-дефолты).
+`AIS_PHOTO_TOKEN`, `AIS_ALLOWED_IPS`, `PHOTOS_DIR` (у всех есть dev-дефолты;
+с `CENTER_ENV=production` центр требует задать секреты явно).
+
+## Развёртывание (ВМ Ubuntu)
+
+Боевой запуск центра — `deploy/README.md`: docker-compose (app + postgres +
+nginx), секреты в `deploy/.env`, миграции контейнером `migrate`, защита
+таблиц от TRUNCATE, TLS, бэкапы.
 
 ## Владелец проекта
 

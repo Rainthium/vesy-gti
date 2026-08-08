@@ -1,0 +1,19 @@
+# В образ центра попадают только pyproject/uv.lock/alembic.ini и пакеты
+# shared/agent/center/tools (см. deploy/Dockerfile); остальное — вне контекста.
+.git/
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+tests/
+docs/
+design/
+deploy/
+photos_data/
+*.sqlite3
+*.db
+.env
+*.log
+.DS_Store

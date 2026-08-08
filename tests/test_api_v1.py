@@ -784,6 +784,61 @@ class TestCreateApp:
         assert "/api/v1/weigh" in paths
         assert "/agents/ws" in paths
 
+    def test_healthz(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Живость для healthcheck'ов compose/nginx — отвечает без похода в БД."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://ves:ves@localhost:5443/ves")
+        monkeypatch.setenv("PHOTOS_DIR", str(tmp_path))
+        client = TestClient(create_app())
+        response = client.get("/healthz")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+    def test_production_refuses_missing_secrets(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CENTER_ENV=production без секретов — отказ старта с перечнем (правило №7)."""
+        monkeypatch.setenv("CENTER_ENV", "production")
+        for name in (
+            "DATABASE_URL",
+            "PANEL_SECRET",
+            "AIS_PHOTO_TOKEN",
+            "V1_USERNAME",
+            "V1_PASSWORD",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        with pytest.raises(RuntimeError) as err:
+            create_app()
+        for name in (
+            "DATABASE_URL",
+            "PANEL_SECRET",
+            "AIS_PHOTO_TOKEN",
+            "V1_USERNAME",
+            "V1_PASSWORD",
+        ):
+            assert name in str(err.value)
+
+    def test_production_refuses_dev_default_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Секрет, совпадающий с dev-дефолтом, в проде не принимается."""
+        monkeypatch.setenv("CENTER_ENV", "production")
+        monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://ves:x@db:5432/ves")
+        monkeypatch.setenv("PANEL_SECRET", "dev-only-panel-secret")
+        monkeypatch.setenv("AIS_PHOTO_TOKEN", "настоящий-токен-из-env")
+        monkeypatch.setenv("V1_PASSWORD", "admin")
+        with pytest.raises(RuntimeError, match="PANEL_SECRET"):
+            create_app()
+
+    def test_production_starts_with_explicit_secrets(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """С явно заданными секретами прод-сборка проходит (admin в v1 — явный выбор)."""
+        monkeypatch.setenv("CENTER_ENV", "production")
+        monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://ves:x@db:5432/ves")
+        monkeypatch.setenv("PANEL_SECRET", "s" * 32)
+        monkeypatch.setenv("AIS_PHOTO_TOKEN", "t" * 32)
+        monkeypatch.setenv("V1_USERNAME", "admin")
+        monkeypatch.setenv("V1_PASSWORD", "admin")
+        monkeypatch.setenv("PHOTOS_DIR", str(tmp_path))
+        app = create_app()
+        assert isinstance(app.state.hub, AgentHub)
+
 
 # ---------------------------------------------------------------------------
 # tools/ais_client: лёгкие проверки без сети

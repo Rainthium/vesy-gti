@@ -1,4 +1,4 @@
-# Дев-окружение центра. Продовый compose (app + nginx) появится к развёртыванию.
+# Дев-окружение центра (только postgres). Боевой compose — deploy/docker-compose.yml.
 # Порт 5443 — чтобы не конфликтовать с другими локальными postgres.
 services:
   postgres:

@@ -1,0 +1,87 @@
+# Боевой compose центра (ВМ Ubuntu): app + postgres + nginx.
+# Секреты — в deploy/.env (скопировать из .env.example, правило проекта №7).
+# Запуск из каталога deploy/:  docker compose up -d --build
+# Пошагово — deploy/README.md.
+name: ves-center
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ves
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?задайте в deploy/.env}
+      POSTGRES_DB: ves
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ves -d ves"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # применяет миграции и завершается; app стартует только после успеха
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://ves:${POSTGRES_PASSWORD}@postgres:5432/ves
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    environment:
+      CENTER_ENV: production  # отказ старта с dev-дефолтами (center/app.py)
+      DATABASE_URL: postgresql+psycopg://ves:${POSTGRES_PASSWORD}@postgres:5432/ves
+      PANEL_SECRET: ${PANEL_SECRET:?задайте в deploy/.env}
+      AIS_PHOTO_TOKEN: ${AIS_PHOTO_TOKEN:?задайте в deploy/.env}
+      V1_USERNAME: ${V1_USERNAME:-admin}
+      V1_PASSWORD: ${V1_PASSWORD:?задайте в deploy/.env (admin — осознанная совместимость с АИС)}
+      V1_WEIGH_TIMEOUT_S: ${V1_WEIGH_TIMEOUT_S:-120}
+      AIS_ALLOWED_IPS: ${AIS_ALLOWED_IPS:-}
+      PHOTOS_DIR: /data/photos
+    volumes:
+      - photos:/data/photos
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - uv
+        - run
+        - --no-sync
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      # - "443:443"  # включить после установки сертификата — deploy/README.md
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  photos:

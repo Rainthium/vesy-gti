@@ -22,9 +22,40 @@ from center.db.session import make_engine, make_session_factory
 from center.photos.router import PhotosConfig, create_photos_router
 from center.web.router import create_panel_router
 
+# dev-значения, с которыми боевой центр стартовать отказывается (правило №7)
+_DEV_DEFAULTS = {
+    "PANEL_SECRET": "dev-only-panel-secret",
+    "AIS_PHOTO_TOKEN": "dev-only-ais-token",
+}
+
+
+def _check_production_env() -> None:
+    """CENTER_ENV=production: секреты обязаны быть заданы явно.
+
+    V1_USERNAME/V1_PASSWORD могут остаться admin/admin (совместимый приём
+    запросов АИС, правило №7-исключение), но выбор должен быть явным —
+    переменная обязана присутствовать в окружении.
+    """
+    problems = []
+    if not os.environ.get("DATABASE_URL"):
+        problems.append("DATABASE_URL не задан")
+    for name, dev_value in _DEV_DEFAULTS.items():
+        value = os.environ.get(name)
+        if not value:
+            problems.append(f"{name} не задан")
+        elif value == dev_value:
+            problems.append(f"{name} совпадает с dev-дефолтом")
+    for name in ("V1_USERNAME", "V1_PASSWORD"):
+        if not os.environ.get(name):
+            problems.append(f"{name} не задан (admin допустим, но только явно)")
+    if problems:
+        raise RuntimeError("Отказ старта в проде (CENTER_ENV=production): " + "; ".join(problems))
+
 
 def create_app() -> FastAPI:
     """Фабрика приложения центра (конфигурация — из переменных окружения)."""
+    if os.environ.get("CENTER_ENV") == "production":
+        _check_production_env()
     engine = make_engine()
     session_factory = make_session_factory(engine)
     hub = AgentHub()
@@ -46,6 +77,12 @@ def create_app() -> FastAPI:
     )
 
     app = FastAPI(title="Весовая система — центр", docs_url=None, redoc_url=None)
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, str]:
+        """Живость процесса для healthcheck'ов compose и nginx (без похода в БД)."""
+        return {"status": "ok"}
+
     # сессии панели (подписанная cookie); секрет — из env, dev-дефолт для стенда
     app.add_middleware(
         SessionMiddleware,
