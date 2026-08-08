@@ -139,7 +139,7 @@ class ManualOperationFlow:
         record_uuid = uuid4()
 
         shots = capture_all(self._cameras, ffmpeg_path=self._ffmpeg_path)
-        photos, camera_errors = self._store_photos(record_uuid, weighed_at, shots)
+        photos, camera_errors = self._store_photos(record_uuid, weighed_at, shots, weight)
 
         tare: TareRecord | None = None
         netto: float | None = None
@@ -243,9 +243,10 @@ class ManualOperationFlow:
         record_uuid: UUID,
         weighed_at: datetime,
         shots: list[CameraShot],
+        weight_kg: float | None,
     ) -> tuple[list[StoredPhoto], list[str]]:
-        """Сохранить удачные снимки файлами (общий кирпич — shots.store_shots)."""
-        return store_shots(self._photos_dir, record_uuid, weighed_at, shots)
+        """Сохранить снимки с оверлеем (общий кирпич — shots.store_shots)."""
+        return store_shots(self._photos_dir, record_uuid, weighed_at, shots, weight_kg=weight_kg)
 
     @staticmethod
     def _remove_files(preview: ManualPreview) -> None:

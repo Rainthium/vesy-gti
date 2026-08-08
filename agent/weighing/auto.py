@@ -137,7 +137,16 @@ class AutoOperationRunner:
             shots = await asyncio.to_thread(
                 capture_all, self._cameras, ffmpeg_path=self._ffmpeg_path
             )
-            photos, camera_errors = store_shots(self._photos_dir, record_uuid, weighed_at, shots)
+            # прожиг оверлея — тоже CPU-работа (PIL, кадры 2560×1440):
+            # в поток, чтобы heartbeat и живой вес не замирали
+            photos, camera_errors = await asyncio.to_thread(
+                store_shots,
+                self._photos_dir,
+                record_uuid,
+                weighed_at,
+                shots,
+                weight_kg=cycle.captured_weight_kg,
+            )
             result = cycle.complete_capture(
                 camera_ok=not camera_errors, message="; ".join(camera_errors) or None
             )

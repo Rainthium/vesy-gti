@@ -94,6 +94,12 @@ class WeighingCycle:
         """Итог цикла; заполнен, когда state == DONE."""
         return self._result
 
+    @property
+    def captured_weight_kg(self) -> float | None:
+        """Зафиксированный вес в состоянии CAPTURE (для оверлея на снимках);
+        None вне CAPTURE — до фиксации и после complete_capture/abort."""
+        return self._candidate_weight if self._state is CycleState.CAPTURE else None
+
     def start(self) -> None:
         """Начать цикл (из IDLE)."""
         if self._state is not CycleState.IDLE:

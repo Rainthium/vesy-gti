@@ -31,7 +31,9 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 import uvicorn
@@ -366,9 +368,18 @@ def test_full_chain_emulator_agent_center_ais(
                     break
                 assert time.monotonic() < deadline, "не дождались догрузки файлов фото в центр"
                 await asyncio.sleep(0.3)
-            assert front_bytes == FRONT_JPEG  # байт-в-байт (правило №2)
             rear_status, rear_bytes = await asyncio.to_thread(_get_photo, base_url, rear_path)
-            assert rear_status == 200 and rear_bytes == REAR_JPEG
+            assert rear_status == 200
+
+            # правило №2: в центре лежит байт-в-байт то, что зафиксировал агент
+            record_uuid = UUID(hex=Path(front_path).name.split("_")[0])
+            local = {p.role: p for p in storage.photos_for(record_uuid)}
+            assert front_bytes == Path(local[CameraRole.FRONT].path).read_bytes()
+            assert rear_bytes == Path(local[CameraRole.REAR].path).read_bytes()
+            # оверлей прожжён при фиксации: кадр отличается от исходного
+            # с камеры, но остался JPEG родного разрешения
+            assert front_bytes != FRONT_JPEG and rear_bytes != REAR_JPEG
+            assert Image.open(io.BytesIO(front_bytes)).size == (64, 48)
 
             # --- 4. журнал центра: обе операции источника «АИС» ---
             with factory() as session:
