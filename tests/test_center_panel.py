@@ -48,6 +48,7 @@ from center.agents_ws.hub import AgentHub
 from center.db import repo
 from center.db.models import (
     Agent,
+    AgentStatus,
     Camera,
     Scale,
     ScaleKind,
@@ -59,8 +60,8 @@ from center.db.models import (
 from center.db.session import database_url, make_session_factory
 from center.web import queries
 from center.web.router import create_panel_router
-from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
-from shared.messages import PhotoMeta, WeighingRecord
+from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
+from shared.messages import CameraStatus, EquipmentStatus, PhotoMeta, WeighingRecord
 from shared.passwords import verify_password
 from tests.test_center_db import ALL_TABLES, _upgrade_head
 
@@ -659,6 +660,7 @@ class PanelEnv:
     scale_id: int
     weighing_id: int  # запись 01KG777AAA с тарой и фото
     taring_id: int
+    hub: AgentHub
 
 
 @pytest.fixture
@@ -700,9 +702,10 @@ def panel_env(db: sessionmaker[Session], tmp_path: Path) -> Iterator[PanelEnv]:
 
     app = FastAPI()
     app.add_middleware(SessionMiddleware, secret_key="test-secret", session_cookie="ves_test")
-    app.include_router(create_panel_router(db, AgentHub(), photos_dir=photos_dir))
+    hub = AgentHub()
+    app.include_router(create_panel_router(db, hub, photos_dir=photos_dir))
     client = TestClient(app)
-    yield PanelEnv(client, db, photos_dir, scale_id, weighing_id, taring_id)
+    yield PanelEnv(client, db, photos_dir, scale_id, weighing_id, taring_id, hub)
     client.close()
 
 
@@ -1030,3 +1033,60 @@ class TestSeedDemoCenter:
             assert journal_total == 40  # 6 тарирований + 34 взвешивания
             _, tares_total = queries.tare_list(session)
             assert tares_total == 6
+
+
+# ---------------------------------------------------------------------------
+# Дашборд: состояние индикатора и камер (запрос Игоря 09.08.2026)
+# ---------------------------------------------------------------------------
+
+
+def _set_agent_online(env: PanelEnv) -> None:
+    with env.factory() as session:
+        agent_id = session.execute(
+            select(Agent.id).where(Agent.scale_id == env.scale_id)
+        ).scalar_one()
+        repo.set_agent_status(session, agent_id, AgentStatus.ONLINE)
+
+
+class TestDashboardEquipment:
+    def test_indicator_and_each_camera_shown(self, panel_env: PanelEnv) -> None:
+        """Все проблемы видны на одном экране: индикатор и КАЖДАЯ камера
+        из последнего heartbeat, недоступная камера — красным."""
+        _login(panel_env)
+        _set_agent_online(panel_env)
+        panel_env.hub.update_equipment(
+            panel_env.scale_id,
+            EquipmentStatus(
+                scale_status=ScaleStatus.OK,
+                current_weight=12340.0,
+                stable=True,
+                cameras=[
+                    CameraStatus(role=CameraRole.FRONT, available=True),
+                    CameraStatus(role=CameraRole.REAR, available=False),
+                ],
+            ),
+        )
+        page = panel_env.client.get("/panel/").text
+        assert "Индикатор: ОК" in page
+        assert "Камера перед: ОК" in page
+        assert "Камера зад: недоступна" in page
+
+    def test_indicator_no_data_is_error(self, panel_env: PanelEnv) -> None:
+        """Индикатор без данных — ошибка на карточке (dot err)."""
+        _login(panel_env)
+        _set_agent_online(panel_env)
+        panel_env.hub.update_equipment(
+            panel_env.scale_id, EquipmentStatus(scale_status=ScaleStatus.NO_DATA)
+        )
+        page = panel_env.client.get("/panel/").text
+        assert "Индикатор: нет данных" in page
+        assert "Камеры: нет данных" in page  # cameras пуст — честное «нет данных»
+
+    def test_equipment_hidden_for_offline_agent(self, panel_env: PanelEnv) -> None:
+        """Для офлайн-агента стухшие статусы оборудования не показываются."""
+        _login(panel_env)
+        panel_env.hub.update_equipment(
+            panel_env.scale_id, EquipmentStatus(scale_status=ScaleStatus.OK)
+        )
+        page = panel_env.client.get("/panel/").text
+        assert "Индикатор" not in page

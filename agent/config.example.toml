@@ -10,8 +10,10 @@ scale_name = "Весы SCS-80"
 indicator_model = "CAS CI-201A"
 agent_id = "kyzyl-kyia-1"
 # ffmpeg нужен только для RTSP-запасного пути (пока работает ISAPI — не используется);
-# верхнеуровневый ключ обязан стоять ДО первой секции [xxx] (правило TOML)
+# верхнеуровневые ключи обязаны стоять ДО первой секции [xxx] (правило TOML)
 ffmpeg_path = "ffmpeg"
+# период фоновой проверки камер, сек (статусы на дашборде центра)
+camera_check_interval_s = 60.0
 
 [scale]
 driver = "cas22"

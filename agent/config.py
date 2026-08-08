@@ -114,6 +114,8 @@ class AgentConfig(_Section):
     storage: StorageSection
     web: WebSection
     ffmpeg_path: str = "ffmpeg"  # для RTSP-запасного пути
+    # период фоновой проверки камер (статусы для heartbeat/дашборда центра)
+    camera_check_interval_s: float = Field(default=60.0, gt=0)
 
     def camera_configs(self) -> list[CameraConfig]:
         return [camera.to_camera_config() for camera in self.cameras]

@@ -18,6 +18,21 @@
       {% if item.agent %}
       <div class="stat"><span class="dot {{ 'ok' if item.agent.version else '' }}"></span><span>Агент v{{ item.agent.version or '—' }} · {{ item.agent.channel.value }}</span></div>
       <div class="stat"><span class="dot {{ 'ok' if online else 'warn' }}"></span><span>Связь: {{ item.agent.last_seen_at | fmt_dt }}</span></div>
+      {# состояние оборудования из последнего heartbeat (запрос Игоря 09.08.2026:
+         индикатор и все камеры видны на одном экране) #}
+      {% set eq = equipment.get(item.scale.id) if online else none %}
+      {% if eq %}
+      {% set scale_ok = eq.scale_status.value == 'ok' %}
+      {% set scale_label = 'ОК' if scale_ok else ('ошибка порта' if eq.scale_status.value == 'port_error' else 'нет данных') %}
+      <div class="stat"><span class="dot {{ 'ok' if scale_ok else 'err' }}"></span><span>Индикатор: {{ scale_label }}{% if scale_ok and eq.current_weight is not none %} · {{ eq.current_weight | fmt_kg }} kg{% endif %}</span></div>
+      {% for camera in eq.cameras %}
+      <div class="stat"><span class="dot {{ 'ok' if camera.available else 'err' }}"></span><span>Камера {{ 'перед' if camera.role.value == 'front' else 'зад' }}: {{ 'ОК' if camera.available else 'недоступна' }}</span></div>
+      {% else %}
+      <div class="stat"><span class="dot warn"></span><span>Камеры: нет данных</span></div>
+      {% endfor %}
+      {% elif online %}
+      <div class="stat"><span class="dot warn"></span><span>Оборудование: ждём heartbeat</span></div>
+      {% endif %}
       {% else %}
       <div class="stat"><span class="dot"></span><span>Агент не создан</span></div>
       {% endif %}

@@ -14,7 +14,7 @@ from typing import Protocol
 from uuid import UUID
 
 from shared.enums import ErrorCode
-from shared.messages import TareRegistryUpdate, WeighRequest, WeighResult
+from shared.messages import EquipmentStatus, TareRegistryUpdate, WeighRequest, WeighResult
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,9 @@ class AgentHub:
         self._links: dict[int, AgentLink] = {}
         # request_id -> (scale_id, future результата)
         self._pending: dict[UUID, tuple[int, asyncio.Future[WeighResult]]] = {}
+        # последняя самодиагностика из hello/heartbeat (для дашборда панели:
+        # состояние индикатора и камер на одном экране, запрос Игоря 09.08.2026)
+        self._equipment: dict[int, EquipmentStatus] = {}
 
     # --- жизненный цикл соединений (вызывает WS-маршрут) ---
 
@@ -63,6 +66,9 @@ class AgentHub:
         """
         if self._links.get(scale_id) is link:
             del self._links[scale_id]
+            # оборудование офлайн-агента неизвестно — стухшие статусы
+            # индикатора/камер на дашборде вводили бы в заблуждение
+            self._equipment.pop(scale_id, None)
             return True
         return False
 
@@ -71,6 +77,15 @@ class AgentHub:
 
     def connected_scale_ids(self) -> list[int]:
         return list(self._links)
+
+    # --- самодиагностика оборудования (hello/heartbeat → дашборд панели) ---
+
+    def update_equipment(self, scale_id: int, equipment: EquipmentStatus) -> None:
+        self._equipment[scale_id] = equipment
+
+    def equipment(self, scale_id: int) -> EquipmentStatus | None:
+        """Последняя самодиагностика агента; None — агент офлайн/не слал."""
+        return self._equipment.get(scale_id)
 
     # --- команды взвешивания ---
 

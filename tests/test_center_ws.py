@@ -186,6 +186,21 @@ class TestAgentHubConnections:
         assert not hub.connected(1)
         assert hub.connected_scale_ids() == []
 
+    def test_equipment_stored_and_cleared_on_detach(self) -> None:
+        """Самодиагностика живёт, пока живо соединение; detach чужого линка
+        её не стирает (для дашборда панели)."""
+        hub = AgentHub()
+        link = FakeLink()
+        hub.attach(1, link)
+        hub.update_equipment(1, EquipmentStatus(scale_status=ScaleStatus.OK))
+        equipment = hub.equipment(1)
+        assert equipment is not None and equipment.scale_status is ScaleStatus.OK
+
+        hub.detach(1, FakeLink())  # чужой (вытесненный) линк
+        assert hub.equipment(1) is not None
+        hub.detach(1, link)  # текущее соединение умерло — статусы стухли
+        assert hub.equipment(1) is None
+
     def test_connected_scale_ids_lists_all(self) -> None:
         """connected_scale_ids перечисляет все подключённые весы."""
         hub = AgentHub()
@@ -881,6 +896,14 @@ class TestAgentsWsSession:
             assert version == AGENT_VERSION  # версия из hello записана
             assert last_seen_at is not None
             assert ws_env.hub.connected(ws_env.scale_id)
+
+    def test_hello_stores_equipment_and_disconnect_clears(self, ws_env: WsEnv) -> None:
+        """hello кладёт самодиагностику в хаб (дашборд), разрыв — очищает."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            _hello_and_registry(ws)
+            equipment = ws_env.hub.equipment(ws_env.scale_id)
+            assert equipment is not None and equipment.scale_status is ScaleStatus.OK
+        assert _wait_until(lambda: ws_env.hub.equipment(ws_env.scale_id) is None)
 
     def test_disconnect_sets_agent_offline(self, ws_env: WsEnv) -> None:
         """Разрыв соединения переводит агента в offline и снимает линк из хаба."""

@@ -30,7 +30,7 @@ from pathlib import Path
 import uvicorn
 
 import agent
-from agent.cameras.capture import CameraShot, capture
+from agent.cameras.capture import CameraConfig, CameraShot, capture
 from agent.config import AgentConfig, load_config
 from agent.drivers.base import ScaleState
 from agent.drivers.cas22 import Cas22Driver
@@ -42,7 +42,7 @@ from agent.web.services import AgentInfo
 from agent.weighing.auto import AutoConfig, AutoOperationRunner
 from agent.weighing.manual import ManualOperationFlow, ManualPreview
 from shared.enums import CameraRole, Operation
-from shared.messages import EquipmentStatus, TareRecord, WeighingRecord
+from shared.messages import CameraStatus, EquipmentStatus, TareRecord, WeighingRecord
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,52 @@ def cleanup_orphan_photos(storage: AgentStorage, photos_dir: Path) -> int:
     if removed:
         logger.info("уборка снимков-сирот: удалено %d файлов", removed)
     return removed
+
+
+class CameraHealth:
+    """Фоновая проверка камер: статусы для heartbeat и дашборда центра.
+
+    Раз в ``interval_s`` пробует снимок каждой камеры (недоступная камера —
+    это видно диспетчеру на экране объектов, запрос Игоря 09.08.2026).
+    Снимок-проба и снимок операции не конфликтуют: камеры отдают JPEG
+    любому числу клиентов.
+    """
+
+    def __init__(self, cameras: list[CameraConfig], *, interval_s: float, ffmpeg_path: str) -> None:
+        self._cameras = cameras
+        self._interval_s = interval_s
+        self._ffmpeg_path = ffmpeg_path
+        self._statuses: dict[CameraRole, CameraStatus] = {}
+
+    @property
+    def statuses(self) -> list[CameraStatus]:
+        return list(self._statuses.values())
+
+    async def check_once(self) -> None:
+        for camera in self._cameras:
+            shot = await asyncio.to_thread(capture, camera, ffmpeg_path=self._ffmpeg_path)
+            previous = self._statuses.get(camera.role)
+            self._statuses[camera.role] = CameraStatus(
+                role=camera.role,
+                available=shot.ok,
+                last_snapshot_at=(
+                    shot.captured_at
+                    if shot.ok
+                    else (previous.last_snapshot_at if previous else None)
+                ),
+            )
+            if not shot.ok:
+                logger.warning("проверка камеры: %s", shot.error)
+
+    async def run(self) -> None:
+        while True:
+            try:
+                await self.check_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("сбой цикла проверки камер")
+            await asyncio.sleep(self._interval_s)
 
 
 class AgentRuntime:
@@ -168,11 +214,16 @@ class AgentRuntime:
 
 def build_runtime(
     config: AgentConfig,
-) -> tuple[AgentRuntime, Cas22Driver, AgentStorage, CenterClient, PhotoUploader]:
+) -> tuple[AgentRuntime, Cas22Driver, AgentStorage, CenterClient, PhotoUploader, CameraHealth]:
     """Собрать все кирпичи агента (без запуска фоновых задач)."""
     driver = Cas22Driver(config.scale.port, baudrate=config.scale.baudrate)
     storage = AgentStorage(config.storage.db_path)
     config.storage.photos_dir.mkdir(parents=True, exist_ok=True)
+    camera_health = CameraHealth(
+        config.camera_configs(),
+        interval_s=config.camera_check_interval_s,
+        ffmpeg_path=config.ffmpeg_path,
+    )
 
     runner = AutoOperationRunner(
         scale_state=lambda: driver.state,
@@ -189,6 +240,7 @@ def build_runtime(
             scale_status=state.status,
             current_weight=state.weight_kg,
             stable=state.stable,
+            cameras=camera_health.statuses,
             pending_sync_count=storage.pending_count(),
         )
 
@@ -221,12 +273,12 @@ def build_runtime(
         ffmpeg_path=config.ffmpeg_path,
     )
     runtime = AgentRuntime(config, driver=driver, storage=storage, client=client, manual=manual)
-    return runtime, driver, storage, client, uploader
+    return runtime, driver, storage, client, uploader, camera_health
 
 
 async def run_agent(config: AgentConfig) -> None:
     """Запустить агента целиком; остановка — отменой (Ctrl-C / stop службы)."""
-    runtime, driver, storage, client, uploader = build_runtime(config)
+    runtime, driver, storage, client, uploader, camera_health = build_runtime(config)
     driver.start()
     cleanup_orphan_photos(storage, config.storage.photos_dir)
 
@@ -245,6 +297,7 @@ async def run_agent(config: AgentConfig) -> None:
     tasks = [
         asyncio.create_task(run_forever(client), name="center-client"),
         asyncio.create_task(uploader.run(), name="photo-uploader"),
+        asyncio.create_task(camera_health.run(), name="camera-health"),
         asyncio.create_task(server.serve(), name="operator-web"),
     ]
     try:

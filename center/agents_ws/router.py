@@ -102,6 +102,7 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                     continue
 
                 if isinstance(message, Hello):
+                    hub.update_equipment(scale_id, message.equipment)
                     await asyncio.to_thread(
                         _db,
                         lambda s, m=message: repo.set_agent_status(
@@ -112,6 +113,7 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                     await send_tare_registry(link)
 
                 elif isinstance(message, Heartbeat):
+                    hub.update_equipment(scale_id, message.equipment)
                     await asyncio.to_thread(
                         _db, lambda s: repo.set_agent_status(s, agent_id, AgentStatus.ONLINE)
                     )

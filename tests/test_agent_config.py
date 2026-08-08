@@ -23,13 +23,26 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from agent.cameras.capture import CameraConfig
 from agent.config import AgentConfig, load_config
-from agent.main import build_runtime, cleanup_orphan_photos, http_base_url, run_agent
+from agent.main import (
+    CameraHealth,
+    build_runtime,
+    cleanup_orphan_photos,
+    http_base_url,
+    run_agent,
+)
 from agent.sync.storage import AgentStorage, StoredPhoto
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 from shared.messages import TareRecord, WeighingRecord
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "agent" / "config.example.toml"
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def config_data(**overrides: object) -> dict[str, object]:
@@ -169,7 +182,7 @@ class TestBuildRuntime:
                 }
             )
         )
-        runtime, _driver, storage, _client, _uploader = build_runtime(config)
+        runtime, _driver, storage, _client, _uploader, _camera_health = build_runtime(config)
         try:
             info = runtime.info
             assert info.site_name == "Тестовый объект"
@@ -249,9 +262,30 @@ class TestBuildRuntime:
                 }
             )
         )
-        runtime, _, storage, _, _ = build_runtime(config)
+        runtime, _, storage, _, _, _ = build_runtime(config)
         try:
             with pytest.raises(ValueError, match="не настроена"):
                 runtime.camera_snapshot(CameraRole.REAR)
         finally:
             storage.close()
+
+
+class TestCameraHealth:
+    def test_unreachable_camera_reported_unavailable(self) -> None:
+        """Недоступная камера видна в статусах (heartbeat → дашборд центра)."""
+        health = CameraHealth(
+            [
+                CameraConfig(
+                    role=CameraRole.FRONT,
+                    snapshot_url=f"http://127.0.0.1:{_free_port()}/pic",
+                    timeout_s=0.3,
+                )
+            ],
+            interval_s=60.0,
+            ffmpeg_path="ffmpeg",
+        )
+        asyncio.run(health.check_once())
+        [status] = health.statuses
+        assert status.role is CameraRole.FRONT
+        assert status.available is False
+        assert status.last_snapshot_at is None  # удачного снимка ещё не было

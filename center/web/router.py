@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from center.agents_ws.hub import AgentHub
 from center.web import queries
 from shared.enums import WeighingSource
+from shared.messages import EquipmentStatus
 
 logger = logging.getLogger(__name__)
 
@@ -122,15 +123,35 @@ def create_panel_router(
 
     # --- экраны ---
 
+    def _equipment_map(scales: list[queries.DashboardScale]) -> dict[int, EquipmentStatus]:
+        """Последняя самодиагностика агентов (индикатор + камеры) по весам."""
+        return {
+            item.scale.id: equipment
+            for item in scales
+            if (equipment := hub.equipment(item.scale.id)) is not None
+        }
+
     @router.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request, user: PanelUser) -> HTMLResponse:
         scales = await asyncio.to_thread(_db, queries.dashboard_scales)
-        return render("dashboard.html", request, user=user, scales=scales)
+        return render(
+            "dashboard.html",
+            request,
+            user=user,
+            scales=scales,
+            equipment=_equipment_map(scales),
+        )
 
     @router.get("/fragments/dashboard", response_class=HTMLResponse)
     async def dashboard_fragment(request: Request, user: PanelUser) -> HTMLResponse:
         scales = await asyncio.to_thread(_db, queries.dashboard_scales)
-        return render("fragments/dashboard_grid.html", request, user=user, scales=scales)
+        return render(
+            "fragments/dashboard_grid.html",
+            request,
+            user=user,
+            scales=scales,
+            equipment=_equipment_map(scales),
+        )
 
     def _parse_filters(
         site_id: int | None,
