@@ -1,0 +1,213 @@
+"""Операции БД для серверной части центра (WS-сервер, позже API v1).
+
+Все функции синхронные (SQLAlchemy Session); асинхронный код вызывает их
+через ``asyncio.to_thread`` — объёмы малы (сотни строк в день).
+"""
+
+import hashlib
+import logging
+from datetime import UTC, datetime
+
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session
+
+from center.db.models import (
+    Agent,
+    AgentStatus,
+    TareRegistry,
+    Weighing,
+    WeighingPhoto,
+    weighing_checksum,
+)
+from shared.enums import CameraRole, ErrorCode, Operation
+from shared.messages import PhotoMeta, TareRecord, WeighingRecord
+from shared.tare import three_months_before
+
+logger = logging.getLogger(__name__)
+
+
+def hash_agent_token(token: str) -> str:
+    """Токен агента хранится только так (правило №7)."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def authenticate_agent(session: Session, token: str) -> Agent | None:
+    """Найти агента по токену; None — токен неизвестен."""
+    return session.execute(
+        select(Agent).where(Agent.token_hash == hash_agent_token(token))
+    ).scalar_one_or_none()
+
+
+def set_agent_status(
+    session: Session, agent_id: int, status: AgentStatus, *, version: str | None = None
+) -> None:
+    """Обновить статус связи и время последней активности агента."""
+    agent = session.get(Agent, agent_id)
+    if agent is None:
+        return
+    agent.status = status
+    agent.last_seen_at = datetime.now(UTC)
+    if version is not None:
+        agent.version = version
+    session.commit()
+
+
+def save_weighing_record(
+    session: Session,
+    scale_id: int,
+    record: WeighingRecord,
+    photos: list[PhotoMeta] | None = None,
+    *,
+    request_payload: dict[str, object] | None = None,
+) -> bool:
+    """Записать операцию в журнал центра; вернуть True, если запись новая.
+
+    Идемпотентно по uuid: повтор досылки той же записи — не ошибка
+    (False). Запись после вставки неизменяема (правило №2).
+    """
+    existing = session.execute(
+        select(Weighing.id).where(Weighing.uuid == record.uuid)
+    ).scalar_one_or_none()
+    if existing is not None:
+        return False
+
+    tare_weighing_id = None
+    if record.tare_weighing_uuid is not None:
+        tare_weighing_id = session.execute(
+            select(Weighing.id).where(Weighing.uuid == record.tare_weighing_uuid)
+        ).scalar_one_or_none()
+
+    photos = photos or []
+    checksum = weighing_checksum(
+        uuid=record.uuid,
+        operation=record.operation.value,
+        code=record.code.value,
+        massa=record.massa,
+        weighed_at=record.weighed_at,
+        vehicle_number=record.vehicle_number,
+        source=record.source.value,
+        photo_sha256s=[photo.sha256 for photo in photos],
+    )
+    row = Weighing(
+        uuid=record.uuid,
+        scale_id=scale_id,
+        operation=record.operation,
+        code=record.code,
+        massa=record.massa,
+        unit=record.unit,
+        stable=record.stable,
+        weighed_at=record.weighed_at,
+        vehicle_number=record.vehicle_number,
+        trailer_number=record.trailer_number,
+        tare_weighing_id=tare_weighing_id,
+        tare_value=record.tare_value,
+        netto=record.netto,
+        source=record.source,
+        operator=record.operator,
+        message=record.message,
+        request_payload=request_payload,
+        checksum=checksum,
+    )
+    session.add(row)
+    session.flush()
+    for photo in photos:
+        session.add(
+            WeighingPhoto(
+                weighing_id=row.id,
+                role=photo.role,
+                path=photo.filename,
+                sha256=photo.sha256,
+                size_bytes=photo.size_bytes,
+            )
+        )
+    # успешное тарирование обновляет единый реестр активных тар
+    if (
+        record.operation is Operation.TARING
+        and record.code in (ErrorCode.OK, ErrorCode.ERR_CAMERA)
+        and record.vehicle_number
+        and record.massa is not None
+    ):
+        _upsert_tare(session, row, record)
+    session.commit()
+    return True
+
+
+def _upsert_tare(session: Session, row: Weighing, record: WeighingRecord) -> None:
+    """Обновить активную тару номера ТС (реестр — снимок, обновляем на месте).
+
+    Более раннее тарирование не затирает более позднее (досылка офлайн-пачек
+    может идти не по порядку).
+    """
+    tared_at = record.weighed_at or datetime.now(UTC)
+    statement = (
+        pg_insert(TareRegistry)
+        .values(
+            vehicle_number=record.vehicle_number,
+            weighing_id=row.id,
+            tare_value=record.massa,
+            tared_at=tared_at,
+        )
+        .on_conflict_do_update(
+            index_elements=[TareRegistry.vehicle_number],
+            set_={"weighing_id": row.id, "tare_value": record.massa, "tared_at": tared_at},
+            where=(TareRegistry.tared_at <= tared_at),
+        )
+    )
+    session.execute(statement)
+
+
+def load_tare_registry(session: Session, *, now: datetime | None = None) -> list[TareRecord]:
+    """Снимок реестра действующих тар для репликации агентам (правило №4).
+
+    Просроченные записи (старше 3 календарных месяцев) не реплицируются.
+    """
+    moment = now or datetime.now(UTC)
+    threshold = three_months_before(moment)
+    rows = session.execute(
+        select(TareRegistry, Weighing.uuid)
+        .join(Weighing, Weighing.id == TareRegistry.weighing_id)
+        .where(TareRegistry.tared_at >= threshold)
+    ).all()
+    return [
+        TareRecord(
+            vehicle_number=tare.vehicle_number,
+            tare_value=tare.tare_value,
+            tared_at=tare.tared_at,
+            weighing_uuid=weighing_uuid,
+        )
+        for tare, weighing_uuid in rows
+    ]
+
+
+def find_active_tare(
+    session: Session, vehicle_number: str, *, now: datetime | None = None
+) -> TareRecord | None:
+    """Действующая тара номера ТС (для расчёта нетто в API v1)."""
+    moment = now or datetime.now(UTC)
+    row = session.execute(
+        select(TareRegistry, Weighing.uuid)
+        .join(Weighing, Weighing.id == TareRegistry.weighing_id)
+        .where(TareRegistry.vehicle_number == vehicle_number)
+        .where(TareRegistry.tared_at >= three_months_before(moment))
+    ).one_or_none()
+    if row is None:
+        return None
+    tare, weighing_uuid = row
+    return TareRecord(
+        vehicle_number=tare.vehicle_number,
+        tare_value=tare.tare_value,
+        tared_at=tare.tared_at,
+        weighing_uuid=weighing_uuid,
+    )
+
+
+__all__ = [
+    "CameraRole",
+    "authenticate_agent",
+    "find_active_tare",
+    "hash_agent_token",
+    "load_tare_registry",
+    "save_weighing_record",
+    "set_agent_status",
+]

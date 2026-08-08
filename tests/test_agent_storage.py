@@ -21,7 +21,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from agent.sync.storage import AgentStorage, StoredPhoto, three_months_before
+from agent.sync.storage import AgentStorage, StoredPhoto
 from shared import (
     CameraRole,
     ErrorCode,
@@ -30,6 +30,7 @@ from shared import (
     WeighingRecord,
     WeighingSource,
 )
+from shared.tare import three_months_before
 
 
 def make_record(**overrides: Any) -> WeighingRecord:
