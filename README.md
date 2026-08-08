@@ -50,6 +50,10 @@ uv run python -m tools.ais_client --vehicle 01KG777AAA       # имитатор 
 
 # администрирование центра (пользователи/объекты/весы/токены агентов):
 uv run python -m tools.center_admin --help
+
+# настоящий агент целиком (конфиг TOML — образец agent/config.example.toml):
+uv run python -m agent.main --config /путь/к/config.toml
+uv run python -m agent.main --config /путь/к/config.toml add-operator --login a.osmonov
 ```
 
 Конфигурация центра — env: `DATABASE_URL`, `PANEL_SECRET`, `V1_USERNAME/V1_PASSWORD`,

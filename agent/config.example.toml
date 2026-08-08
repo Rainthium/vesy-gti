@@ -1,0 +1,56 @@
+# Конфиг агента весового ПК — образец для СВХ «Кызыл-Кыя»
+# (значения из выгрузки UniServer 07.08.2026, docs/uniserver-kyzylkia.md §2а).
+#
+# Боевой файл: скопировать рядом со службой (C:/vesy-agent/config.toml),
+# вписать секреты. В git боевой конфиг НЕ попадает (правило №7):
+# здесь токен агента и пароли камер.
+
+site_name = "СВХ «Кызыл-Кыя»"
+scale_name = "Весы SCS-80"
+indicator_model = "CAS CI-201A"
+agent_id = "kyzyl-kyia-1"
+# ffmpeg нужен только для RTSP-запасного пути (пока работает ISAPI — не используется);
+# верхнеуровневый ключ обязан стоять ДО первой секции [xxx] (правило TOML)
+ffmpeg_path = "ffmpeg"
+
+[scale]
+driver = "cas22"
+port = "COM5"      # 9600 8-N-1, DTR/RTS не поднимать (правило №6)
+baudrate = 9600
+
+[cycle]
+zero_threshold_kg = 200.0    # НмПВ UniServer: 20 дискрет × 10 кг
+vehicle_threshold_kg = 500.0
+zero_timeout_s = 10.0
+vehicle_timeout_s = 90.0     # в UniServer явного нет — своё значение
+stable_duration_s = 5.0      # фиксация после 5 с неизменной массы
+stable_timeout_s = 30.0
+no_data_timeout_s = 5.0
+
+# Камеры Hikvision: основной путь — HTTP-snapshot ISAPI, запасной — RTSP.
+# Логин/пароль вписать в URL (см. выгрузку, вне git); спецсимволы в пароле
+# кодировать percent-encoding (@ → %40).
+[[cameras]]
+role = "front"
+snapshot_url = "http://ЛОГИН:ПАРОЛЬ@192.168.158.120/ISAPI/Streaming/channels/101/picture"
+rtsp_url = "rtsp://ЛОГИН:ПАРОЛЬ@192.168.158.120:554/Streaming/Channels/101"
+
+[[cameras]]
+role = "rear"
+snapshot_url = "http://ЛОГИН:ПАРОЛЬ@192.168.158.121/ISAPI/Streaming/channels/101/picture"
+rtsp_url = "rtsp://ЛОГИН:ПАРОЛЬ@192.168.158.121:554/Streaming/Channels/101"
+
+[center]
+# до включения TLS на центре — ws://, после — wss://
+url = "ws://vesy.gti.kg/agents/ws"
+# выпускает центр: docker compose exec app uv run python -m tools.center_admin create-agent --scale-id N
+token = "ВПИШИТЕ-ТОКЕН-АГЕНТА-ИЗ-CREATE-AGENT"
+
+[storage]
+db_path = "C:/vesy-agent/agent.sqlite3"
+photos_dir = "C:/vesy-agent/photos"
+
+[web]
+host = "127.0.0.1"   # интерфейс оператора только на этом ПК
+port = 8090          # 8087 занят UniServer на время параллельной работы
+session_secret = "СЛУЧАЙНАЯ-СТРОКА-32-СИМВОЛА"

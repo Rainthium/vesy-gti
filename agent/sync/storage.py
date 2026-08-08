@@ -379,6 +379,17 @@ class AgentStorage:
             weighing_uuid=UUID(row["weighing_uuid"]),
         )
 
+    def photo_paths(self) -> set[str]:
+        """Пути всех снимков, привязанных к записям журнала.
+
+        Для уборки снимков-сирот при старте агента: файл в photos_dir,
+        которого здесь нет, не принадлежит ни одной записи (погибшее
+        превью ручного режима) и подлежит удалению.
+        """
+        with self._lock:
+            rows = self._conn.execute("SELECT path FROM weighing_photos_local").fetchall()
+        return {row["path"] for row in rows}
+
     def tare_registry_size(self) -> int:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) AS n FROM tare_registry_replica").fetchone()
