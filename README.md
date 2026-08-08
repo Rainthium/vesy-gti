@@ -45,7 +45,7 @@ uv run ruff format . && uv run ruff check . && uv run mypy .
 # демо-стенды:
 uv run python -m tools.seed_demo_center            # демо-данные центра (пустая БД; вход demo/demo1234)
 uv run uvicorn center.app:create_app --factory --port 8080   # центр: /panel, /api/v1, /agents/ws
-uv run python -m tools.dev_operator_ui --offline   # интерфейс оператора агента (operator/operator)
+uv run python -m tools.dev_operator_ui   # интерфейс оператора агента (operator/operator; автономный режим по умолчанию, --online изображает связь с центром)
 uv run python -m tools.ais_client --vehicle 01KG777AAA       # имитатор запроса АИС
 
 # администрирование центра (пользователи/объекты/весы/токены агентов):

@@ -11,6 +11,7 @@
 
 import argparse
 import math
+import os
 import tempfile
 import time
 from datetime import UTC, datetime, timedelta
@@ -221,13 +222,27 @@ class DemoServices:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Интерфейс оператора с демо-данными")
     parser.add_argument("--port", type=int, default=8077)
+    # Автономный режим — ПО УМОЛЧАНИЮ: смысл стенда — кликать ручное
+    # взвешивание (запускалки типа предпросмотра не передают доп. флаги).
     parser.add_argument(
-        "--offline", action="store_true", help="автономный режим (центр недоступен)"
+        "--online",
+        action="store_true",
+        help="изобразить связь с центром (ручной режим заблокирован, как в бою)",
     )
-    parser.add_argument("--no-data", action="store_true", help="нет данных с индикатора")
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="(по умолчанию, флаг оставлен для совместимости)",
+    )
+    parser.add_argument(
+        "--no-data",
+        action="store_true",
+        default=os.environ.get("DEMO_NO_DATA") == "1",
+        help="нет данных с индикатора; env DEMO_NO_DATA=1",
+    )
     args = parser.parse_args()
 
-    services = DemoServices(offline=args.offline, no_data=args.no_data)
+    services = DemoServices(offline=not args.online, no_data=args.no_data)
     app = create_app(services, session_secret="dev-only-secret")
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
