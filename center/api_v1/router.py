@@ -198,8 +198,9 @@ def create_api_v1_router(
         code = result.record.code
         await asyncio.to_thread(_audit, request, code, result.record.uuid)
 
-        # ошибки цикла (кроме ERR_CAMERA — вес возвращается с предупреждением)
-        if code is not ErrorCode.OK and code is not ErrorCode.ERR_CAMERA:
+        # любая ошибка цикла — только {code, message}; ERR_CAMERA тоже:
+        # без снимков обеих камер операция не проводится (решение 09.08.2026)
+        if code is not ErrorCode.OK:
             return _error(code, result.record.message or code.value)
 
         response = await asyncio.to_thread(_build_success_response, request, result)

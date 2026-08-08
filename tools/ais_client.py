@@ -74,7 +74,7 @@ def main() -> None:
     try:
         parsed = json.loads(body)
         print(json.dumps(parsed, ensure_ascii=False, indent=2))
-        if parsed.get("code") not in ("OK", "ERR_CAMERA"):
+        if parsed.get("code") != "OK":
             sys.exit(1)
     except json.JSONDecodeError:
         print(body)

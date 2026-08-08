@@ -13,7 +13,7 @@
         <div class="record-title">
           <h1>Запись №{{ w.id }} · {{ 'Взвешивание' if is_weighing else 'Тарирование' }}</h1>
           <span class="pill {{ 'pill-info' if w.source.value == 'ais' else 'pill-warn' }}"><span class="dot"></span>{{ 'АИС' if w.source.value == 'ais' else 'Вручную (офлайн)' }}</span>
-          <span class="pill {{ 'pill-ok' if w.code.value in ('OK', 'ERR_CAMERA') else 'pill-err' }}"><span class="dot"></span>{{ w.code.value }}</span>
+          <span class="pill {{ 'pill-ok' if w.code.value == 'OK' else 'pill-err' }}"><span class="dot"></span>{{ w.code.value }}</span>
         </div>
         <div class="record-sub">{{ w.weighed_at | fmt_dt }} · {{ card.site.name }} · {{ card.scale.name }}{% if w.operator %} · оператор {{ w.operator }}{% endif %}</div>
       </div>

@@ -139,7 +139,14 @@ class ManualOperationFlow:
         record_uuid = uuid4()
 
         shots = capture_all(self._cameras, ffmpeg_path=self._ffmpeg_path)
-        photos, camera_errors = self._store_photos(record_uuid, weighed_at, shots, weight)
+        camera_errors = [shot.error or "камера недоступна" for shot in shots if not shot.ok]
+        if camera_errors:
+            # решение Игоря 09.08.2026: без снимков ОБЕИХ камер операция
+            # не проводится (файлы не сохранялись — сохранять нечего)
+            raise ManualFlowError(
+                "Операция не проведена — камера недоступна: " + "; ".join(camera_errors)
+            )
+        photos, _ = self._store_photos(record_uuid, weighed_at, shots, weight)
 
         tare: TareRecord | None = None
         netto: float | None = None
@@ -148,11 +155,10 @@ class ManualOperationFlow:
             if tare is not None:
                 netto = weight - tare.tare_value
 
-        code = ErrorCode.OK if not camera_errors else ErrorCode.ERR_CAMERA
         record = WeighingRecord(
             uuid=record_uuid,
             operation=operation,
-            code=code,
+            code=ErrorCode.OK,
             massa=weight,
             stable=True,
             weighed_at=weighed_at,
@@ -163,7 +169,6 @@ class ManualOperationFlow:
             netto=netto,
             source=WeighingSource.LOCAL_OFFLINE,
             operator=operator,
-            message="; ".join(camera_errors) or None,
         )
         preview = ManualPreview(
             preview_id=secrets.token_urlsafe(16),

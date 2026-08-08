@@ -3,7 +3,7 @@
 Покрытие AutoOperationRunner.handle():
 - счастливый путь: цикл до CAPTURE, снимки обеих камер, code OK,
   запись в журнале, файлы на диске байт-в-байт (правило №2);
-- ERR_CAMERA: вес не теряется, запись сохранена, в photos только удачный кадр;
+- ERR_CAMERA: без снимков обеих камер операция не проводится (решение 09.08.2026);
 - ошибки до фиксации веса (ERR_NOT_ZERO, ERR_SCALE_OFFLINE): результат
   возвращается, но локально НЕ сохраняется, камеры не дёргаются;
 - ERR_BUSY: параллельная команда отклоняется сразу и не пишется в журнал;
@@ -245,9 +245,9 @@ def test_happy_path_weighing_ok(env: RunnerEnv) -> None:
 # --- ERR_CAMERA ---
 
 
-def test_one_camera_failed_keeps_weight_and_saves(env: RunnerEnv) -> None:
-    """Сбой одной камеры: code=ERR_CAMERA, вес есть, запись СОХРАНЕНА,
-    в photos только удачный снимок, message содержит ошибку камеры."""
+def test_one_camera_failed_rejects_operation(env: RunnerEnv) -> None:
+    """Сбой одной камеры: операция НЕ проводится (решение 09.08.2026) —
+    code=ERR_CAMERA без веса, запись не создана, файлов на диске нет."""
     drive_to_capture(env.script)
     env.capture.shots = [
         CameraShot(role=CameraRole.FRONT, jpeg=FRONT_JPEG, captured_at=datetime.now(UTC)),
@@ -261,12 +261,12 @@ def test_one_camera_failed_keeps_weight_and_saves(env: RunnerEnv) -> None:
     record = run_handle(env, make_request()).record
 
     assert record.code is ErrorCode.ERR_CAMERA
-    assert record.massa == GROSS_KG  # вес зафиксирован несмотря на камеру
-    assert record.stable is True
-    assert record.message is not None and "rear" in record.message
-    assert [photo.role for photo in record.photos] == [CameraRole.FRONT]
-    assert Path(env.storage.photos_for(record.uuid)[0].path).read_bytes() == FRONT_JPEG
-    assert stored_record(env, record) is not None  # операция не теряется
+    assert record.massa is None  # вес НЕ возвращается: операции не было
+    assert record.message is not None and "не проведена" in record.message
+    assert "rear" in record.message
+    assert record.photos == []
+    assert stored_record(env, record) is None  # журнал пуст
+    assert list(env.photos_dir.rglob("*.jpeg")) == []  # файлов не осталось
 
 
 # --- ошибки до фиксации веса: локально не сохраняются ---

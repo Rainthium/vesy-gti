@@ -13,9 +13,11 @@
   отправки weigh_result — обрыв связи её не теряет, досылка offline_sync
   доведёт до центра (приём идемпотентен по uuid), ack пометит synced,
   после чего PhotoUploader дольёт файлы снимков;
-- операции, не дошедшие до фиксации веса (ERR_NOT_ZERO и т.п.), локально
-  не сохраняются: живой weigh_result донесёт код до АИС, а при обрыве
-  связи запрос АИС всё равно уже завершился тайм-аутом центра.
+- операции без результата — ошибки цикла (ERR_NOT_ZERO и т.п.) и отказ
+  из-за камер (ERR_CAMERA: без снимков обеих камер операция не проводится,
+  решение 09.08.2026) — локально не сохраняются: живой weigh_result донесёт
+  код до АИС, а при обрыве связи запрос АИС всё равно уже завершился
+  тайм-аутом центра.
 
 Одновременно выполняется не больше одной операции: параллельная команда
 сразу получает ERR_BUSY (весы физически одни).
@@ -137,9 +139,21 @@ class AutoOperationRunner:
             shots = await asyncio.to_thread(
                 capture_all, self._cameras, ffmpeg_path=self._ffmpeg_path
             )
+            camera_errors = [shot.error or "камера недоступна" for shot in shots if not shot.ok]
+            if camera_errors:
+                # решение Игоря 09.08.2026: без снимков ОБЕИХ камер операция
+                # не проводится — вес не возвращается, запись не создаётся
+                cycle.complete_capture(camera_ok=False, message="; ".join(camera_errors))
+                return WeighingRecord(
+                    uuid=record_uuid,
+                    operation=request.operation,
+                    code=ErrorCode.ERR_CAMERA,
+                    source=WeighingSource.AIS,
+                    message="операция не проведена, камера недоступна: " + "; ".join(camera_errors),
+                )
             # прожиг оверлея — тоже CPU-работа (PIL, кадры 2560×1440):
             # в поток, чтобы heartbeat и живой вес не замирали
-            photos, camera_errors = await asyncio.to_thread(
+            photos, _ = await asyncio.to_thread(
                 store_shots,
                 self._photos_dir,
                 record_uuid,
@@ -147,9 +161,7 @@ class AutoOperationRunner:
                 shots,
                 weight_kg=cycle.captured_weight_kg,
             )
-            result = cycle.complete_capture(
-                camera_ok=not camera_errors, message="; ".join(camera_errors) or None
-            )
+            result = cycle.complete_capture(camera_ok=True)
         else:
             done_result = cycle.result
             assert done_result is not None  # state == DONE

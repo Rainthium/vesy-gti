@@ -167,7 +167,7 @@ class CenterClient:
             )
             await connection.send(heartbeat.model_dump_json())
             # записи, появившиеся при живом соединении (например, после
-            # ERR_CAMERA или ручного режима), досылаются без ожидания
+            # ручного режима) досылаются без ожидания
             # реконнекта — подталкиваем очередь вместе с heartbeat
             await self._send_pending(connection)
 

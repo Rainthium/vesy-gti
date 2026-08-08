@@ -122,7 +122,7 @@ def main() -> None:
             tare = repo.find_active_tare(session, vehicle, now=at)
             massa = float(rng.randrange(27000, 44000, 10))
             source = WeighingSource.AIS if rng.random() < 0.8 else WeighingSource.LOCAL_OFFLINE
-            code = ErrorCode.OK if rng.random() < 0.9 else ErrorCode.ERR_CAMERA
+            code = ErrorCode.OK
             record = WeighingRecord(
                 uuid=uuid4(),
                 operation=Operation.WEIGHING,
@@ -137,7 +137,7 @@ def main() -> None:
                 netto=(massa - tare.tare_value) if tare else None,
                 source=source,
                 operator="А. Осмонов" if source is WeighingSource.LOCAL_OFFLINE else None,
-                message="камера rear недоступна" if code is ErrorCode.ERR_CAMERA else None,
+                message=None,
             )
             repo.save_weighing_record(session, scale_id, record)
 

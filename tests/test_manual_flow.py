@@ -4,7 +4,7 @@
 - ready(): каждый фактор готовности по отдельности ломает кнопку;
 - prepare(): отказы (ManualFlowError, превью и файлов нет) и успех —
   подстановка тары из реплики реестра, расчёт нетто (правило №4),
-  нормализация номеров, снимки байт-в-байт (правило №2), ERR_CAMERA
+  нормализация номеров, снимки байт-в-байт (правило №2), отказ без камер
   при сбое одной камеры, замена неподтверждённого превью;
 - commit(): запись в журнале, фото привязаны, файлы не удаляются,
   повторный/чужой id → ManualFlowError без записи;
@@ -365,9 +365,9 @@ class TestPrepareSuccess:
             assert photo.sha256 == hashlib.sha256(jpeg).hexdigest()
             assert photo.size_bytes == len(jpeg)
 
-    def test_one_camera_failed_is_err_camera(self, env: FlowEnv, http_camera: str) -> None:
-        """Сбой одной камеры: вес не теряется — code=ERR_CAMERA, текст ошибки
-        в message, удачный снимок сохранён."""
+    def test_one_camera_failed_rejects_operation(self, env: FlowEnv, http_camera: str) -> None:
+        """Сбой одной камеры: операция НЕ проводится (решение 09.08.2026) —
+        ManualFlowError с текстом для оператора, файлов и записи нет."""
         cameras = [
             CameraConfig(role=CameraRole.FRONT, snapshot_url=f"{http_camera}/front.jpg"),
             CameraConfig(
@@ -376,13 +376,11 @@ class TestPrepareSuccess:
                 timeout_s=0.5,
             ),
         ]
-        preview = prepare_weighing(env.make_flow(cameras))
-        record = preview.record
-        assert record.code is ErrorCode.ERR_CAMERA
-        assert record.message is not None and "rear" in record.message
-        assert record.massa == 43310.0  # вес зафиксирован несмотря на камеру
-        assert [photo.role for photo in preview.photos] == [CameraRole.FRONT]
-        assert Path(preview.photos[0].path).read_bytes() == FRONT_JPEG
+        flow = env.make_flow(cameras)
+        with pytest.raises(ManualFlowError, match="не проведена"):
+            prepare_weighing(flow)
+        assert flow.pending() is None  # превью не создано
+        assert list(env.photos_dir.rglob("*.jpeg")) == []  # файлов не осталось
 
     def test_new_prepare_replaces_old_preview(self, env: FlowEnv, http_camera: str) -> None:
         """Повторная фиксация заменяет неподтверждённое превью,

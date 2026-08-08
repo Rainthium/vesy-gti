@@ -38,11 +38,6 @@
         </div>
       {% endif %}
 
-      {% if preview.record.code.value == 'ERR_CAMERA' %}
-      <div class="warn"><b>Часть снимков не получена (ERR_CAMERA)</b>
-        <p>Вес сохранён с предупреждением.</p></div>
-      {% endif %}
-
       {# операция уже записана (одношагово, как в ВесыСофт) — только навигация #}
       <div class="result-actions">
         <a class="btn-primary" href="/manual/{{ preview.record.operation.value }}">Новая операция</a>

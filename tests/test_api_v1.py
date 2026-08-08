@@ -9,8 +9,8 @@
   матчится при любом порте запроса); ERR_AGENT_OFFLINE без линка;
 - состав ответа: успех (шесть базовых полей + tare/tare_datetime/netto),
   no_valid_tare без действующей тары, тарирование БЕЗ полей тары,
-  ошибки цикла — только {code, message}, ERR_CAMERA — полный успешный
-  состав, фото из БД, нормализация номера ТС, тайм-аут операции;
+  ошибки цикла (включая ERR_CAMERA с 09.08.2026) — только {code,
+  message}, фото из БД, нормализация номера ТС, тайм-аут операции;
 - audit_log: запись weigh_request_v1 без пароля, с code и record_uuid;
 - create_app: сборка приложения и конфиг из переменных окружения;
 - tools/ais_client: импорт и --help (без сети).
@@ -612,26 +612,23 @@ class TestWeighSuccessResponse:
             "message": "АТС не заехало за отведённое время",
         }
 
-    def test_err_camera_returns_full_success_shape(self, api_env: ApiEnv) -> None:
-        """ERR_CAMERA: вес зафиксирован → полный успешный состав полей,
-        code сигнализирует отсутствие снимка (контракт)."""
-        taring = _seed_taring(api_env)
+    def test_err_camera_is_error_without_weight(self, api_env: ApiEnv) -> None:
+        """ERR_CAMERA: операция не проведена (решение 09.08.2026) —
+        только {code, message}, веса и фото в ответе нет."""
         record = _make_record(
             code=ErrorCode.ERR_CAMERA,
-            message="нет снимка с камеры front",
-            tare_value=15300.0,
-            netto=28010.0,
-            tare_weighing_uuid=taring.uuid,
+            massa=None,
+            stable=False,
+            weighed_at=None,
+            message="операция не проведена, камера недоступна: rear",
         )
         self._attach(api_env, record)
 
         data = _post(api_env, vehicle_number="01KG777AAA").json()
-        assert set(data) == WEIGHING_SUCCESS_KEYS | {"message"}
-        assert data["code"] == "ERR_CAMERA"
-        assert data["massa"] == 43310.0
-        assert data["tare"] == 15300.0
-        assert data["netto"] == 28010.0
-        assert data["message"] == "нет снимка с камеры front"
+        assert data == {
+            "code": "ERR_CAMERA",
+            "message": "операция не проведена, камера недоступна: rear",
+        }
 
     def test_photo_paths_taken_from_db(self, api_env: ApiEnv) -> None:
         """Фото записи (front/rear) отдаются путями из БД."""

@@ -16,7 +16,7 @@ class ErrorCode(StrEnum):
     ERR_NOT_ZERO = "ERR_NOT_ZERO"  # весы не пусты перед началом операции
     ERR_VEHICLE_TIMEOUT = "ERR_VEHICLE_TIMEOUT"  # АТС не заехало за отведённое время
     ERR_UNSTABLE = "ERR_UNSTABLE"  # вес не стабилизировался за таймаут
-    ERR_CAMERA = "ERR_CAMERA"  # вес зафиксирован, но нет снимка (вес возвращается)
+    ERR_CAMERA = "ERR_CAMERA"  # камера недоступна — операция не проведена (реш. 09.08.2026)
     ERR_BUSY = "ERR_BUSY"  # на этих весах уже выполняется операция
     ERR_INTERNAL = "ERR_INTERNAL"  # прочее, детали в поле message
 
