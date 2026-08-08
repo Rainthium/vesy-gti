@@ -79,9 +79,11 @@ class WeighingRecord(BaseModel):
 
 
 class TareRecord(BaseModel):
-    """Строка реестра тарирований (активная тара одного номера ТС)."""
+    """Строка реестра тарирований — активная тара СЦЕПКИ (решение 09.08.2026:
+    тара привязана к паре голова+прицеп; None — тарирование без прицепа)."""
 
     vehicle_number: str
+    trailer_number: str | None = None
     tare_value: float
     tared_at: datetime
     weighing_uuid: UUID

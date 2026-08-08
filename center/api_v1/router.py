@@ -136,7 +136,8 @@ def create_api_v1_router(
             tare_datetime: str | None = None
             if tare_value is None and record.vehicle_number:
                 vehicle = record.vehicle_number
-                tare = _db(lambda s: repo.find_active_tare(s, vehicle))
+                trailer = record.trailer_number
+                tare = _db(lambda s: repo.find_active_tare(s, vehicle, trailer))
                 if tare is not None and record.massa is not None:
                     tare_value = tare.tare_value
                     netto = record.massa - tare.tare_value

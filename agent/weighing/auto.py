@@ -170,7 +170,8 @@ class AutoOperationRunner:
         vehicle = (request.vehicle_number or "").strip().upper() or None
         trailer = (request.trailer_number or "").strip().upper() or None
 
-        # правило №4: нетто только из тарирований системы, тара ≤ 3 месяцев
+        # правило №4 (ред. 09.08.2026): нетто только из тарирований системы,
+        # тара ≤ 3 месяцев и только совпавшей СЦЕПКИ голова+прицеп
         tare = None
         netto = None
         if (
@@ -179,7 +180,7 @@ class AutoOperationRunner:
             and vehicle is not None
             and weighed_at is not None
         ):
-            tare = self._storage.find_active_tare(vehicle, weighed_at)
+            tare = self._storage.find_active_tare(vehicle, weighed_at, trailer)
             if tare is not None:
                 netto = result.weight_kg - tare.tare_value
 

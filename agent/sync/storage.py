@@ -66,11 +66,15 @@ CREATE TABLE IF NOT EXISTS weighing_photos_local (
 CREATE INDEX IF NOT EXISTS idx_photos_local_upload
     ON weighing_photos_local (uploaded);
 
+-- Тара по ПАРЕ голова+прицеп (решение 09.08.2026); '' = без прицепа
+-- (NULL в первичном ключе SQLite невозможен)
 CREATE TABLE IF NOT EXISTS tare_registry_replica (
-    vehicle_number TEXT PRIMARY KEY,
+    vehicle_number TEXT NOT NULL,
+    trailer_number TEXT NOT NULL DEFAULT '',
     tare_value REAL NOT NULL,
     tared_at TEXT NOT NULL,
-    weighing_uuid TEXT NOT NULL
+    weighing_uuid TEXT NOT NULL,
+    PRIMARY KEY (vehicle_number, trailer_number)
 );
 
 -- Локальные операторы (architecture §3.4: список синхронизируется с центром;
@@ -166,6 +170,14 @@ class AgentStorage:
         with self._lock, self._conn:
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA foreign_keys = ON")
+            # реплика старой схемы (тара по одной голове, до 09.08.2026)
+            # пересоздаётся: это расходные данные, центр пришлёт снимок заново
+            columns = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(tare_registry_replica)").fetchall()
+            }
+            if columns and "trailer_number" not in columns:
+                self._conn.execute("DROP TABLE tare_registry_replica")
             self._conn.executescript(_SCHEMA)
 
     def close(self) -> None:
@@ -337,31 +349,41 @@ class AgentStorage:
         Возвращает размер новой реплики.
         """
         rows = [
-            (r.vehicle_number, r.tare_value, r.tared_at.isoformat(), str(r.weighing_uuid))
+            (
+                r.vehicle_number,
+                r.trailer_number or "",
+                r.tare_value,
+                r.tared_at.isoformat(),
+                str(r.weighing_uuid),
+            )
             for r in records
         ]
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM tare_registry_replica")
             self._conn.executemany(
                 "INSERT INTO tare_registry_replica"
-                " (vehicle_number, tare_value, tared_at, weighing_uuid)"
-                " VALUES (?, ?, ?, ?)",
+                " (vehicle_number, trailer_number, tare_value, tared_at, weighing_uuid)"
+                " VALUES (?, ?, ?, ?, ?)",
                 rows,
             )
         return len(rows)
 
-    def find_active_tare(self, vehicle_number: str, at: datetime) -> TareRecord | None:
-        """Действующая тара номера ТС: не старше 3 месяцев от момента ``at``.
+    def find_active_tare(
+        self, vehicle_number: str, at: datetime, trailer_number: str | None = None
+    ) -> TareRecord | None:
+        """Действующая тара СЦЕПКИ: пара голова+прицеп, не старше 3 месяцев.
 
-        None — действующей тары нет (нетто не считается, правило №4).
-        Naive-даты (без пояса) трактуются как UTC.
+        Тара подставляется только при совпадении ОБОИХ номеров (решение
+        09.08.2026); None — действующей тары нет (нетто не считается,
+        правило №4). Naive-даты (без пояса) трактуются как UTC.
         """
         if at.tzinfo is None:
             at = at.replace(tzinfo=UTC)
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM tare_registry_replica WHERE vehicle_number = ?",
-                (vehicle_number,),
+                "SELECT * FROM tare_registry_replica"
+                " WHERE vehicle_number = ? AND trailer_number = ?",
+                (vehicle_number, trailer_number or ""),
             ).fetchone()
         if row is None:
             return None
@@ -374,6 +396,7 @@ class AgentStorage:
             return None
         return TareRecord(
             vehicle_number=row["vehicle_number"],
+            trailer_number=row["trailer_number"] or None,
             tare_value=row["tare_value"],
             tared_at=tared_at,
             weighing_uuid=UUID(row["weighing_uuid"]),

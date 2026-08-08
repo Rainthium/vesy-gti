@@ -179,10 +179,12 @@ def put_tare(
     vehicle_number: str = VEHICLE,
     tare_value: float = TARE_KG,
     tared_at: datetime | None = None,
+    trailer_number: str | None = None,
 ) -> TareRecord:
     """Положить в реплику реестра единственную тару и вернуть её."""
     record = TareRecord(
         vehicle_number=vehicle_number,
+        trailer_number=trailer_number,
         tare_value=tare_value,
         tared_at=tared_at or datetime.now(UTC) - timedelta(days=10),
         weighing_uuid=uuid4(),
@@ -442,9 +444,9 @@ def test_stale_tare_is_ignored(env: RunnerEnv) -> None:
 
 
 def test_vehicle_and_trailer_normalized(env: RunnerEnv) -> None:
-    """Номера приводятся к upper и strip; тара ищется по нормализованному
-    номеру; нормализованные значения попадают и в сохранённую запись."""
-    put_tare(env.storage, vehicle_number=VEHICLE)
+    """Номера приводятся к upper и strip; тара СЦЕПКИ ищется уже по
+    нормализованной паре; нормализованные значения попадают и в запись."""
+    put_tare(env.storage, vehicle_number=VEHICLE, trailer_number="BD123AB")
     drive_to_capture(env.script)
     record = run_handle(
         env, make_request(vehicle_number="  01kg777aaa ", trailer_number=" bd123ab ")
@@ -457,6 +459,36 @@ def test_vehicle_and_trailer_normalized(env: RunnerEnv) -> None:
     assert saved is not None
     assert saved.vehicle_number == VEHICLE
     assert saved.trailer_number == "BD123AB"
+
+
+def test_tare_of_other_trailer_not_applied(env: RunnerEnv) -> None:
+    """Правило №4 (ред. 09.08.2026): смена прицепа = нет действующей тары.
+
+    Тарирование было со старым прицепом — при взвешивании с другим прицепом
+    (и при взвешивании вовсе без прицепа) тара НЕ подставляется."""
+    put_tare(env.storage, vehicle_number=VEHICLE, trailer_number="OLD01AB")
+    drive_to_capture(env.script)
+    record = run_handle(env, make_request(vehicle_number=VEHICLE, trailer_number="NEW02CD")).record
+
+    assert record.code is ErrorCode.OK
+    assert record.tare_value is None and record.netto is None  # чужая сцепка
+
+    drive_to_capture(env.script)
+    record = run_handle(env, make_request(vehicle_number=VEHICLE)).record
+    assert record.tare_value is None and record.netto is None  # без прицепа
+
+
+def test_tare_without_trailer_only_for_solo_vehicle(env: RunnerEnv) -> None:
+    """Тарирование без прицепа действует только для машины без прицепа."""
+    put_tare(env.storage, vehicle_number=VEHICLE, trailer_number=None)
+    drive_to_capture(env.script)
+    record = run_handle(env, make_request(vehicle_number=VEHICLE, trailer_number="BD123AB")).record
+    assert record.tare_value is None  # с прицепом — соло-тара не подходит
+
+    drive_to_capture(env.script)
+    record = run_handle(env, make_request(vehicle_number=VEHICLE)).record
+    assert record.tare_value == TARE_KG  # без прицепа — подошла
+    assert record.netto == GROSS_KG - TARE_KG
 
 
 @pytest.mark.parametrize("blank", ["", "   "], ids=["empty", "whitespace"])

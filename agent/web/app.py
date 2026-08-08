@@ -256,12 +256,21 @@ def create_app(services: AgentServices, *, session_secret: str) -> FastAPI:
         return render("manual_result.html", request, operator=operator, preview=preview)
 
     @app.get("/manual-fragments/tare-hint", response_class=HTMLResponse)
-    def tare_hint(request: Request, operator: Operator, vehicle_number: str = "") -> HTMLResponse:
-        """Подсказка «по номеру головы найдена тара …» (HTMX по вводу номера)."""
+    def tare_hint(
+        request: Request,
+        operator: Operator,
+        vehicle_number: str = "",
+        trailer_number: str = "",
+    ) -> HTMLResponse:
+        """Подсказка «по сцепке найдена тара …» (HTMX по вводу номеров).
+
+        Тара ищется по ПАРЕ голова+прицеп (решение 09.08.2026) — смена
+        прицепа в форме сразу убирает подсказку чужой тары.
+        """
         tare = None
         number = vehicle_number.strip().upper()
         if number:
-            tare = services.find_active_tare(number)
+            tare = services.find_active_tare(number, trailer_number.strip().upper() or None)
         return render("fragments/tare_hint.html", request, operator=operator, tare=tare)
 
     # --- живой вес ---

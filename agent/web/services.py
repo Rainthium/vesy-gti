@@ -88,6 +88,9 @@ class AgentServices(Protocol):
         с немедленной записью в журнал. ManualFlowError — текст для формы."""
         ...
 
-    def find_active_tare(self, vehicle_number: str) -> TareRecord | None:
-        """Действующая тара номера ТС из локальной реплики (подсказка в форме)."""
+    def find_active_tare(
+        self, vehicle_number: str, trailer_number: str | None = None
+    ) -> TareRecord | None:
+        """Действующая тара СЦЕПКИ из локальной реплики (подсказка в форме);
+        подставляется только при совпадении обоих номеров (решение 09.08.2026)."""
         ...

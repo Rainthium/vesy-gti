@@ -150,22 +150,23 @@ def save_weighing_record(
 
 
 def _upsert_tare(session: Session, row: Weighing, record: WeighingRecord) -> None:
-    """Обновить активную тару номера ТС (реестр — снимок, обновляем на месте).
+    """Обновить активную тару СЦЕПКИ (реестр — снимок, обновляем на месте).
 
-    Более раннее тарирование не затирает более позднее (досылка офлайн-пачек
-    может идти не по порядку).
+    Ключ — пара голова+прицеп (решение 09.08.2026). Более раннее тарирование
+    не затирает более позднее (досылка офлайн-пачек может идти не по порядку).
     """
     tared_at = record.weighed_at or datetime.now(UTC)
     statement = (
         pg_insert(TareRegistry)
         .values(
             vehicle_number=record.vehicle_number,
+            trailer_number=record.trailer_number or "",
             weighing_id=row.id,
             tare_value=record.massa,
             tared_at=tared_at,
         )
         .on_conflict_do_update(
-            index_elements=[TareRegistry.vehicle_number],
+            index_elements=[TareRegistry.vehicle_number, TareRegistry.trailer_number],
             set_={"weighing_id": row.id, "tare_value": record.massa, "tared_at": tared_at},
             where=(TareRegistry.tared_at <= tared_at),
         )
@@ -188,6 +189,7 @@ def load_tare_registry(session: Session, *, now: datetime | None = None) -> list
     return [
         TareRecord(
             vehicle_number=tare.vehicle_number,
+            trailer_number=tare.trailer_number or None,
             tare_value=tare.tare_value,
             tared_at=tare.tared_at,
             weighing_uuid=weighing_uuid,
@@ -197,14 +199,24 @@ def load_tare_registry(session: Session, *, now: datetime | None = None) -> list
 
 
 def find_active_tare(
-    session: Session, vehicle_number: str, *, now: datetime | None = None
+    session: Session,
+    vehicle_number: str,
+    trailer_number: str | None = None,
+    *,
+    now: datetime | None = None,
 ) -> TareRecord | None:
-    """Действующая тара номера ТС (для расчёта нетто в API v1)."""
+    """Действующая тара СЦЕПКИ голова+прицеп (для расчёта нетто в API v1).
+
+    Тара подставляется только при совпадении ОБОИХ номеров (решение
+    09.08.2026); тарирование без прицепа действует только для машины
+    без прицепа.
+    """
     moment = now or datetime.now(UTC)
     row = session.execute(
         select(TareRegistry, Weighing.uuid)
         .join(Weighing, Weighing.id == TareRegistry.weighing_id)
         .where(TareRegistry.vehicle_number == vehicle_number)
+        .where(TareRegistry.trailer_number == (trailer_number or ""))
         .where(TareRegistry.tared_at >= three_months_before(moment))
     ).one_or_none()
     if row is None:
@@ -212,6 +224,7 @@ def find_active_tare(
     tare, weighing_uuid = row
     return TareRecord(
         vehicle_number=tare.vehicle_number,
+        trailer_number=tare.trailer_number or None,
         tare_value=tare.tare_value,
         tared_at=tare.tared_at,
         weighing_uuid=weighing_uuid,

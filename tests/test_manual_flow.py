@@ -95,10 +95,12 @@ def put_tare(
     vehicle_number: str = VEHICLE,
     tare_value: float = 15300.0,
     tared_at: datetime | None = None,
+    trailer_number: str | None = None,
 ) -> TareRecord:
     """Положить в реплику реестра единственную тару и вернуть её."""
     record = TareRecord(
         vehicle_number=vehicle_number,
+        trailer_number=trailer_number,
         tare_value=tare_value,
         tared_at=tared_at or datetime.now(UTC) - timedelta(days=10),
         weighing_uuid=uuid4(),
@@ -293,13 +295,35 @@ class TestPrepareSuccess:
 
     def test_vehicle_and_trailer_normalized(self, env: FlowEnv) -> None:
         """Номера приводятся к верхнему регистру и обрезаются по краям;
-        тара ищется уже по нормализованному номеру."""
-        put_tare(env.storage, vehicle_number=VEHICLE)
+        тара СЦЕПКИ ищется уже по нормализованной паре."""
+        put_tare(env.storage, vehicle_number=VEHICLE, trailer_number="BD123AB")
         flow = env.make_flow()
         preview = prepare_weighing(flow, vehicle_number="  01kg777aaa ", trailer_number=" bd123ab ")
         assert preview.record.vehicle_number == VEHICLE
         assert preview.record.trailer_number == "BD123AB"
-        assert preview.record.tare_value == 15300.0  # тара нашлась по upper-номеру
+        assert preview.record.tare_value == 15300.0  # тара нашлась по upper-паре
+
+    def test_tare_of_other_trailer_not_applied(self, env: FlowEnv) -> None:
+        """Правило №4 (ред. 09.08.2026): смена прицепа = нет действующей тары."""
+        put_tare(env.storage, vehicle_number=VEHICLE, trailer_number="OLD01AB")
+        preview = prepare_weighing(env.make_flow(), trailer_number="NEW02CD")
+        assert preview.record.tare_value is None
+        assert preview.no_valid_tare is True
+
+    def test_tare_without_trailer_only_for_solo_vehicle(self, env: FlowEnv) -> None:
+        """Соло-тарирование действует только для машины без прицепа
+        (зеркало кейса авторежима из test_auto_runner)."""
+        put_tare(env.storage, vehicle_number=VEHICLE, trailer_number=None)
+        # с прицепом соло-тара не подставляется, нетто не считается
+        preview = prepare_weighing(env.make_flow(), trailer_number="BD123AB")
+        assert preview.record.tare_value is None
+        assert preview.record.netto is None
+        assert preview.no_valid_tare is True
+        # без прицепа — тара подошла, нетто = брутто − тара
+        preview = prepare_weighing(env.make_flow())
+        assert preview.record.tare_value == 15300.0
+        assert preview.record.netto == 43310.0 - 15300.0
+        assert preview.no_valid_tare is False
 
     @pytest.mark.parametrize("trailer", [None, "", "   "])
     def test_empty_trailer_becomes_none(self, env: FlowEnv, trailer: str | None) -> None:

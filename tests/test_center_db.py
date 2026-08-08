@@ -78,7 +78,7 @@ ALL_TABLES = (
     "weighing_photos",
 )
 
-HEAD_REVISION = "00579b2541c6"
+HEAD_REVISION = "a1b2c3d4e5f6"  # тара по паре голова+прицеп (09.08.2026)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -389,7 +389,7 @@ class TestModelGraph:
         assert [p.sha256 for p in photos] == [SHA_A, SHA_B]
         assert all(p.weighing_id == weighing_id for p in photos)
 
-        tare = db_session.get(TareRegistry, "01KG123ABC")
+        tare = db_session.get(TareRegistry, ("01KG123ABC", ""))
         assert tare is not None
         assert tare.weighing_id == weighing_id
         assert tare.tare_value == 7500.0
@@ -561,7 +561,7 @@ class TestImmutability:
         )
         db_session.commit()
         db_session.expire_all()
-        tare = db_session.get(TareRegistry, "01KG123ABC")
+        tare = db_session.get(TareRegistry, ("01KG123ABC", ""))
         assert tare is not None
         assert tare.tare_value == 7600.0
 

@@ -172,7 +172,9 @@ class FakeServices:
         self.manual_capture_args = (operation, vehicle_number, trailer_number, operator)
         return self.manual_preview
 
-    def find_active_tare(self, vehicle_number: str) -> TareRecord | None:
+    def find_active_tare(
+        self, vehicle_number: str, trailer_number: str | None = None
+    ) -> TareRecord | None:
         return self.tare_hint
 
 

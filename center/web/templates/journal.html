@@ -1,11 +1,11 @@
 {% extends "base.html" %}
-{% block title %}Журнал — Весовая система{% endblock %}
+{% block title %}Взвешивания — Весовая система{% endblock %}
 {% block body %}
 {% set active_tab = 'journal' %}
 {% include "_header.html" %}
 <main class="content">
   <div class="page-head">
-    <h1>Журнал взвешиваний</h1>
+    <h1>Взвешивания</h1>
     <span class="page-meta">Всего записей под фильтром: {{ total }}</span>
   </div>
   <form method="get" action="/panel/journal" class="filters" id="journal-filters">

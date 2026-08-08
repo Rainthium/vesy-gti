@@ -56,10 +56,16 @@ def make_record(**overrides: Any) -> WeighingRecord:
     return WeighingRecord(**fields)
 
 
-def make_tare(vehicle_number: str, tared_at: datetime, tare_value: float = 7500.0) -> TareRecord:
-    """Строка реестра тарирований."""
+def make_tare(
+    vehicle_number: str,
+    tared_at: datetime,
+    tare_value: float = 7500.0,
+    trailer_number: str | None = None,
+) -> TareRecord:
+    """Строка реестра тарирований (trailer_number=None — тарирование без прицепа)."""
     return TareRecord(
         vehicle_number=vehicle_number,
+        trailer_number=trailer_number,
         tare_value=tare_value,
         tared_at=tared_at,
         weighing_uuid=uuid4(),
@@ -401,6 +407,21 @@ class TestTareRegistry:
         storage.replace_tare_registry([stale])
         assert storage.find_active_tare("01KG555EEE", self.NOW) is None
 
+    def test_pair_tare_only_for_matching_pair(self, storage: AgentStorage) -> None:
+        # Решение 09.08.2026: тара привязана к СЦЕПКЕ — нужны оба номера;
+        # соло-тарирование действует только для машины без прицепа
+        pair = make_tare("01KG111AAA", self.NOW - timedelta(days=10), trailer_number="BD123AB")
+        solo = make_tare("01KG222BBB", self.NOW - timedelta(days=10), tare_value=6800.0)
+        storage.replace_tare_registry([pair, solo])
+        # совпавшая пара — тара найдена вместе с номером прицепа
+        assert storage.find_active_tare("01KG111AAA", self.NOW, trailer_number="BD123AB") == pair
+        # чужой прицеп и запрос без прицепа — действующей тары нет
+        assert storage.find_active_tare("01KG111AAA", self.NOW, trailer_number="XX999YY") is None
+        assert storage.find_active_tare("01KG111AAA", self.NOW) is None
+        # соло-тара: без прицепа находится, с прицепом — нет
+        assert storage.find_active_tare("01KG222BBB", self.NOW) == solo
+        assert storage.find_active_tare("01KG222BBB", self.NOW, trailer_number="BD123AB") is None
+
     def test_utc_round_trip(self, storage: AgentStorage) -> None:
         # tared_at хранится в UTC и восстанавливается aware-датой без искажений
         tared_at = datetime(2026, 6, 15, 23, 59, 59, 999999, tzinfo=UTC)
@@ -500,6 +521,45 @@ class TestPersistence:
             assert found == tare
         finally:
             second.close()
+
+
+def test_old_replica_schema_recreated_with_trailer_column(tmp_path: Path) -> None:
+    """Реплика СТАРОЙ схемы (тара по одной голове, до 09.08.2026) пересоздаётся
+    при старте: данные расходные, центр пришлёт снимок заново."""
+    db_path = tmp_path / "agent.db"
+    conn = sqlite3.connect(db_path)
+    with conn:
+        # старая схема: ключ — только голова, колонки trailer_number нет
+        conn.execute(
+            "CREATE TABLE tare_registry_replica ("
+            " vehicle_number TEXT PRIMARY KEY, tare_value REAL,"
+            " tared_at TEXT, weighing_uuid TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO tare_registry_replica VALUES (?, ?, ?, ?)",
+            ("01KG111AAA", 7500.0, datetime(2026, 8, 1, tzinfo=UTC).isoformat(), str(uuid4())),
+        )
+    conn.close()
+
+    storage = AgentStorage(db_path)
+    try:
+        # таблица пересоздана по новой схеме: колонка trailer_number есть,
+        # старых строк нет (тара по одной голове больше не действует)
+        columns = {
+            row["name"] for row in storage._conn.execute("PRAGMA table_info(tare_registry_replica)")
+        }
+        assert "trailer_number" in columns
+        assert storage.tare_registry_size() == 0
+        assert storage.find_active_tare("01KG111AAA", datetime(2026, 8, 7, tzinfo=UTC)) is None
+        # реплика работоспособна: снимок центра встаёт и ищется по паре
+        tare = make_tare("01KG222BBB", datetime(2026, 8, 1, tzinfo=UTC), trailer_number="BD123AB")
+        assert storage.replace_tare_registry([tare]) == 1
+        found = storage.find_active_tare(
+            "01KG222BBB", datetime(2026, 8, 7, tzinfo=UTC), trailer_number="BD123AB"
+        )
+        assert found == tare
+    finally:
+        storage.close()
 
 
 class TestThreadSafety:

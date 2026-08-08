@@ -36,10 +36,12 @@
           <label>Номер головы
             <input name="vehicle_number" value="{{ vehicle_number }}" required autofocus
                    hx-get="/manual-fragments/tare-hint" hx-trigger="keyup changed delay:400ms"
-                   hx-target="#tare-hint" hx-swap="outerHTML" hx-include="this">
+                   hx-target="#tare-hint" hx-swap="outerHTML" hx-include="#manual-form">
           </label>
           <label>Номер прицепа
-            <input name="trailer_number" value="{{ trailer_number }}">
+            <input name="trailer_number" value="{{ trailer_number }}"
+                   hx-get="/manual-fragments/tare-hint" hx-trigger="keyup changed delay:400ms"
+                   hx-target="#tare-hint" hx-swap="outerHTML" hx-include="#manual-form">
           </label>
         </div>
         {% include "fragments/tare_hint.html" %}

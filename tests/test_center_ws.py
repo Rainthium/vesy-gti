@@ -7,7 +7,10 @@
 - repo на живом PostgreSQL: аутентификация по хешу токена, идемпотентная
   запись журнала с контрольной суммой, резолв tare_weighing_uuid, обновление
   реестра тар (OK/ERR_CAMERA — да, ERR_UNSTABLE и weighing — нет), досылка
-  не по порядку не затирает актуальную тару, фильтр 3 месяцев, фото;
+  не по порядку не затирает актуальную тару, фильтр 3 месяцев, фото,
+  тара по ПАРЕ голова+прицеп (решение 09.08.2026): регистрация под парой,
+  find_active_tare только при совпадении обоих номеров, сосуществование
+  тар одной головы с разными прицепами;
 - WS-эндпоинт через TestClient: закрытие 4401 без/с неверным токеном,
   hello → tare_registry + статус online, журнал без дублей, offline_sync
   с ack на все uuid, живучесть после мусора, offline при разрыве,
@@ -584,9 +587,11 @@ class TestRepoSaveWeighing:
 # ---------------------------------------------------------------------------
 
 
-def _tare_row(session: Session, vehicle_number: str) -> TareRegistry | None:
+def _tare_row(
+    session: Session, vehicle_number: str, trailer_number: str = ""
+) -> TareRegistry | None:
     session.expire_all()
-    return session.get(TareRegistry, vehicle_number)
+    return session.get(TareRegistry, (vehicle_number, trailer_number))
 
 
 class TestRepoTareRegistry:
@@ -685,6 +690,78 @@ class TestRepoTareRegistry:
 
         assert repo.find_active_tare(session, "01KG222BBB") is None  # просрочена
         assert repo.find_active_tare(session, "01KG999XYZ") is None  # неизвестна
+
+    def test_taring_with_trailer_registered_under_pair(
+        self, repo_env: tuple[Session, int, int]
+    ) -> None:
+        """Тарирование сцепки попадает в реестр под парой голова+прицеп,
+        а не под одной головой (решение 09.08.2026; '' = без прицепа)."""
+        session, scale_id, _ = repo_env
+        taring = _make_taring(trailer_number="BD123AB")
+        repo.save_weighing_record(session, scale_id, taring)
+
+        tare = _tare_row(session, "01KG123ABC", "BD123AB")
+        assert tare is not None
+        assert tare.tare_value == 7500.0
+        assert tare.weighing_id == _weighing_by_uuid(session, taring.uuid).id
+        # под соло-ключом (без прицепа) записи нет
+        assert _tare_row(session, "01KG123ABC") is None
+
+    def test_find_active_tare_matches_full_pair_only(
+        self, repo_env: tuple[Session, int, int]
+    ) -> None:
+        """find_active_tare: тара подставляется только при совпадении ОБОИХ
+        номеров; соло-тара действует только для машины без прицепа."""
+        session, scale_id, _ = repo_env
+        now = datetime.now(UTC)
+        pair = _make_taring(
+            vehicle_number="01KG111AAA",
+            trailer_number="BD123AB",
+            weighed_at=now - timedelta(days=5),
+        )
+        solo = _make_taring(
+            vehicle_number="01KG222BBB", massa=6800.0, weighed_at=now - timedelta(days=5)
+        )
+        repo.save_weighing_record(session, scale_id, pair)
+        repo.save_weighing_record(session, scale_id, solo)
+
+        # чужой прицеп и запрос без прицепа — действующей тары нет
+        assert repo.find_active_tare(session, "01KG111AAA", "XX999YY") is None
+        assert repo.find_active_tare(session, "01KG111AAA") is None
+        # совпавшая пара — тара найдена, прицеп восстановлен в записи
+        found = repo.find_active_tare(session, "01KG111AAA", "BD123AB")
+        assert found is not None
+        assert found.tare_value == 7500.0
+        assert found.trailer_number == "BD123AB"
+        assert found.weighing_uuid == pair.uuid
+        # соло-тара не находится при запросе с прицепом, но действует без него
+        assert repo.find_active_tare(session, "01KG222BBB", "BD123AB") is None
+        solo_found = repo.find_active_tare(session, "01KG222BBB")
+        assert solo_found is not None
+        assert solo_found.tare_value == 6800.0
+        assert solo_found.trailer_number is None
+
+    def test_same_head_different_trailers_coexist(self, repo_env: tuple[Session, int, int]) -> None:
+        """Составной PK (vehicle, trailer): тары одной головы с разными
+        прицепами сосуществуют — новое тарирование одной сцепки не затирает
+        тару другой."""
+        session, scale_id, _ = repo_env
+        now = datetime.now(UTC)
+        first = _make_taring(
+            trailer_number="BD111AA", massa=7000.0, weighed_at=now - timedelta(days=3)
+        )
+        second = _make_taring(
+            trailer_number="BD222BB", massa=8200.0, weighed_at=now - timedelta(days=1)
+        )
+        repo.save_weighing_record(session, scale_id, first)
+        repo.save_weighing_record(session, scale_id, second)
+
+        one = _tare_row(session, "01KG123ABC", "BD111AA")
+        other = _tare_row(session, "01KG123ABC", "BD222BB")
+        assert one is not None and one.tare_value == 7000.0
+        assert other is not None and other.tare_value == 8200.0
+        assert one.weighing_id == _weighing_by_uuid(session, first.uuid).id
+        assert other.weighing_id == _weighing_by_uuid(session, second.uuid).id
 
 
 # ---------------------------------------------------------------------------

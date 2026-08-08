@@ -156,8 +156,14 @@ class AgentRuntime:
             operator=operator,
         )
 
-    def find_active_tare(self, vehicle_number: str) -> TareRecord | None:
-        return self._storage.find_active_tare(vehicle_number.strip().upper(), datetime.now(UTC))
+    def find_active_tare(
+        self, vehicle_number: str, trailer_number: str | None = None
+    ) -> TareRecord | None:
+        return self._storage.find_active_tare(
+            vehicle_number.strip().upper(),
+            datetime.now(UTC),
+            (trailer_number or "").strip().upper() or None,
+        )
 
 
 def build_runtime(

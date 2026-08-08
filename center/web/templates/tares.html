@@ -16,13 +16,14 @@
     <div class="journal-scroll">
       <table class="journal">
         <thead><tr>
-          <th>Номер ТС</th><th class="num">Тара, kg</th><th>Дата тарирования</th>
+          <th>Номер ТС</th><th>Прицеп</th><th class="num">Тара, kg</th><th>Дата тарирования</th>
           <th>Объект</th><th>Действует до</th><th>Статус</th>
         </tr></thead>
         <tbody>
           {% for tare, weighing, scale, site in rows %}
           <tr class="clickable" onclick="location.href='/panel/journal/{{ weighing.id }}'">
             <td class="cell-vehicle">{{ tare.vehicle_number }}</td>
+            <td>{{ tare.trailer_number or "—" }}</td>
             <td class="num cell-gross">{{ tare.tare_value | fmt_kg }}</td>
             <td class="cell-muted">{{ tare.tared_at | fmt_dt }}</td>
             <td>{{ site.name }}</td>
@@ -30,7 +31,7 @@
             <td><span class="pill pill-ok"><span class="dot"></span>Действует</span></td>
           </tr>
           {% else %}
-          <tr><td colspan="6" class="empty">Действующих тарирований нет</td></tr>
+          <tr><td colspan="7" class="empty">Действующих тарирований нет</td></tr>
           {% endfor %}
         </tbody>
       </table>

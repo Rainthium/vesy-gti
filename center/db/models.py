@@ -243,11 +243,18 @@ class WeighingPhoto(Base):
 
 
 class TareRegistry(Base):
-    """Активная тара по номеру ТС — единый реестр, реплицируется агентам."""
+    """Активная тара СЦЕПКИ — единый реестр, реплицируется агентам.
+
+    Ключ — пара (голова, прицеп): смена прицепа не подставляет тару старой
+    сцепки (решение Игоря 09.08.2026). Пустая строка = без прицепа
+    (NULL в первичном ключе невозможен)."""
 
     __tablename__ = "tare_registry"
 
     vehicle_number: Mapped[str] = mapped_column(String(32), primary_key=True)
+    trailer_number: Mapped[str] = mapped_column(
+        String(32), primary_key=True, default="", server_default=""
+    )
     weighing_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("weighings.id"))
     tare_value: Mapped[float] = mapped_column(Float)
     tared_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

@@ -101,7 +101,7 @@ def main() -> None:
 
         # журнал: сначала тарирования, затем взвешивания с расчётом нетто
         now = datetime.now(UTC)
-        for vehicle, _ in VEHICLES:
+        for vehicle, trailer in VEHICLES:
             tare_at = now - timedelta(hours=rng.randint(24, 45))
             record = WeighingRecord(
                 uuid=uuid4(),
@@ -111,6 +111,7 @@ def main() -> None:
                 stable=True,
                 weighed_at=tare_at,
                 vehicle_number=vehicle,
+                trailer_number=trailer,  # тара привязана к сцепке (правило №4)
                 source=WeighingSource.AIS,
             )
             repo.save_weighing_record(session, rng.choice(scale_ids), record)
@@ -119,7 +120,7 @@ def main() -> None:
             vehicle, trailer = rng.choice(VEHICLES)
             at = now - timedelta(minutes=rng.randint(5, 2700))
             scale_id = rng.choice(scale_ids)
-            tare = repo.find_active_tare(session, vehicle, now=at)
+            tare = repo.find_active_tare(session, vehicle, trailer, now=at)
             massa = float(rng.randrange(27000, 44000, 10))
             source = WeighingSource.AIS if rng.random() < 0.8 else WeighingSource.LOCAL_OFFLINE
             code = ErrorCode.OK

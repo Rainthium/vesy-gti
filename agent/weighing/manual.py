@@ -121,6 +121,7 @@ class ManualOperationFlow:
         if not self._manual_allowed():
             raise ManualFlowError("Есть связь с центром — взвешивание проводится через АИС «СВХ»")
         vehicle_number = vehicle_number.strip().upper()
+        trailer_number = (trailer_number or "").strip().upper() or None
         if not vehicle_number:
             raise ManualFlowError("Укажите номер головы (номер ТС)")
 
@@ -151,7 +152,8 @@ class ManualOperationFlow:
         tare: TareRecord | None = None
         netto: float | None = None
         if operation is Operation.WEIGHING:
-            tare = self._storage.find_active_tare(vehicle_number, weighed_at)
+            # правило №4 (ред. 09.08.2026): тара — только совпавшей СЦЕПКИ
+            tare = self._storage.find_active_tare(vehicle_number, weighed_at, trailer_number)
             if tare is not None:
                 netto = weight - tare.tare_value
 
@@ -163,7 +165,7 @@ class ManualOperationFlow:
             stable=True,
             weighed_at=weighed_at,
             vehicle_number=vehicle_number,
-            trailer_number=(trailer_number or "").strip().upper() or None,
+            trailer_number=trailer_number,  # нормализован выше
             tare_value=tare.tare_value if tare else None,
             tare_weighing_uuid=tare.weighing_uuid if tare else None,
             netto=netto,

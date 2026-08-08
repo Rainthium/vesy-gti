@@ -364,9 +364,10 @@ def _seed_taring(
     *,
     massa: float = 15300.0,
     weighed_at: datetime | None = None,
+    trailer_number: str | None = None,
 ) -> WeighingRecord:
     """Посеять тарирование через журнал (как его записал бы WS-сервер)."""
-    taring = _make_taring(vehicle_number=vehicle_number, massa=massa)
+    taring = _make_taring(vehicle_number=vehicle_number, massa=massa, trailer_number=trailer_number)
     if weighed_at is not None:
         taring = taring.model_copy(update={"weighed_at": weighed_at})
     with env.factory() as session:
@@ -560,6 +561,35 @@ class TestWeighSuccessResponse:
         assert data["netto"] == 43310.0 - 15300.0
         assert data["tare_datetime"] == bishkek_iso(taring.weighed_at)
         assert "no_valid_tare" not in data
+
+    def test_center_computes_tare_for_matching_pair(self, api_env: ApiEnv) -> None:
+        """Фолбэк центра учитывает прицеп (решение 09.08.2026): тара той же
+        СЦЕПКИ голова+прицеп подставляется, нетто досчитывается."""
+        taring = _seed_taring(api_env, massa=15300.0, trailer_number="BD123AB")
+        record = _make_record(
+            trailer_number="BD123AB", tare_value=None, netto=None, tare_weighing_uuid=None
+        )
+        self._attach(api_env, record)
+
+        data = _post(api_env, vehicle_number="01KG777AAA", trailer_number="BD123AB").json()
+        assert data["code"] == "OK"
+        assert data["tare"] == 15300.0
+        assert data["netto"] == 43310.0 - 15300.0
+        assert data["tare_datetime"] == bishkek_iso(taring.weighed_at)
+        assert "no_valid_tare" not in data
+
+    def test_center_tare_of_other_trailer_gives_no_valid_tare(self, api_env: ApiEnv) -> None:
+        """Фолбэк центра: в реестре тара другого прицепа → действующей тары
+        нет, no_valid_tare = true (смена прицепа = новое тарирование)."""
+        _seed_taring(api_env, trailer_number="OLD01AB")
+        record = _make_record(trailer_number="NEW02CD", tare_value=None, netto=None)
+        self._attach(api_env, record)
+
+        data = _post(api_env, vehicle_number="01KG777AAA", trailer_number="NEW02CD").json()
+        assert data["code"] == "OK"
+        assert data["tare"] is None
+        assert data["netto"] is None
+        assert data["no_valid_tare"] is True
 
     def test_weighing_without_vehicle_no_valid_tare(self, api_env: ApiEnv) -> None:
         """Без номера ТС тару подставить не из чего: tare/netto = null +
