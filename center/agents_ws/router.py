@@ -118,7 +118,7 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                     saved = await asyncio.to_thread(
                         _db,
                         lambda s, m=message: repo.save_weighing_record(
-                            s, scale_id, m.record, m.photos
+                            s, scale_id, m.record, m.record.photos
                         ),
                     )
                     hub.resolve_result(message, scale_id=scale_id)
@@ -131,7 +131,7 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                     for record in message.records:
                         await asyncio.to_thread(
                             _db,
-                            lambda s, r=record: repo.save_weighing_record(s, scale_id, r),
+                            lambda s, r=record: repo.save_weighing_record(s, scale_id, r, r.photos),
                         )
                         # ack и за новые, и за повторные записи: агент должен
                         # пометить их synced в любом случае (идемпотентность)

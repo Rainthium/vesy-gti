@@ -28,7 +28,7 @@ from pathlib import Path
 from uuid import UUID
 
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
-from shared.messages import TareRecord, WeighingRecord
+from shared.messages import PhotoMeta, TareRecord, WeighingRecord
 from shared.tare import TARE_VALIDITY_MONTHS, three_months_before  # noqa: F401 — реэкспорт
 
 _SCHEMA = """
@@ -61,8 +61,12 @@ CREATE TABLE IF NOT EXISTS weighing_photos_local (
     path TEXT NOT NULL,
     sha256 TEXT NOT NULL,
     size_bytes INTEGER NOT NULL,
+    uploaded INTEGER NOT NULL DEFAULT 0 CHECK (uploaded IN (0, 1)),
     PRIMARY KEY (weighing_uuid, role)
 );
+
+CREATE INDEX IF NOT EXISTS idx_photos_local_upload
+    ON weighing_photos_local (uploaded);
 
 CREATE TABLE IF NOT EXISTS tare_registry_replica (
     vehicle_number TEXT PRIMARY KEY,
@@ -115,6 +119,12 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS weighing_photos_local_no_update
     BEFORE UPDATE ON weighing_photos_local
+    WHEN NOT (
+        NEW.weighing_uuid = OLD.weighing_uuid AND NEW.role = OLD.role
+        AND NEW.path = OLD.path AND NEW.sha256 = OLD.sha256
+        AND NEW.size_bytes = OLD.size_bytes
+        AND (NEW.uploaded = OLD.uploaded OR (OLD.uploaded = 0 AND NEW.uploaded = 1))
+    )
 BEGIN
     SELECT RAISE(ABORT, 'фото не редактируются (правило неизменяемости)');
 END;
@@ -129,6 +139,16 @@ class StoredPhoto:
     path: str
     sha256: str
     size_bytes: int
+
+
+def photo_meta(photo: StoredPhoto) -> PhotoMeta:
+    """Метаданные фото для протокола (имя файла — без локального пути)."""
+    return PhotoMeta(
+        role=photo.role,
+        filename=Path(photo.path).name,
+        sha256=photo.sha256,
+        size_bytes=photo.size_bytes,
+    )
 
 
 def _iso(moment: datetime | None) -> str | None:
@@ -239,13 +259,58 @@ class AgentStorage:
             return cursor.rowcount
 
     def pending_records(self, limit: int = 100) -> list[WeighingRecord]:
-        """Недосланные записи, старые первыми (для offline_sync)."""
+        """Недосланные записи, старые первыми (для offline_sync).
+
+        Метаданные фото включаются в записи (record.photos) — центр
+        зафиксирует их в контрольной сумме; файлы уедут отдельно.
+        """
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM weighings_local WHERE synced = 0 ORDER BY created_at, uuid LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [self._row_to_record(row) for row in rows]
+        records = []
+        for row in rows:
+            record = self._row_to_record(row)
+            photos = self.photos_for(record.uuid)
+            if photos:
+                record = record.model_copy(update={"photos": [photo_meta(p) for p in photos]})
+            records.append(record)
+        return records
+
+    def photos_to_upload(self, limit: int = 8) -> list[tuple[UUID, StoredPhoto]]:
+        """Фото досланных записей, ещё не загруженные в центр (файлами)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT p.* FROM weighing_photos_local p
+                JOIN weighings_local w ON w.uuid = p.weighing_uuid
+                WHERE p.uploaded = 0 AND w.synced = 1
+                ORDER BY w.created_at, p.role LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            (
+                UUID(row["weighing_uuid"]),
+                StoredPhoto(
+                    role=CameraRole(row["role"]),
+                    path=row["path"],
+                    sha256=row["sha256"],
+                    size_bytes=row["size_bytes"],
+                ),
+            )
+            for row in rows
+        ]
+
+    def mark_photo_uploaded(self, weighing_uuid: UUID, role: CameraRole) -> None:
+        """Пометить файл фото как принятый центром."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE weighing_photos_local SET uploaded = 1"
+                " WHERE weighing_uuid = ? AND role = ?",
+                (str(weighing_uuid), role.value),
+            )
 
     def pending_count(self) -> int:
         """Размер очереди досылки (для heartbeat и локального интерфейса)."""

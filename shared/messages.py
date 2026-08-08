@@ -73,6 +73,9 @@ class WeighingRecord(BaseModel):
     source: WeighingSource
     operator: str | None = None  # логин оператора при ручном режиме
     message: str | None = None  # детали при code != OK
+    # метаданные снимков: едут с записью и в weigh_result, и в offline_sync;
+    # сами файлы агент загружает отдельно по HTTP (см. decisions 08.08.2026)
+    photos: list[PhotoMeta] = Field(default_factory=list)
 
 
 class TareRecord(BaseModel):
@@ -108,12 +111,11 @@ class Heartbeat(BaseModel):
 
 
 class WeighResult(BaseModel):
-    """Результат операции по команде центра."""
+    """Результат операции по команде центра (фото — в record.photos)."""
 
     type: Literal["weigh_result"] = "weigh_result"
     request_id: UUID
     record: WeighingRecord
-    photos: list[PhotoMeta] = Field(default_factory=list)
 
 
 class OfflineSync(BaseModel):

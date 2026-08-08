@@ -559,9 +559,12 @@ class TestRepoSaveWeighing:
             .scalars()
             .all()
         )
+        # пути канонические (центр игнорирует имена файлов агента)
+        assert record.weighed_at is not None
+        day = record.weighed_at.strftime("%Y/%m/%d")
         assert [(p.role, p.path, p.sha256, p.size_bytes) for p in photo_rows] == [
-            (CameraRole.FRONT, "front.jpeg", SHA_A, 100),
-            (CameraRole.REAR, "rear.jpeg", SHA_B, 200),
+            (CameraRole.FRONT, f"/vesy/{day}/{record.uuid.hex}_photo1.jpeg", SHA_A, 100),
+            (CameraRole.REAR, f"/vesy/{day}/{record.uuid.hex}_photo2.jpeg", SHA_B, 200),
         ]
         with_photos = weighing_checksum(
             uuid=record.uuid,
@@ -855,7 +858,8 @@ class TestAgentsWsWeighResult:
         поэтому привязать фото позже было бы невозможно)."""
         record = _make_record()
         photo = PhotoMeta(role=CameraRole.FRONT, filename="front.jpeg", sha256=SHA_A, size_bytes=1)
-        result = WeighResult(request_id=uuid4(), record=record, photos=[photo])
+        record = record.model_copy(update={"photos": [photo]})
+        result = WeighResult(request_id=uuid4(), record=record)
         with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
             ws.send_text(result.model_dump_json())
             _hello_and_registry(ws)

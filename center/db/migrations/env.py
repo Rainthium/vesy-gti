@@ -10,7 +10,9 @@ from center.db.session import database_url
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # не отключать логгеры приложения: миграции могут выполняться
+    # программно в живом процессе (тесты, инициализация)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

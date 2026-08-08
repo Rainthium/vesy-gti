@@ -24,7 +24,7 @@ dist/
 # Данные
 *.sqlite3
 *.db
-photos/
+/photos_data/
 logs/
 *.log
 

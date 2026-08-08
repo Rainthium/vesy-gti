@@ -27,6 +27,20 @@ from shared.tare import three_months_before
 logger = logging.getLogger(__name__)
 
 
+PHOTO_INDEX_BY_ROLE = {CameraRole.FRONT: 1, CameraRole.REAR: 2}
+
+
+def canonical_photo_path(record: WeighingRecord, role: CameraRole) -> str:
+    """Постоянный путь фото (architecture §4.1): /vesy/ГГГГ/ММ/ДД/<uuid>_photoN.jpeg.
+
+    Дата — из weighed_at (UTC-момент записи); front → photo1, rear → photo2,
+    как в UniServer.
+    """
+    moment = record.weighed_at or datetime.now(UTC)
+    day = moment.astimezone(UTC).strftime("%Y/%m/%d")
+    return f"/vesy/{day}/{record.uuid.hex}_photo{PHOTO_INDEX_BY_ROLE[role]}.jpeg"
+
+
 def hash_agent_token(token: str) -> str:
     """Токен агента хранится только так (правило №7)."""
     return hashlib.sha256(token.encode()).hexdigest()
@@ -79,6 +93,7 @@ def save_weighing_record(
         ).scalar_one_or_none()
 
     photos = photos or []
+    photo_paths = {photo.role: canonical_photo_path(record, photo.role) for photo in photos}
     checksum = weighing_checksum(
         uuid=record.uuid,
         operation=record.operation.value,
@@ -116,7 +131,8 @@ def save_weighing_record(
             WeighingPhoto(
                 weighing_id=row.id,
                 role=photo.role,
-                path=photo.filename,
+                # канонический путь формирует центр; имя файла агента не используется
+                path=photo_paths[photo.role],
                 sha256=photo.sha256,
                 size_bytes=photo.size_bytes,
             )

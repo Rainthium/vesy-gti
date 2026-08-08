@@ -216,9 +216,8 @@ class ScriptedAgentLink(SilentLink):
         if isinstance(message, WeighRequest):
             self.requests.append(message)
             if self.record is not None:
-                result = WeighResult(
-                    request_id=message.request_id, record=self.record, photos=self.photos
-                )
+                record = self.record.model_copy(update={"photos": self.photos})
+                result = WeighResult(request_id=message.request_id, record=record)
                 self.hub.resolve_result(result, scale_id=self.scale_id)
 
 
@@ -658,8 +657,11 @@ class TestWeighSuccessResponse:
 
         data = _post(api_env).json()
         assert data["code"] == "OK"
-        assert data["front_image"] == "/vesy/2026/08/07/aaa_photo1.jpeg"
-        assert data["rear_image"] == "/vesy/2026/08/07/aaa_photo2.jpeg"
+        # пути канонические — формирует центр из uuid и даты записи
+        assert record.weighed_at is not None
+        day = record.weighed_at.strftime("%Y/%m/%d")
+        assert data["front_image"] == f"/vesy/{day}/{record.uuid.hex}_photo1.jpeg"
+        assert data["rear_image"] == f"/vesy/{day}/{record.uuid.hex}_photo2.jpeg"
 
     def test_vehicle_number_normalized_before_agent(self, api_env: ApiEnv) -> None:
         """Номер нормализуется (upper, без пробелов по краям) до отправки агенту."""
