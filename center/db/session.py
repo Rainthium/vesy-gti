@@ -19,7 +19,13 @@ def database_url() -> str:
 
 
 def make_engine(url: str | None = None) -> Engine:
-    return create_engine(url or database_url(), pool_pre_ping=True)
+    # connect_timeout: недоступная БД не должна подвешивать вызовы на
+    # OS TCP-таймаут (важно для синхронной записи offline в WS-finally)
+    return create_engine(
+        url or database_url(),
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": 5},
+    )
 
 
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:

@@ -729,8 +729,12 @@ def _count_by_uuid(env: WsEnv, record_uuid: UUID) -> int:
         return _weighing_count(session, record_uuid)
 
 
-def _wait_until(predicate: Callable[[], bool], timeout: float = 2.0) -> bool:
-    """Подождать условие (финализация серверных задач) без сна вслепую."""
+def _wait_until(predicate: Callable[[], bool], timeout: float = 10.0) -> bool:
+    """Подождать условие (финализация серверных задач) без сна вслепую.
+
+    Потолок щедрый: на нагруженных раннерах CI финализация (detach +
+    запись offline в БД) занимает секунды; быстрые машины выходят сразу.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():

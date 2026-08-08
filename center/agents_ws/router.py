@@ -12,6 +12,8 @@
   ERR_AGENT_OFFLINE.
 
 БД синхронная — вызовы через ``asyncio.to_thread`` (see center/db/repo).
+Единственное исключение — запись offline-статуса в finally обработчика:
+она намеренно синхронная, чтобы пережить отмену задачи (см. комментарий там).
 """
 
 import asyncio
@@ -147,12 +149,14 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
         finally:
             was_current = hub.detach(scale_id, link)
             if was_current:
-                # это было действующее соединение — агент действительно офлайн
+                # это было действующее соединение — агент действительно офлайн.
+                # Запись статуса — СИНХРОННО, без await: при отмене задачи
+                # (остановка сервера, тестовый клиент) await в finally
+                # прерывается CancelledError и статус остался бы online.
+                # Блокировка цикла на один UPDATE при редком разрыве допустима.
                 hub.fail_pending_for_scale(scale_id, "связь с агентом потеряна во время операции")
                 try:
-                    await asyncio.to_thread(
-                        _db, lambda s: repo.set_agent_status(s, agent_id, AgentStatus.OFFLINE)
-                    )
+                    _db(lambda s: repo.set_agent_status(s, agent_id, AgentStatus.OFFLINE))
                 except Exception:
                     logger.exception("весы %d: не удалось записать статус offline", scale_id)
                 logger.info("агент весов %d отключился", scale_id)
