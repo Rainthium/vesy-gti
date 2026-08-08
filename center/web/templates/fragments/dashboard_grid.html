@@ -1,0 +1,40 @@
+{# Сетка карточек весов (макет center-dashboard.dc.html); обновляется HTMX-опросом #}
+<div id="dashboard-grid" hx-get="/panel/fragments/dashboard" hx-trigger="every 10s" hx-swap="outerHTML">
+  {% for item in scales %}
+  {% set online = item.agent and item.agent.status.value == 'online' %}
+  <article class="obj-card">
+    <div class="obj-head">
+      <div>
+        <div class="obj-title" title="{{ item.site.name }}">{{ item.site.name }}</div>
+        <div class="obj-sub">{{ item.scale.name }} · {{ item.scale.driver }}</div>
+      </div>
+      {% if item.agent %}
+      <span class="pill {{ 'pill-ok' if online else 'pill-err' }}"><span class="dot"></span>{{ 'Онлайн' if online else 'Офлайн' }}</span>
+      {% else %}
+      <span class="pill"><span class="dot"></span>Не подключены</span>
+      {% endif %}
+    </div>
+    <div class="obj-stats">
+      {% if item.agent %}
+      <div class="stat"><span class="dot {{ 'ok' if item.agent.version else '' }}"></span><span>Агент v{{ item.agent.version or '—' }} · {{ item.agent.channel.value }}</span></div>
+      <div class="stat"><span class="dot {{ 'ok' if online else 'warn' }}"></span><span>Связь: {{ item.agent.last_seen_at | fmt_dt }}</span></div>
+      {% else %}
+      <div class="stat"><span class="dot"></span><span>Агент не создан</span></div>
+      {% endif %}
+    </div>
+    <div class="obj-foot">
+      {% if item.last_weighing %}
+      <a class="obj-foot-link" href="/panel/journal/{{ item.last_weighing.id }}" title="{{ item.last_weighing.weighed_at | fmt_dt }}">
+        <span class="last-op">{{ item.last_weighing.weighed_at | fmt_time }} · {{ 'взвешивание' if item.last_weighing.operation.value == 'weighing' else 'тарирование' }}</span>
+        <span class="last-w">{{ item.last_weighing.massa | fmt_kg }} kg</span>
+      </a>
+      {% else %}
+      <span class="last-op">операций не было</span>
+      <span class="last-w">—</span>
+      {% endif %}
+    </div>
+  </article>
+  {% else %}
+  <p class="empty">Объекты ещё не заведены — используйте tools/center_admin.py</p>
+  {% endfor %}
+</div>

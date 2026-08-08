@@ -12,12 +12,15 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
 from center.agents_ws.hub import AgentHub
 from center.agents_ws.router import create_agents_router
 from center.api_v1.router import ApiV1Config, create_api_v1_router
 from center.db.session import make_engine, make_session_factory
 from center.photos.router import PhotosConfig, create_photos_router
+from center.web.router import create_panel_router
 
 
 def create_app() -> FastAPI:
@@ -43,9 +46,21 @@ def create_app() -> FastAPI:
     )
 
     app = FastAPI(title="Весовая система — центр", docs_url=None, redoc_url=None)
+    # сессии панели (подписанная cookie); секрет — из env, dev-дефолт для стенда
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=os.environ.get("PANEL_SECRET", "dev-only-panel-secret"),
+        session_cookie="ves_center_session",
+        same_site="strict",
+    )
+    static_dir = Path(__file__).parent / "web" / "static"
+    app.mount("/panel/static", StaticFiles(directory=str(static_dir)), name="panel-static")
     app.include_router(create_agents_router(hub, session_factory))
     app.include_router(create_api_v1_router(hub, session_factory, api_v1_config))
     app.include_router(create_photos_router(session_factory, photos_config))
+    app.include_router(
+        create_panel_router(session_factory, hub, photos_dir=photos_config.photos_dir)
+    )
     # хаб доступен другим слоям (панель, сквозные тесты)
     app.state.hub = hub
     app.state.session_factory = session_factory

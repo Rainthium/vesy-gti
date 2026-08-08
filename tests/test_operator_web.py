@@ -36,12 +36,13 @@ from starlette.websockets import WebSocketDisconnect
 
 from agent.cameras.capture import CameraShot
 from agent.drivers.base import ScaleState
-from agent.sync.storage import AgentStorage, hash_password, verify_password
+from agent.sync.storage import AgentStorage
 from agent.web.app import create_app
 from agent.web.services import AgentInfo
 from agent.weighing.manual import ManualFlowError, ManualPreview
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
 from shared.messages import TareRecord, WeighingRecord
+from shared.passwords import hash_password, verify_password
 
 # узкий неразрывный пробел — разделитель тысяч в весе (как в макетах)
 NNBSP = " "

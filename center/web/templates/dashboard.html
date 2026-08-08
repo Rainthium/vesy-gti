@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Объекты — Весовая система{% endblock %}
+{% block body %}
+{% set active_tab = 'dashboard' %}
+{% include "_header.html" %}
+<main class="content">
+  <div class="page-head">
+    <h1>Состояние объектов</h1>
+    <span class="page-meta">обновляется автоматически каждые 10 секунд</span>
+  </div>
+  {% include "fragments/dashboard_grid.html" %}
+</main>
+{% endblock %}

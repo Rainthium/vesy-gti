@@ -1,0 +1,26 @@
+{# Шапка панели (по макету center-*.dc.html): герб, навигация, пользователь #}
+{% set role = request.session.get('panel_role', '') %}
+{% set role_ru = {'admin': 'администратор', 'dispatcher': 'диспетчер', 'operator': 'оператор'}.get(role, role) %}
+{% set name_parts = (user or '').replace('.', ' ').split() %}
+<header class="app-header">
+  <div class="inner">
+    <div class="brand">
+      <img src="/panel/static/logo.png" alt="Герб ГТИ">
+      Весовая система
+    </div>
+    <nav class="tabs">
+      <a href="/panel/" class="{{ 'active' if active_tab == 'dashboard' else '' }}">Объекты</a>
+      <a href="/panel/journal" class="{{ 'active' if active_tab == 'journal' else '' }}">Журнал</a>
+      <a href="/panel/tares" class="{{ 'active' if active_tab == 'tares' else '' }}">Тарирования</a>
+      <a href="/panel/refs" class="{{ 'active' if active_tab == 'refs' else '' }}">Справочники</a>
+    </nav>
+    <div class="user-box">
+      <span class="avatar">{{ (name_parts[0][:1] ~ (name_parts[1][:1] if name_parts | length > 1 else '')) | upper or '·' }}</span>
+      <div>
+        <div class="user-name">{{ user }}</div>
+        {% if role_ru %}<div class="user-role">{{ role_ru }}</div>{% endif %}
+      </div>
+      <form method="post" action="/panel/logout"><button class="logout-btn">Выйти</button></form>
+    </div>
+  </div>
+</header>

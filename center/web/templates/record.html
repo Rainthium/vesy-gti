@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Запись №{{ card.weighing.id }} — Весовая система{% endblock %}
+{% block body %}
+{% set active_tab = 'journal' %}
+{% include "_header.html" %}
+{% set w = card.weighing %}
+{% set is_weighing = w.operation.value == 'weighing' %}
+<main class="content record">
+  <a href="/panel/journal" class="back">← К журналу</a>
+  <section class="record-card">
+    <div class="record-head">
+      <div>
+        <div class="record-title">
+          <h1>Запись №{{ w.id }} · {{ 'Взвешивание' if is_weighing else 'Тарирование' }}</h1>
+          <span class="pill {{ 'pill-info' if w.source.value == 'ais' else 'pill-warn' }}"><span class="dot"></span>{{ 'АИС' if w.source.value == 'ais' else 'Вручную (офлайн)' }}</span>
+          <span class="pill {{ 'pill-ok' if w.code.value in ('OK', 'ERR_CAMERA') else 'pill-err' }}"><span class="dot"></span>{{ w.code.value }}</span>
+        </div>
+        <div class="record-sub">{{ w.weighed_at | fmt_dt }} · {{ card.site.name }} · {{ card.scale.name }}{% if w.operator %} · оператор {{ w.operator }}{% endif %}</div>
+      </div>
+      <a href="/panel/journal" class="close-btn" title="Закрыть">✕</a>
+    </div>
+    <div class="record-body">
+      <div class="photos">
+        {% for photo in card.photos %}
+        <figure class="photo-card">
+          <a class="photo-frame" href="/panel/photos{{ photo.path }}" target="_blank">
+            <img src="/panel/photos{{ photo.path | replace('.jpeg', '_thumb.jpeg') }}"
+                 alt="Снимок камеры {{ 'ПЕРЕД' if photo.role.value == 'front' else 'ЗАД' }}"
+                 onerror="this.classList.add('failed')">
+            <span class="photo-missing">снимок недоступен</span>
+          </a>
+          <figcaption class="photo-caption">
+            <b>{{ 'Камера ПЕРЕД' if photo.role.value == 'front' else 'Камера ЗАД' }}</b>
+            <span>sha256 {{ photo.sha256[:12] }}…</span>
+          </figcaption>
+        </figure>
+        {% else %}
+        <div class="empty-photos">Снимков нет</div>
+        {% endfor %}
+      </div>
+      {% if is_weighing %}
+      <div class="values-row">
+        <div class="value-box">
+          <span>Брутто</span>
+          <b>{{ w.massa | fmt_kg }}</b> <span class="unit">kg</span>
+          <small>{{ 'стабильный вес' if w.stable else 'нестабильный вес' }} · {{ w.weighed_at | fmt_time }}</small>
+        </div>
+        <div class="value-box">
+          <span>Тара</span>
+          <b>{{ w.tare_value | fmt_kg }}</b> <span class="unit">kg</span>
+          {% if card.tare_weighing %}
+          <small><a href="/panel/journal/{{ card.tare_weighing.id }}">тарирование от {{ card.tare_weighing.weighed_at | fmt_dt }}</a></small>
+          {% elif w.tare_value is none %}
+          <small>действующей тары нет</small>
+          {% endif %}
+        </div>
+        <div class="value-box netto">
+          <span>Нетто</span>
+          <b>{{ w.netto | fmt_kg }}</b> <span class="unit">kg</span>
+        </div>
+      </div>
+      {% else %}
+      <div class="values-row single">
+        <div class="value-box">
+          <span>Тара</span>
+          <b>{{ w.massa | fmt_kg }}</b> <span class="unit">kg</span>
+          <small>действует 3 месяца для номера {{ w.vehicle_number or '—' }}</small>
+        </div>
+      </div>
+      {% endif %}
+      <div class="record-strip">
+        <div><div class="strip-k">Номер ТС</div><div class="strip-v">{{ w.vehicle_number or '—' }}</div></div>
+        <div><div class="strip-k">Прицеп</div><div class="strip-v">{{ w.trailer_number or '—' }}</div></div>
+        <div><div class="strip-k">Объект</div><div class="strip-v" title="{{ card.site.name }}">{{ card.site.name }}</div></div>
+        <div><div class="strip-k">Весы</div><div class="strip-v" title="{{ card.scale.name }}">{{ card.scale.name }}</div></div>
+      </div>
+      {% if w.message %}
+      <div class="record-message"><b>Сообщение:</b> {{ w.message }}</div>
+      {% endif %}
+      {% if card.storno_of %}
+      <div class="record-message"><b>Сторно:</b> запись сторнирует <a href="/panel/journal/{{ card.storno_of.id }}">запись №{{ card.storno_of.id }} от {{ card.storno_of.weighed_at | fmt_dt }}</a></div>
+      {% endif %}
+      <div class="checksum-row">
+        <b>Контрольная сумма записи:</b>
+        <code>sha256 · {{ w.checksum }}</code>
+        <span>запись неизменяема; корректировка — только сторнированием</span>
+      </div>
+    </div>
+    <div class="record-foot">
+      <a href="/panel/journal" class="btn-muted">Закрыть</a>
+    </div>
+  </section>
+</main>
+{% endblock %}

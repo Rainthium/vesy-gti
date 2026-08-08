@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Вход — Весовая система{% endblock %}
+{% block body %}
+<main class="login">
+  <section class="login-brand">
+    <div class="login-org">
+      <img src="/panel/static/logo.png" alt="Герб ГТИ">
+      <div>ОАО «Государственная таможенная инфраструктура»</div>
+    </div>
+    <div class="login-hero">
+      <div class="login-kicker">Внутренняя система</div>
+      <h1>Весовая система</h1>
+      <p>Состояние 13 весовых объектов, единый журнал взвешиваний с фото, реестр тарирований и управление агентами.</p>
+    </div>
+    <div class="login-copy">© 2026 ОАО «Государственная таможенная инфраструктура» · gti.kg</div>
+  </section>
+  <section class="login-side">
+    <div class="login-card">
+      <div>
+        <h2>Вход в систему</h2>
+        <p class="login-subtitle">Используйте учётную запись, выданную администратором</p>
+      </div>
+      {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+      <form method="post" action="/panel/login">
+        <label>Логин <input name="login" autocomplete="username" required autofocus></label>
+        <label>Пароль <input name="password" type="password" autocomplete="current-password" required></label>
+        <button type="submit" class="login-submit">Войти</button>
+      </form>
+      <div class="login-help">Забыли пароль? Обратитесь к администратору</div>
+      <div class="login-foot">Доступ только из сети организации · все входы журналируются</div>
+    </div>
+  </section>
+</main>
+{% endblock %}

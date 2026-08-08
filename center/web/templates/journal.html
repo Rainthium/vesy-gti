@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Журнал — Весовая система{% endblock %}
+{% block body %}
+{% set active_tab = 'journal' %}
+{% include "_header.html" %}
+<main class="content">
+  <div class="page-head">
+    <h1>Журнал взвешиваний</h1>
+    <span class="page-meta">Всего записей под фильтром: {{ total }}</span>
+  </div>
+  <form method="get" action="/panel/journal" class="filters" id="journal-filters">
+    <select name="site_id">
+      <option value="">Все объекты</option>
+      {% for site in refs.sites %}
+      <option value="{{ site.id }}" {{ 'selected' if filters.site_id == site.id else '' }}>{{ site.name }}</option>
+      {% endfor %}
+    </select>
+    <input type="date" name="date_from" value="{{ filters.date_from }}" title="С даты">
+    <input type="date" name="date_to" value="{{ filters.date_to }}" title="По дату">
+    <input name="vehicle" placeholder="Номер ТС или прицепа" value="{{ filters.vehicle }}">
+    <select name="source">
+      <option value="">Любой источник</option>
+      <option value="ais" {{ 'selected' if filters.source == 'ais' else '' }}>АИС</option>
+      <option value="local_offline" {{ 'selected' if filters.source == 'local_offline' else '' }}>Вручную (офлайн)</option>
+    </select>
+    <button type="submit" class="btn-primary">Показать</button>
+  </form>
+  <div class="table-card">
+    <div class="journal-scroll">
+      <table class="journal">
+        <thead>
+          <tr><th>Дата / время</th><th>Объект</th><th>Номер ТС</th><th>Прицеп</th><th>Операция</th>
+          <th class="num">Брутто, kg</th><th class="num">Тара, kg</th><th class="num">Нетто, kg</th>
+          <th>Источник</th><th>Код</th></tr>
+        </thead>
+        <tbody>
+          {% for weighing, scale, site in rows %}
+          <tr class="clickable" onclick="location.href='/panel/journal/{{ weighing.id }}'">
+            <td class="cell-muted">{{ weighing.weighed_at | fmt_dt }}</td>
+            <td>{{ site.name }}</td>
+            <td class="cell-vehicle">{{ weighing.vehicle_number or '—' }}</td>
+            <td>{{ weighing.trailer_number or '—' }}</td>
+            <td>{{ 'Взвешивание' if weighing.operation.value == 'weighing' else 'Тарирование' }}</td>
+            <td class="num cell-gross">{{ weighing.massa | fmt_kg if weighing.operation.value == 'weighing' else '—' }}</td>
+            <td class="num">{{ (weighing.tare_value if weighing.operation.value == 'weighing' else weighing.massa) | fmt_kg }}</td>
+            <td class="num cell-netto">{{ weighing.netto | fmt_kg }}</td>
+            <td><span class="pill {{ 'pill-info' if weighing.source.value == 'ais' else 'pill-warn' }}"><span class="dot"></span>{{ 'АИС' if weighing.source.value == 'ais' else 'Вручную (офлайн)' }}</span></td>
+            <td class="cell-muted">{{ weighing.code.value }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="10" class="empty">Записей нет</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="page-line">
+    <span class="page-meta">Показано {{ rows | length }} из {{ total }} записей</span>
+    {% if pages > 1 %}
+    <nav class="pagination">
+      {% for p in range(1, pages + 1) %}
+      <a class="{{ 'active' if p == page else '' }}" href="/panel/journal?page={{ p }}&site_id={{ filters.site_id or '' }}&scale_id={{ filters.scale_id or '' }}&date_from={{ filters.date_from | urlencode }}&date_to={{ filters.date_to | urlencode }}&vehicle={{ filters.vehicle | urlencode }}&source={{ filters.source | urlencode }}">{{ p }}</a>
+      {% endfor %}
+    </nav>
+    {% endif %}
+  </div>
+</main>
+{% endblock %}

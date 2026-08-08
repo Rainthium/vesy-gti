@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Тарирования — Весовая система{% endblock %}
+{% block body %}
+{% set active_tab = 'tares' %}
+{% include "_header.html" %}
+<main class="content">
+  <div class="page-head">
+    <h1>Реестр тарирований</h1>
+    <span class="page-meta">{{ total }} действующих тарирований · реплицируется на агентов</span>
+  </div>
+  <form method="get" action="/panel/tares" class="filters">
+    <input name="search" placeholder="Поиск по номеру ТС" value="{{ search }}">
+    <button type="submit" class="btn-primary">Найти</button>
+  </form>
+  <div class="table-card">
+    <div class="journal-scroll">
+      <table class="journal">
+        <thead><tr>
+          <th>Номер ТС</th><th class="num">Тара, kg</th><th>Дата тарирования</th>
+          <th>Объект</th><th>Действует до</th><th>Статус</th>
+        </tr></thead>
+        <tbody>
+          {% for tare, weighing, scale, site in rows %}
+          <tr class="clickable" onclick="location.href='/panel/journal/{{ weighing.id }}'">
+            <td class="cell-vehicle">{{ tare.vehicle_number }}</td>
+            <td class="num cell-gross">{{ tare.tare_value | fmt_kg }}</td>
+            <td class="cell-muted">{{ tare.tared_at | fmt_dt }}</td>
+            <td>{{ site.name }}</td>
+            <td class="cell-muted">{{ expires(tare.tared_at) | fmt_dt }}</td>
+            <td><span class="pill pill-ok"><span class="dot"></span>Действует</span></td>
+          </tr>
+          {% else %}
+          <tr><td colspan="6" class="empty">Действующих тарирований нет</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <p class="table-hint">При взвешивании брутто система автоматически подставляет последнее действующее тарирование этого номера ТС. Истёкшие записи в расчёте нетто не участвуют.</p>
+</main>
+{% endblock %}

@@ -16,9 +16,6 @@
 поток цикла взвешивания и поток синхронизации).
 """
 
-import hashlib
-import hmac
-import secrets
 import sqlite3
 import threading
 from collections.abc import Iterable
@@ -29,6 +26,7 @@ from uuid import UUID
 
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 from shared.messages import PhotoMeta, TareRecord, WeighingRecord
+from shared.passwords import hash_password, verify_password
 from shared.tare import TARE_VALIDITY_MONTHS, three_months_before  # noqa: F401 — реэкспорт
 
 _SCHEMA = """
@@ -153,32 +151,6 @@ def photo_meta(photo: StoredPhoto) -> PhotoMeta:
 
 def _iso(moment: datetime | None) -> str | None:
     return moment.isoformat() if moment is not None else None
-
-
-# --- пароли операторов (PBKDF2-HMAC-SHA256, соль на пользователя) ---
-
-_PBKDF2_ITERATIONS = 200_000
-
-
-def hash_password(password: str) -> str:
-    """Хеш пароля в самодостаточном формате ``pbkdf2$<iters>$<salt>$<hash>``."""
-    salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, _PBKDF2_ITERATIONS)
-    return f"pbkdf2${_PBKDF2_ITERATIONS}${salt.hex()}${digest.hex()}"
-
-
-def verify_password(password: str, stored: str) -> bool:
-    """Проверить пароль против сохранённого хеша (постоянное время сравнения)."""
-    try:
-        scheme, iterations_s, salt_hex, digest_hex = stored.split("$")
-        if scheme != "pbkdf2":
-            return False
-        digest = hashlib.pbkdf2_hmac(
-            "sha256", password.encode(), bytes.fromhex(salt_hex), int(iterations_s)
-        )
-        return hmac.compare_digest(digest.hex(), digest_hex)
-    except (ValueError, TypeError):
-        return False
 
 
 class AgentStorage:

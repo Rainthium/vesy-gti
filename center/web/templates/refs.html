@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Справочники — Весовая система{% endblock %}
+{% block body %}
+{% set active_tab = 'refs' %}
+{% include "_header.html" %}
+<main class="content">
+  <div class="page-head">
+    <h1>Справочники</h1>
+    <span class="page-meta">только чтение · изменения — через tools/center_admin.py</span>
+  </div>
+  <div class="refs-layout">
+    <nav class="refs-menu">
+      <a href="#refs-scales">Объекты и весы</a>
+      <a href="#refs-agents">Агенты</a>
+      <a href="#refs-cameras">Камеры</a>
+    </nav>
+    <div class="refs-sections">
+      <section class="table-card" id="refs-scales">
+        <div class="card-title">Объекты и весы</div>
+        <div class="journal-scroll">
+          <table class="journal">
+            <thead><tr><th>Объект</th><th>Весы</th><th>Драйвер</th><th>Маршрут АИС (legacy)</th></tr></thead>
+            <tbody>
+              {% for scale, site in refs.scales %}
+              <tr>
+                <td class="cell-gross">{{ site.name }}</td>
+                <td>{{ scale.name }}</td>
+                <td class="cell-muted">{{ scale.driver }}</td>
+                <td class="cell-muted">{% if scale.legacy_ip %}{{ scale.legacy_ip }}:{{ scale.legacy_port or '—' }} · autoscale {{ scale.legacy_autoscale }}{% else %}—{% endif %}</td>
+              </tr>
+              {% else %}
+              <tr><td colspan="4" class="empty">Весы не заведены</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="table-card" id="refs-agents">
+        <div class="card-title">Агенты</div>
+        <div class="journal-scroll">
+          <table class="journal">
+            <thead><tr><th>Весы</th><th>Статус</th><th>Версия</th><th>Канал</th><th>Последняя связь</th></tr></thead>
+            <tbody>
+              {% for agent, scale in refs.agents %}
+              <tr>
+                <td class="cell-gross">{{ scale.name }}</td>
+                <td><span class="pill {{ 'pill-ok' if agent.status.value == 'online' else 'pill-err' }}"><span class="dot"></span>{{ 'Онлайн' if agent.status.value == 'online' else 'Офлайн' }}</span></td>
+                <td>{{ agent.version or '—' }}</td>
+                <td class="cell-muted">{{ agent.channel.value }}</td>
+                <td class="cell-muted">{{ agent.last_seen_at | fmt_dt }}</td>
+              </tr>
+              {% else %}
+              <tr><td colspan="5" class="empty">Агенты не заведены</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="table-card" id="refs-cameras">
+        <div class="card-title">Камеры</div>
+        <div class="journal-scroll">
+          <table class="journal">
+            <thead><tr><th>Весы</th><th>Роль</th><th>Snapshot</th><th>RTSP</th></tr></thead>
+            <tbody>
+              {% for camera, scale in refs.cameras %}
+              <tr>
+                <td class="cell-gross">{{ scale.name }}</td>
+                <td>{{ 'ПЕРЕД' if camera.role.value == 'front' else 'ЗАД' }}</td>
+                <td>{% if camera.snapshot_url %}<span class="pill pill-ok"><span class="dot"></span>настроен</span>{% else %}<span class="pill"><span class="dot"></span>—</span>{% endif %}</td>
+                <td>{% if camera.rtsp_url %}<span class="pill pill-ok"><span class="dot"></span>настроен</span>{% else %}<span class="pill"><span class="dot"></span>—</span>{% endif %}</td>
+              </tr>
+              {% else %}
+              <tr><td colspan="4" class="empty">Камеры не заведены</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+</main>
+{% endblock %}
