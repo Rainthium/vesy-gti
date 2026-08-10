@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}Пользователи — Весовая система{% endblock %}
+{% block body %}
+{% set active_tab = 'users' %}
+{% include "_header.html" %}
+{% set role_names = {'admin': 'администратор', 'dispatcher': 'диспетчер', 'operator': 'оператор'} %}
+<main class="content">
+  <div class="page-head">
+    <h1>Пользователи</h1>
+    <span class="page-meta">учётки панели центра · доступ только администраторам</span>
+  </div>
+  {% if note %}<div class="flash-note">{{ note }}</div>{% endif %}
+
+  <section class="table-card">
+    <div class="card-title">Новый пользователь</div>
+    <form class="user-create" method="post" action="/panel/users/create" autocomplete="off">
+      <label>Логин <input name="login" required maxlength="64" autocomplete="off"></label>
+      <label>ФИО <input name="full_name" maxlength="200" placeholder="Фамилия Имя"></label>
+      <label>Роль
+        <select name="role">
+          {% for r in roles %}
+          <option value="{{ r.value }}" {{ 'selected' if r.value == 'dispatcher' else '' }}>{{ role_names.get(r.value, r.value) }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Объект
+        <select name="site_id">
+          <option value="">— все —</option>
+          {% for site in sites %}<option value="{{ site.id }}">{{ site.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Пароль <input name="password" type="password" required minlength="{{ min_password }}" autocomplete="new-password"></label>
+      <button type="submit" class="btn-primary">Создать</button>
+    </form>
+    <div class="card-hint">Пароль — не короче {{ min_password }} символов; логин (латиница, цифры, . _ -) после создания не меняется. Пользователи не удаляются — только отключаются.</div>
+  </section>
+
+  <section class="table-card">
+    <div class="card-title">Учётки ({{ rows | length }})</div>
+    <div class="journal-scroll">
+      <table class="journal users">
+        <thead><tr><th>Логин</th><th>ФИО</th><th>Роль</th><th>Объект</th><th>Статус</th><th>Пароль</th><th></th></tr></thead>
+        <tbody>
+          {% for u, site in rows %}
+          <tr class="{{ '' if u.is_active else 'row-off' }}">
+            <td class="cell-gross">
+              {{ u.login }}{% if u.login == admin_login %} <span class="cell-muted">(вы)</span>{% endif %}
+              <form id="edit-{{ u.id }}" method="post" action="/panel/users/{{ u.id }}/edit"></form>
+              <form id="pw-{{ u.id }}" method="post" action="/panel/users/{{ u.id }}/password" autocomplete="off"></form>
+            </td>
+            <td><input class="cell-input" form="edit-{{ u.id }}" name="full_name" value="{{ u.full_name }}" maxlength="200"></td>
+            <td>
+              <select class="cell-input" form="edit-{{ u.id }}" name="role">
+                {% for r in roles %}
+                <option value="{{ r.value }}" {{ 'selected' if u.role.value == r.value else '' }}>{{ role_names.get(r.value, r.value) }}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td>
+              <select class="cell-input" form="edit-{{ u.id }}" name="site_id">
+                <option value="">— все —</option>
+                {% for s in sites %}
+                <option value="{{ s.id }}" {{ 'selected' if site and site.id == s.id else '' }}>{{ s.name }}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td>
+              {% if u.is_active %}
+              <span class="pill pill-ok"><span class="dot"></span>активен</span>
+              {% else %}
+              <span class="pill pill-err"><span class="dot"></span>отключён</span>
+              {% endif %}
+            </td>
+            <td>
+              <span class="pw-cell">
+                <input class="cell-input" form="pw-{{ u.id }}" name="password" type="password" minlength="{{ min_password }}" placeholder="новый пароль" autocomplete="new-password">
+                <button type="submit" form="pw-{{ u.id }}" class="btn-row">Сменить</button>
+              </span>
+            </td>
+            <td class="cell-actions">
+              <button type="submit" form="edit-{{ u.id }}" class="btn-row btn-row-primary">Сохранить</button>
+              {# в confirm нет логина: подстановка данных в JS-строку — вектор
+                 инъекции (логины из CLI не проходят белый список панели) #}
+              <form method="post" action="/panel/users/{{ u.id }}/toggle" class="inline-form"
+                    onsubmit="return confirm('{{ 'Отключить эту учётку?' if u.is_active else 'Включить эту учётку?' }}')">
+                <button type="submit" class="btn-row {{ 'btn-row-danger' if u.is_active else '' }}">{{ 'Отключить' if u.is_active else 'Включить' }}</button>
+              </form>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="7" class="empty">Пользователи не заведены</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+{% endblock %}

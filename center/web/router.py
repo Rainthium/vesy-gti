@@ -1,12 +1,13 @@
 """Веб-панель диспетчера (FastAPI + Jinja2 + HTMX, architecture §4.3).
 
-Экраны этапа 1: вход, дашборд объектов, журнал с фильтрами и карточкой
-записи, реестр тарирований, справочники. Всё — только чтение
-(правило №2: записанные операции неизменны; управление справочниками —
-CLI ``tools/center_admin.py``, экраны редактирования — позже).
+Экраны: вход, дашборд объектов, журнал с фильтрами и карточкой записи,
+реестр тарирований, справочники (чтение; правило №2: записанные операции
+неизменны, редактирование справочников пока в CLI ``tools/center_admin.py``)
+и администрирование пользователей (``/panel/users``, только admin —
+права сверяются с БД на каждый запрос, см. ``users_admin``).
 
-Доступ по учёткам users (роли admin/dispatcher/operator видят одно и
-то же на этапе 1 — разграничение по объектам появится с ролями операторов).
+Доступ по учёткам users (роли dispatcher/operator видят одно и то же —
+разграничение по объектам появится с ролями операторов).
 Фото пользователям панели отдаются через ``/panel/photos/...`` со своей
 сессией (сервисные токены /vesy/... — только для интеграторов).
 """
@@ -26,8 +27,9 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from center.agents_ws.hub import AgentHub, AgentHubError
+from center.db.models import UserRole
 from center.releases import AgentRelease, latest_release
-from center.web import queries
+from center.web import queries, users_admin
 from shared.enums import WeighingSource
 from shared.messages import EquipmentStatus, UpdateCommand
 
@@ -116,6 +118,7 @@ def create_panel_router(
             logger.warning("панель: неудачный вход %s", login.strip())
             return render("login.html", request, error="Неверный логин или пароль")
         request.session["panel_user"] = user.full_name or user.login
+        request.session["panel_login"] = user.login
         request.session["panel_role"] = user.role.value
         logger.info("панель: вход %s (%s)", user.login, user.role.value)
         return RedirectResponse("/panel/", status_code=303)
@@ -123,8 +126,22 @@ def create_panel_router(
     @router.post("/logout")
     def logout(request: Request) -> RedirectResponse:
         request.session.pop("panel_user", None)
+        request.session.pop("panel_login", None)
         request.session.pop("panel_role", None)
         return RedirectResponse("/panel/login", status_code=303)
+
+    async def current_admin(request: Request) -> str:
+        """Логин администратора; права проверяются по БД, не по сессии —
+        разжалованный или отключённый админ теряет экран сразу."""
+        login = request.session.get("panel_login")
+        if not login:
+            raise HTTPException(status_code=303, headers={"Location": "/panel/login"})
+        ok = await asyncio.to_thread(_db, lambda s: users_admin.is_active_admin(s, str(login)))
+        if not ok:
+            raise HTTPException(status_code=403, detail="Доступ только администраторам")
+        return str(login)
+
+    PanelAdmin = Annotated[str, Depends(current_admin)]
 
     # --- экраны ---
 
@@ -298,6 +315,130 @@ def create_panel_router(
     async def refs(request: Request, user: PanelUser) -> HTMLResponse:
         data = await asyncio.to_thread(_db, queries.refs_data)
         return render("refs.html", request, user=user, refs=data)
+
+    # --- пользователи (только администратор; права сверяются с БД) ---
+
+    def _users_redirect(note: str) -> RedirectResponse:
+        return RedirectResponse(f"/panel/users?note={quote(note)}", status_code=303)
+
+    def _parse_role(raw: str) -> UserRole | None:
+        try:
+            return UserRole(raw)
+        except ValueError:
+            return None
+
+    def _parse_site_id(raw: str) -> tuple[int | None, bool]:
+        """(site_id, ok): пустое поле — «все объекты», мусор — ошибка,
+        а не тихая отвязка от объекта."""
+        raw = raw.strip()
+        if not raw:
+            return None, True
+        if not raw.isdigit():
+            return None, False
+        return int(raw), True
+
+    @router.get("/users", response_class=HTMLResponse)
+    async def users_page(request: Request, user: PanelUser, admin: PanelAdmin) -> HTMLResponse:
+        rows = await asyncio.to_thread(_db, users_admin.users_list)
+        sites = await asyncio.to_thread(_db, lambda s: queries.refs_data(s).sites)
+        return render(
+            "users.html",
+            request,
+            user=user,
+            admin_login=admin,
+            rows=rows,
+            sites=sites,
+            roles=list(UserRole),
+            min_password=users_admin.MIN_PASSWORD_LEN,
+            note=request.query_params.get("note"),
+        )
+
+    @router.post("/users/create")
+    async def users_create(
+        request: Request,
+        admin: PanelAdmin,
+        login: Annotated[str, Form()],
+        password: Annotated[str, Form()],
+        full_name: Annotated[str, Form()] = "",
+        role: Annotated[str, Form()] = UserRole.DISPATCHER.value,
+        site_id: Annotated[str, Form()] = "",
+    ) -> RedirectResponse:
+        parsed_role = _parse_role(role)
+        if parsed_role is None:
+            return _users_redirect("неизвестная роль")
+        parsed_site, site_ok = _parse_site_id(site_id)
+        if not site_ok:
+            return _users_redirect("объект не найден")
+        error = await asyncio.to_thread(
+            _db,
+            lambda s: users_admin.create_user(
+                s,
+                login=login,
+                password=password,
+                full_name=full_name,
+                role=parsed_role,
+                site_id=parsed_site,
+            ),
+        )
+        if error is None:
+            logger.info("панель (%s): создан пользователь %s", admin, login.strip())
+            return _users_redirect(f"пользователь {login.strip()} создан")
+        return _users_redirect(error)
+
+    @router.post("/users/{user_id}/edit")
+    async def users_edit(
+        request: Request,
+        admin: PanelAdmin,
+        user_id: int,
+        full_name: Annotated[str, Form()] = "",
+        role: Annotated[str, Form()] = UserRole.DISPATCHER.value,
+        site_id: Annotated[str, Form()] = "",
+    ) -> RedirectResponse:
+        parsed_role = _parse_role(role)
+        if parsed_role is None:
+            return _users_redirect("неизвестная роль")
+        parsed_site, site_ok = _parse_site_id(site_id)
+        if not site_ok:
+            return _users_redirect("объект не найден")
+        error = await asyncio.to_thread(
+            _db,
+            lambda s: users_admin.update_user(
+                s,
+                user_id,
+                full_name=full_name,
+                role=parsed_role,
+                site_id=parsed_site,
+            ),
+        )
+        if error is None:
+            logger.info("панель (%s): пользователь id=%d обновлён", admin, user_id)
+            return _users_redirect("изменения сохранены")
+        return _users_redirect(error)
+
+    @router.post("/users/{user_id}/password")
+    async def users_password(
+        request: Request,
+        admin: PanelAdmin,
+        user_id: int,
+        password: Annotated[str, Form()],
+    ) -> RedirectResponse:
+        error = await asyncio.to_thread(
+            _db, lambda s: users_admin.set_password(s, user_id, password)
+        )
+        if error is None:
+            logger.info("панель (%s): пароль пользователя id=%d сброшен", admin, user_id)
+            return _users_redirect("пароль изменён")
+        return _users_redirect(error)
+
+    @router.post("/users/{user_id}/toggle")
+    async def users_toggle(request: Request, admin: PanelAdmin, user_id: int) -> RedirectResponse:
+        error = await asyncio.to_thread(
+            _db, lambda s: users_admin.toggle_active(s, user_id, actor_login=admin)
+        )
+        if error is None:
+            logger.info("панель (%s): пользователь id=%d включён/отключён", admin, user_id)
+            return _users_redirect("статус учётки изменён")
+        return _users_redirect(error)
 
     # --- фото для пользователей панели (по сессии, не по сервисному токену) ---
 

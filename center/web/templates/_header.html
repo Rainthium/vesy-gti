@@ -13,6 +13,7 @@
       <a href="/panel/journal" class="{{ 'active' if active_tab == 'journal' else '' }}">Взвешивания</a>
       <a href="/panel/tares" class="{{ 'active' if active_tab == 'tares' else '' }}">Тарирования</a>
       <a href="/panel/refs" class="{{ 'active' if active_tab == 'refs' else '' }}">Справочники</a>
+      {% if role == 'admin' %}<a href="/panel/users" class="{{ 'active' if active_tab == 'users' else '' }}">Пользователи</a>{% endif %}
     </nav>
     <div class="user-box">
       <span class="avatar">{{ (name_parts[0][:1] ~ (name_parts[1][:1] if name_parts | length > 1 else '')) | upper or '·' }}</span>
