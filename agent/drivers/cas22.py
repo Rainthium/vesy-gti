@@ -141,15 +141,48 @@ class Cas22Driver:
     # --- публичный интерфейс ScaleDriver ---
 
     def start(self) -> None:
-        """Запустить фоновый поток чтения (повторный вызов безвреден)."""
+        """Запустить фоновый поток чтения (повторный вызов безвреден).
+
+        У каждого запуска СВОЙ stop-event: если прежний поток завис
+        в блокирующем read() (клин CH340) и stop() его не дождался,
+        новый поток стартует независимо, а зависший выйдет по своему
+        event, когда адаптер его отпустит (порт нового запуска другой
+        либо откроется после освобождения старого — цикл переоткрытия).
+        """
         with self._lifecycle_lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-            self._stop_event.clear()
+            if (
+                self._thread is not None
+                and self._thread.is_alive()
+                and not self._stop_event.is_set()
+            ):
+                return  # уже работает
+            self._stop_event = threading.Event()
             self._thread = threading.Thread(
-                target=self._run, name=f"cas22:{self._port_url}", daemon=True
+                target=self._run,
+                args=(self._stop_event,),
+                name=f"cas22:{self._port_url}",
+                daemon=True,
             )
             self._thread.start()
+
+    @property
+    def port_url(self) -> str:
+        return self._port_url
+
+    @property
+    def baudrate(self) -> int:
+        return self._baudrate
+
+    def set_port(self, port_url: str, baudrate: int | None = None) -> None:
+        """Переключить порт/скорость (настройки из центра): остановить чтение,
+        сменить адрес, запустить заново. Блокирует до перезапуска потока;
+        проверку, что индикатор ожил, и откат делает вызывающий код."""
+        self.stop()
+        self._port_url = port_url
+        if baudrate is not None:
+            self._baudrate = baudrate
+        self._set_state(ScaleState(status=ScaleStatus.NO_DATA))
+        self.start()
 
     def stop(self) -> None:
         """Остановить чтение; блокирует до завершения потока (не дольше 5 с)."""
@@ -158,8 +191,10 @@ class Cas22Driver:
             if self._thread is not None:
                 self._thread.join(timeout=5.0)
                 if self._thread.is_alive():
-                    # поток завис в блокирующем read() (битый CH340) — ссылку
-                    # сохраняем, чтобы start() не породил второй поток чтения
+                    # поток завис в блокирующем read() (битый CH340); ссылку
+                    # сохраняем — start() увидит выставленный event и заведёт
+                    # НОВЫЙ поток со своим event, а этот выйдет сам, когда
+                    # адаптер его отпустит
                     return
                 self._thread = None
 
@@ -178,17 +213,18 @@ class Cas22Driver:
         with self._lock:
             self._state = state
 
-    def _run(self) -> None:
+    def _run(self, stop_event: threading.Event) -> None:
         """Главный цикл потока: открыть порт → читать; при сбое — переоткрыть.
 
         Цикл бесконечен до stop(): любое исключение порта переводит статус
         в PORT_ERROR и приводит к новой попытке через reopen_delay_s.
+        ``stop_event`` — свой у каждого запуска (см. start()).
         """
-        while not self._stop_event.is_set():
+        while not stop_event.is_set():
             port: serial.Serial | None = None
             try:
                 port = self._open_port()
-                self._read_loop(port)
+                self._read_loop(port, stop_event)
             except (serial.SerialException, OSError) as exc:
                 # включая ошибку 31 подвисшего CH340 — просто переоткроемся
                 self._set_state(ScaleState(status=ScaleStatus.PORT_ERROR, error=str(exc)))
@@ -196,7 +232,7 @@ class Cas22Driver:
                 if port is not None:
                     with contextlib.suppress(serial.SerialException, OSError):
                         port.close()
-            self._stop_event.wait(self._reopen_delay_s)
+            stop_event.wait(self._reopen_delay_s)
 
     def _open_port(self) -> serial.Serial:
         """Открыть порт, НЕ поднимая DTR/RTS (правило проекта №6)."""
@@ -211,13 +247,13 @@ class Cas22Driver:
         port.open()
         return port
 
-    def _read_loop(self, port: serial.Serial) -> None:
+    def _read_loop(self, port: serial.Serial, stop_event: threading.Event) -> None:
         """Читать поток, разбирать пакеты, обновлять состояние."""
         assembler = PacketAssembler()
         last_packet_at: float | None = None
         started_at = time.monotonic()
 
-        while not self._stop_event.is_set():
+        while not stop_event.is_set():
             chunk: bytes = port.read(64)
             now = time.monotonic()
 

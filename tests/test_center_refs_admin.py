@@ -14,7 +14,12 @@
   в БД только sha256, один агент на весы, перевыпуск обрывает старый токен;
 - маршруты /panel/refs*: 303 без сессии, 403 диспетчеру на мутации при
   доступном GET, мутации админа с note, токен агента через одноразовый
-  flash в сессии (не в URL).
+  flash в сессии (не в URL);
+- save_scale_settings и маршруты /panel/refs/scales/{id}/settings
+  (решение 10.08.2026): валидации цикла/порта/скорости, пустой порт →
+  port_cfg None, страница только для админа (403 диспетчеру и на GET),
+  404 на несуществующие весы, note о доставке агенту (офлайн-хвост),
+  push настроек при сохранении камеры.
 
 Инфраструктура БД — по образцу tests/test_center_users_admin.py: одноразовая
 БД ves_test_refs_<pid> + миграции alembic + TRUNCATE между тестами.
@@ -53,6 +58,7 @@ from center.db.session import database_url, make_session_factory
 from center.web import refs_admin
 from center.web.router import create_panel_router
 from shared.enums import CameraRole
+from shared.messages import CycleSettings
 from shared.passwords import hash_password
 from tests.test_center_db import ALL_TABLES, _upgrade_head
 
@@ -1176,3 +1182,364 @@ class TestRefsRoutesAdmin:
             ).scalar_one()
             assert camera.role is CameraRole.FRONT
             assert camera.snapshot_url == "http://user:pass@10.0.0.5/snap"
+
+
+# ---------------------------------------------------------------------------
+# save_scale_settings (страница настроек весов, решение Игоря 10.08.2026)
+# ---------------------------------------------------------------------------
+
+
+def _make_cycle(**overrides: float) -> CycleSettings:
+    """Валидный полный набор параметров цикла; overrides — точечные замены."""
+    fields: dict[str, float] = {
+        "zero_threshold_kg": 150.0,
+        "vehicle_threshold_kg": 600.0,
+        "zero_timeout_s": 10.0,
+        "vehicle_timeout_s": 90.0,
+        "stable_duration_s": 5.0,
+        "stable_timeout_s": 30.0,
+        "no_data_timeout_s": 5.0,
+    }
+    fields.update(overrides)
+    return CycleSettings(**fields)
+
+
+class TestSaveScaleSettings:
+    def test_success_saves_thresholds_and_port(self, db_session: Session) -> None:
+        """Успех: thresholds — полный словарь цикла, port_cfg — порт и скорость."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        cycle = _make_cycle()
+        error = refs_admin.save_scale_settings(
+            db_session, scale.id, cycle=cycle, port="  COM11  ", baudrate=19200
+        )
+        assert error is None
+        db_session.refresh(scale)
+        assert scale.thresholds == cycle.model_dump()
+        assert scale.port_cfg == {"port": "COM11", "baudrate": 19200}
+
+    def test_empty_port_clears_port_cfg(self, db_session: Session) -> None:
+        """Пустой порт → port_cfg None (портом управляет локальный конфиг)."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        scale.port_cfg = {"port": "COM7", "baudrate": 9600}
+        db_session.commit()
+        error = refs_admin.save_scale_settings(
+            db_session, scale.id, cycle=_make_cycle(), port="   ", baudrate=None
+        )
+        assert error is None
+        db_session.refresh(scale)
+        assert scale.port_cfg is None
+        assert scale.thresholds == _make_cycle().model_dump()
+
+    def test_port_without_baudrate_defaults_9600(self, db_session: Session) -> None:
+        """Порт без скорости: в port_cfg записывается дефолт 9600."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        error = refs_admin.save_scale_settings(
+            db_session, scale.id, cycle=_make_cycle(), port="COM11", baudrate=None
+        )
+        assert error is None
+        db_session.refresh(scale)
+        assert scale.port_cfg == {"port": "COM11", "baudrate": 9600}
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "zero_threshold_kg",
+            "vehicle_threshold_kg",
+            "zero_timeout_s",
+            "vehicle_timeout_s",
+            "stable_duration_s",
+            "stable_timeout_s",
+            "no_data_timeout_s",
+        ],
+    )
+    @pytest.mark.parametrize("bad_value", [0.0, -1.0], ids=["zero", "negative"])
+    def test_non_positive_cycle_value_rejected(
+        self, db_session: Session, field: str, bad_value: float
+    ) -> None:
+        """Каждый параметр цикла обязан быть > 0; БД не тронута."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        cycle = _make_cycle(**{field: bad_value})
+        error = refs_admin.save_scale_settings(
+            db_session, scale.id, cycle=cycle, port="", baudrate=None
+        )
+        assert error is not None
+        assert "больше нуля" in error
+        db_session.refresh(scale)
+        assert scale.thresholds is None
+
+    @pytest.mark.parametrize("vehicle", [150.0, 100.0], ids=["equal", "below"])
+    def test_vehicle_threshold_must_exceed_zero_threshold(
+        self, db_session: Session, vehicle: float
+    ) -> None:
+        """Порог заезда должен быть СТРОГО больше порога пустых весов."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        cycle = _make_cycle(zero_threshold_kg=150.0, vehicle_threshold_kg=vehicle)
+        error = refs_admin.save_scale_settings(
+            db_session, scale.id, cycle=cycle, port="", baudrate=None
+        )
+        assert error is not None
+        assert "порог заезда" in error
+        db_session.refresh(scale)
+        assert scale.thresholds is None
+
+    def test_stable_duration_above_timeout_rejected(self, db_session: Session) -> None:
+        """Время стабильности больше её таймаута → фиксация недостижима, ошибка."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        cycle = _make_cycle(stable_duration_s=31.0, stable_timeout_s=30.0)
+        error = refs_admin.save_scale_settings(
+            db_session, scale.id, cycle=cycle, port="", baudrate=None
+        )
+        assert error is not None
+        assert "стабильности" in error
+
+    def test_stable_duration_equal_timeout_allowed(self, db_session: Session) -> None:
+        """Граница: duration == timeout допустимо."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        cycle = _make_cycle(stable_duration_s=30.0, stable_timeout_s=30.0)
+        assert (
+            refs_admin.save_scale_settings(
+                db_session, scale.id, cycle=cycle, port="", baudrate=None
+            )
+            is None
+        )
+
+    def test_port_longer_64_rejected(self, db_session: Session) -> None:
+        """Порт длиннее 64 символов отклоняется; ровно 64 — допустим."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        error = refs_admin.save_scale_settings(
+            db_session, scale.id, cycle=_make_cycle(), port="C" * 65, baudrate=None
+        )
+        assert error is not None
+        assert "64" in error
+        db_session.refresh(scale)
+        assert scale.port_cfg is None
+        assert (
+            refs_admin.save_scale_settings(
+                db_session, scale.id, cycle=_make_cycle(), port="C" * 64, baudrate=None
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        "baudrate", [299, 921601, 0, -9600], ids=["low", "high", "zero", "neg"]
+    )
+    def test_baudrate_out_of_range_rejected(self, db_session: Session, baudrate: int) -> None:
+        """Скорость вне 300..921600 → ошибка, настройки не сохранены."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        error = refs_admin.save_scale_settings(
+            db_session, scale.id, cycle=_make_cycle(), port="COM11", baudrate=baudrate
+        )
+        assert error is not None
+        assert "скорость" in error
+        db_session.refresh(scale)
+        assert scale.port_cfg is None
+
+    @pytest.mark.parametrize("baudrate", [300, 921600], ids=["min", "max"])
+    def test_baudrate_boundaries_accepted(self, db_session: Session, baudrate: int) -> None:
+        """Границы диапазона скорости 300 и 921600 принимаются."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        assert (
+            refs_admin.save_scale_settings(
+                db_session, scale.id, cycle=_make_cycle(), port="COM11", baudrate=baudrate
+            )
+            is None
+        )
+
+    def test_missing_scale(self, db_session: Session) -> None:
+        """Несуществующие весы → «весы не найдены»."""
+        error = refs_admin.save_scale_settings(
+            db_session, 987654, cycle=_make_cycle(), port="", baudrate=None
+        )
+        assert error == "весы не найдены"
+
+
+# ---------------------------------------------------------------------------
+# Маршруты /panel/refs/scales/{id}/settings
+# ---------------------------------------------------------------------------
+
+
+def _settings_form(**overrides: str) -> dict[str, str]:
+    """Валидные данные формы настроек весов."""
+    fields = {
+        "zero_threshold_kg": "150",
+        "vehicle_threshold_kg": "600",
+        "zero_timeout_s": "10",
+        "vehicle_timeout_s": "90",
+        "stable_duration_s": "5",
+        "stable_timeout_s": "30",
+        "no_data_timeout_s": "5",
+        "port": "COM11",
+        "baudrate": "19200",
+    }
+    fields.update(overrides)
+    return fields
+
+
+def _settings_note(response: object, scale_id: int) -> str:
+    """Флеш-заметка из редиректа обратно на страницу настроек весов."""
+    location = response.headers["location"]  # type: ignore[attr-defined]
+    parts = urlsplit(location)
+    assert parts.path == f"/panel/refs/scales/{scale_id}/settings", (
+        f"редирект не на страницу настроек: {location}"
+    )
+    notes = parse_qs(parts.query).get("note", [])
+    assert notes, f"note отсутствует в редиректе: {location}"
+    return unquote(notes[0])
+
+
+class TestScaleSettingsRoutes:
+    def test_admin_gets_page_with_defaults(self, refs_env: RefsEnv) -> None:
+        """GET страница настроек: 200, поля цикла с дефолтами и пустой порт."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        response = refs_env.client.get(f"/panel/refs/scales/{refs_env.scale_id}/settings")
+        assert response.status_code == 200
+        for field in (
+            "zero_threshold_kg",
+            "vehicle_threshold_kg",
+            "zero_timeout_s",
+            "vehicle_timeout_s",
+            "stable_duration_s",
+            "stable_timeout_s",
+            "no_data_timeout_s",
+            'name="port"',
+            'name="baudrate"',
+        ):
+            assert field in response.text, f"на странице нет поля {field}"
+        # дефолты цикла (пока центр не управляет) — из DEFAULT_CYCLE
+        assert str(refs_admin.DEFAULT_CYCLE.zero_threshold_kg) in response.text
+
+    def test_get_missing_scale_404(self, refs_env: RefsEnv) -> None:
+        """GET несуществующих весов → 404."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        response = refs_env.client.get("/panel/refs/scales/987654/settings")
+        assert response.status_code == 404
+
+    def test_get_without_session_redirects_to_login(self, refs_env: RefsEnv) -> None:
+        """GET без сессии → 303 на форму входа."""
+        response = refs_env.client.get(
+            f"/panel/refs/scales/{refs_env.scale_id}/settings", follow_redirects=False
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/panel/login"
+
+    def test_dispatcher_gets_403_on_get_and_post(self, refs_env: RefsEnv) -> None:
+        """Страница настроек — только админам: диспетчеру 403 и на GET, и на POST."""
+        _login(refs_env, DISPATCHER_LOGIN, DISPATCHER_PASSWORD)
+        get_response = refs_env.client.get(f"/panel/refs/scales/{refs_env.scale_id}/settings")
+        assert get_response.status_code == 403
+        post_response = refs_env.client.post(
+            f"/panel/refs/scales/{refs_env.scale_id}/settings",
+            data=_settings_form(),
+            follow_redirects=False,
+        )
+        assert post_response.status_code == 403
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None
+            assert scale.thresholds is None, "диспетчер изменил настройки весов"
+
+    def test_post_saves_and_redirects_with_note(self, refs_env: RefsEnv) -> None:
+        """POST: настройки в БД, редирект на страницу настроек с note;
+        агента в хабе нет → «агент офлайн, применятся при подключении»."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        response = refs_env.client.post(
+            f"/panel/refs/scales/{refs_env.scale_id}/settings",
+            data=_settings_form(),
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        note = _settings_note(response, refs_env.scale_id)
+        assert "настройки сохранены" in note
+        assert "офлайн" in note
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None
+            assert scale.thresholds == {
+                "zero_threshold_kg": 150.0,
+                "vehicle_threshold_kg": 600.0,
+                "zero_timeout_s": 10.0,
+                "vehicle_timeout_s": 90.0,
+                "stable_duration_s": 5.0,
+                "stable_timeout_s": 30.0,
+                "no_data_timeout_s": 5.0,
+            }
+            assert scale.port_cfg == {"port": "COM11", "baudrate": 19200}
+        # сохранённые значения видны на странице при следующем GET
+        page = refs_env.client.get(f"/panel/refs/scales/{refs_env.scale_id}/settings")
+        assert "COM11" in page.text
+        assert "19200" in page.text
+
+    def test_post_validation_error_shown_as_note(self, refs_env: RefsEnv) -> None:
+        """Ошибка валидации (порог заезда ниже порога пустых) → note, БД не тронута."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        response = refs_env.client.post(
+            f"/panel/refs/scales/{refs_env.scale_id}/settings",
+            data=_settings_form(vehicle_threshold_kg="100"),
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert "порог заезда" in _settings_note(response, refs_env.scale_id)
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None
+            assert scale.thresholds is None
+
+    def test_post_garbage_baudrate_is_note_not_500(self, refs_env: RefsEnv) -> None:
+        """Нечисловая скорость → note об ошибке, не 500/422."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        response = refs_env.client.post(
+            f"/panel/refs/scales/{refs_env.scale_id}/settings",
+            data=_settings_form(baudrate="fast"),
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert "число" in _settings_note(response, refs_env.scale_id)
+
+    def test_post_missing_scale_redirects_with_error(self, refs_env: RefsEnv) -> None:
+        """POST на несуществующие весы → note «весы не найдены», не 500."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        response = refs_env.client.post(
+            "/panel/refs/scales/987654/settings",
+            data=_settings_form(),
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert "весы не найдены" in _settings_note(response, 987654)
+
+    def test_camera_post_pushes_settings_note(self, refs_env: RefsEnv) -> None:
+        """Сохранение камеры с URL — часть настроек: note содержит хвост
+        доставки (агент офлайн в тестовом хабе)."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        response = refs_env.client.post(
+            f"/panel/refs/scales/{refs_env.scale_id}/camera",
+            data={"role": "front", "snapshot_url": "http://10.0.0.5/snap", "rtsp_url": ""},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        note = _note_from(response)
+        assert "камера сохранена" in note
+        assert "офлайн" in note
+
+    def test_camera_post_without_settings_no_push_tail(self, refs_env: RefsEnv) -> None:
+        """Камера без URL и без прочих настроек: снимок пуст — хвоста
+        доставки в note нет (агенту нечего слать)."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        response = refs_env.client.post(
+            f"/panel/refs/scales/{refs_env.scale_id}/camera",
+            data={"role": "front", "snapshot_url": "", "rtsp_url": ""},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        note = _note_from(response)
+        assert "камера сохранена" in note
+        assert "офлайн" not in note

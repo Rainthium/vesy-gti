@@ -17,6 +17,7 @@ from shared.enums import ErrorCode
 from shared.messages import (
     EquipmentStatus,
     OperatorsRegistryUpdate,
+    ScaleConfigUpdate,
     TareRegistryUpdate,
     UpdateCommand,
     WeighRequest,
@@ -193,6 +194,19 @@ class AgentHub:
             return True
         except Exception:
             logger.warning("не удалось отправить операторов агенту весов %d", scale_id)
+            return False
+
+    async def send_scale_config(self, scale_id: int, update: ScaleConfigUpdate) -> bool:
+        """Отправить агенту настройки его весов (best-effort: офлайн-агент
+        получит актуальный снимок при следующем hello)."""
+        link = self._links.get(scale_id)
+        if link is None:
+            return False
+        try:
+            await link.send_text(update.model_dump_json())
+            return True
+        except Exception:
+            logger.warning("не удалось отправить настройки агенту весов %d", scale_id)
             return False
 
     async def broadcast_tare_registry(self, update: TareRegistryUpdate) -> int:

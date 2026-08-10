@@ -89,6 +89,13 @@ CREATE TABLE IF NOT EXISTS local_users (
     from_center INTEGER NOT NULL DEFAULT 0 CHECK (from_center IN (0, 1))
 );
 
+-- Настройки, присланные центром (scale_config): последний применённый
+-- снимок накатывается на конфиг при старте — переживает рестарт и офлайн
+CREATE TABLE IF NOT EXISTS agent_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 -- Правило №2: запись неизменяема. Разрешён только переход synced 0 -> 1;
 -- любое другое изменение и любое удаление блокируются на уровне БД.
 CREATE TRIGGER IF NOT EXISTS weighings_local_no_delete
@@ -471,6 +478,25 @@ class AgentStorage:
                 rows,
             )
         return len(rows)
+
+    # --- настройки из центра (scale_config) ---
+
+    def save_center_settings(self, payload_json: str) -> None:
+        """Сохранить последний применённый снимок настроек (JSON)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO agent_settings (key, value) VALUES ('scale_settings', ?)"
+                " ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (payload_json,),
+            )
+
+    def load_center_settings(self) -> str | None:
+        """Последний применённый снимок настроек центра (JSON) или None."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM agent_settings WHERE key = 'scale_settings'"
+            ).fetchone()
+        return str(row["value"]) if row is not None else None
 
     def operators_size(self) -> int:
         with self._lock:

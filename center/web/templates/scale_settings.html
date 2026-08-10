@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Настройки весов — {{ scale.name }} — Весовая система{% endblock %}
+{% block body %}
+{% set active_tab = 'refs' %}
+{% include "_header.html" %}
+<main class="content">
+  <a href="/panel/refs" class="back">← К справочникам</a>
+  <div class="page-head">
+    <h1>Настройки весов</h1>
+    <span class="page-meta">{{ site.name }} · {{ scale.name }} · применяются агентом на лету</span>
+  </div>
+  {% if note %}<div class="flash-note">{{ note }}</div>{% endif %}
+  <form method="post" action="/panel/refs/scales/{{ scale.id }}/settings">
+    <section class="table-card">
+      <div class="card-title">Параметры цикла взвешивания</div>
+      <div class="settings-grid">
+        <label>Порог пустых весов, кг
+          <input name="zero_threshold_kg" type="number" step="any" min="1" required value="{{ cycle.zero_threshold_kg }}">
+        </label>
+        <label>Порог заезда, кг
+          <input name="vehicle_threshold_kg" type="number" step="any" min="1" required value="{{ cycle.vehicle_threshold_kg }}">
+        </label>
+        <label>Таймаут обнуления, с
+          <input name="zero_timeout_s" type="number" step="any" min="1" required value="{{ cycle.zero_timeout_s }}">
+        </label>
+        <label>Таймаут заезда, с
+          <input name="vehicle_timeout_s" type="number" step="any" min="1" required value="{{ cycle.vehicle_timeout_s }}">
+        </label>
+        <label>Время стабильности, с
+          <input name="stable_duration_s" type="number" step="any" min="1" required value="{{ cycle.stable_duration_s }}">
+        </label>
+        <label>Таймаут стабилизации, с
+          <input name="stable_timeout_s" type="number" step="any" min="1" required value="{{ cycle.stable_timeout_s }}">
+        </label>
+        <label>Таймаут потока данных, с
+          <input name="no_data_timeout_s" type="number" step="any" min="1" required value="{{ cycle.no_data_timeout_s }}">
+        </label>
+      </div>
+      <div class="card-hint">
+        {% if has_center_cycle %}Значения заданы в центре и доставлены агенту.{% else %}Значения по умолчанию (как в конфиге агента) — после сохранения ими начнёт управлять центр.{% endif %}
+        Порог пустых весов — ниже него платформа считается свободной; фиксация веса — после «времени стабильности» неизменных показаний.
+      </div>
+    </section>
+
+    <section class="table-card">
+      <div class="card-title">COM-порт индикатора</div>
+      <div class="settings-grid">
+        <label>Порт
+          <input name="port" maxlength="64" value="{{ port }}" placeholder="COM11">
+        </label>
+        <label>Скорость
+          <input name="baudrate" inputmode="numeric" maxlength="6" value="{{ baudrate }}">
+        </label>
+      </div>
+      <div class="card-hint">Пустой порт — портом управляет локальный конфиг весового ПК. Защита от ошибки: если после смены порта индикатор молчит, агент откатится на прежний порт и сообщит в центр.</div>
+    </section>
+
+    <div class="settings-actions">
+      <button type="submit" class="btn-primary">Сохранить и отправить агенту</button>
+      <a href="/panel/refs" class="btn-muted">Отмена</a>
+    </div>
+  </form>
+</main>
+{% endblock %}

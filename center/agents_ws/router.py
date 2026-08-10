@@ -29,15 +29,18 @@ from center.agents_ws.hub import AgentHub, AgentLink
 from center.db import repo
 from center.db.models import AgentStatus
 from shared.messages import (
+    ConfigStatus,
     Heartbeat,
     Hello,
     OfflineSync,
     OfflineSyncAck,
     OperatorsRegistryUpdate,
+    ScaleConfigUpdate,
     TareRegistryUpdate,
     UpdateStatus,
     WeighResult,
     parse_agent_message,
+    supports_secure_sync,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,6 +77,12 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
     async def send_operators(link: AgentLink, scale_id: int) -> None:
         records = await asyncio.to_thread(_db, lambda s: repo.load_operators_for_scale(s, scale_id))
         await link.send_text(OperatorsRegistryUpdate(records=records).model_dump_json())
+
+    async def send_scale_config(link: AgentLink, scale_id: int) -> None:
+        """Настройки весов из центра — только если там что-то задано."""
+        settings = await asyncio.to_thread(_db, lambda s: repo.load_scale_settings(s, scale_id))
+        if settings is not None:
+            await link.send_text(ScaleConfigUpdate(settings=settings).model_dump_json())
 
     @router.websocket("/agents/ws")
     async def agents_ws(websocket: WebSocket) -> None:
@@ -115,9 +124,21 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                             s, agent_id, AgentStatus.ONLINE, version=m.version
                         ),
                     )
-                    # раздача реестров при каждом подключении: тары и операторы
+                    # раздача при каждом подключении: реестр тар, затем
+                    # операторы и настройки весов (если заданы в центре).
+                    # Снимки с секретами — только агентам, понимающим их:
+                    # старый ws_client логирует незнакомые сообщения (№7)
                     await send_tare_registry(link)
-                    await send_operators(link, scale_id)
+                    if supports_secure_sync(message.version):
+                        await send_operators(link, scale_id)
+                        await send_scale_config(link, scale_id)
+                    else:
+                        logger.info(
+                            "весы %d: агент v%s не получает операторов/настройки — "
+                            "обновите его из панели",
+                            scale_id,
+                            message.version,
+                        )
 
                 elif isinstance(message, Heartbeat):
                     hub.update_equipment(scale_id, message.equipment)
@@ -135,6 +156,17 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                     hub.resolve_result(message, scale_id=scale_id)
                     if saved and _is_taring(message):
                         await broadcast_tare_registry()
+
+                elif isinstance(message, ConfigStatus):
+                    if message.ok:
+                        logger.info("весы %d: настройки применены агентом", scale_id)
+                    else:
+                        logger.error(
+                            "весы %d: настройки НЕ применены%s: %s",
+                            scale_id,
+                            " (откат COM-порта)" if message.rolled_back else "",
+                            message.error,
+                        )
 
                 elif isinstance(message, UpdateStatus):
                     if message.ok:

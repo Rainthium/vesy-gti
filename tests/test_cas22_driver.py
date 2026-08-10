@@ -8,7 +8,8 @@
 1. ``parse_packet`` — чистый разбор одного 22-байтового пакета;
 2. ``PacketAssembler`` — сборка пакетов из потока с ресинхронизацией;
 3. ``Cas22Driver`` — фоновый поток чтения через pyserial-URL
-   ``socket://`` с TCP-сервером эмулятора (интеграционно, без железа).
+   ``socket://`` с TCP-сервером эмулятора (интеграционно, без железа),
+   включая смену порта на лету (``set_port``, настройки из центра).
 """
 
 import asyncio
@@ -645,3 +646,93 @@ class TestDriverPortErrors:
                 assert driver_thread_names(server.port) != []
         finally:
             server.stop()
+
+
+class TestDriverSetPort:
+    """Смена порта на лету (set_port, настройки из центра): драйвер
+    останавливает чтение старого порта и продолжает на новом."""
+
+    WEIGHT_A = 1000.0
+    WEIGHT_B = 2000.0
+
+    def _server(self, weight: float) -> EmulatorServer:
+        builder = PacketBuilder()
+
+        def factory() -> Iterator[Step]:
+            return stable_weight(builder, weight, duration_s=30.0, rate=RATE)
+
+        server = EmulatorServer(factory)
+        server.start()
+        return server
+
+    def test_set_port_switches_between_two_emulators(self) -> None:
+        """Драйвер читает эмулятор A; set_port на эмулятор B — статус OK
+        с весом B, свойства port_url/baudrate обновлены, поток чтения один."""
+        server_a = self._server(self.WEIGHT_A)
+        server_b = self._server(self.WEIGHT_B)
+        try:
+            with running_driver(server_a.port) as driver:
+                assert wait_until(
+                    lambda: (
+                        driver.state.status is ScaleStatus.OK
+                        and driver.state.weight_kg == self.WEIGHT_A
+                    ),
+                    3.0,
+                )
+                new_url = f"socket://127.0.0.1:{server_b.port}"
+                driver.set_port(new_url)
+                # адрес сменился сразу, baudrate остался прежним (None = не менять)
+                assert driver.port_url == new_url
+                assert driver.baudrate == 9600
+                # чтение продолжается уже с нового эмулятора
+                assert wait_until(
+                    lambda: (
+                        driver.state.status is ScaleStatus.OK
+                        and driver.state.weight_kg == self.WEIGHT_B
+                    ),
+                    3.0,
+                )
+                # старый поток чтения остановлен, новый — единственный
+                assert driver_thread_names(server_a.port) == []
+                assert len(driver_thread_names(server_b.port)) == 1
+        finally:
+            server_a.stop()
+            server_b.stop()
+
+    def test_set_port_resets_state_until_new_data(self) -> None:
+        """set_port на мёртвый порт: старый вес не «залипает» — состояние
+        сброшено в NO_DATA/PORT_ERROR (вызывающий код видит молчание и
+        откатывает порт)."""
+        server_a = self._server(self.WEIGHT_A)
+        dead_port = free_port()  # никто не слушает
+        try:
+            with running_driver(server_a.port) as driver:
+                assert wait_until(
+                    lambda: (
+                        driver.state.status is ScaleStatus.OK
+                        and driver.state.weight_kg == self.WEIGHT_A
+                    ),
+                    3.0,
+                )
+                driver.set_port(f"socket://127.0.0.1:{dead_port}", 19200)
+                assert driver.baudrate == 19200
+                # вес старого порта не показывается как живой
+                state = driver.state
+                assert state.status is not ScaleStatus.OK
+                assert wait_until(
+                    lambda: driver.state.status in (ScaleStatus.NO_DATA, ScaleStatus.PORT_ERROR),
+                    2.0,
+                )
+                # и OK больше не появляется (данных нет)
+                assert not wait_until(lambda: driver.state.status is ScaleStatus.OK, 0.6)
+                # откат обратно (как это делает SettingsManager) — чтение оживает
+                driver.set_port(f"socket://127.0.0.1:{server_a.port}")
+                assert wait_until(
+                    lambda: (
+                        driver.state.status is ScaleStatus.OK
+                        and driver.state.weight_kg == self.WEIGHT_A
+                    ),
+                    3.0,
+                )
+        finally:
+            server_a.stop()

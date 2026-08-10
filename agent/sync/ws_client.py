@@ -36,12 +36,14 @@ import websockets
 from agent.sync.storage import AgentStorage
 from shared.enums import ErrorCode, WeighingSource
 from shared.messages import (
+    ConfigStatus,
     EquipmentStatus,
     Heartbeat,
     Hello,
     OfflineSync,
     OfflineSyncAck,
     OperatorsRegistryUpdate,
+    ScaleConfigUpdate,
     TareRegistryUpdate,
     UpdateCommand,
     UpdateStatus,
@@ -89,12 +91,14 @@ class CenterClient:
         equipment_status: Callable[[], EquipmentStatus],
         on_weigh_request: Callable[[WeighRequest], Awaitable[WeighResult]],
         on_update_command: Callable[[UpdateCommand], Awaitable[UpdateStatus]] | None = None,
+        on_scale_config: Callable[[ScaleConfigUpdate], Awaitable[ConfigStatus]] | None = None,
     ) -> None:
         self._config = config
         self._storage = storage
         self._equipment_status = equipment_status
         self._on_weigh_request = on_weigh_request
         self._on_update_command = on_update_command
+        self._on_scale_config = on_scale_config
         self._connected = asyncio.Event()
         self._stopping = False
         self._request_tasks: set[asyncio.Task[None]] = set()
@@ -197,8 +201,29 @@ class CenterClient:
             elif isinstance(message, OperatorsRegistryUpdate):
                 count = self._storage.replace_center_operators(message.records)
                 logger.info("реплика операторов обновлена: %d учёток", count)
+            elif isinstance(message, ScaleConfigUpdate):
+                self._spawn_config_handler(connection, message)
             elif isinstance(message, UpdateCommand):
                 self._spawn_update_handler(connection, message)
+
+    def _spawn_config_handler(
+        self, connection: websockets.ClientConnection, update: ScaleConfigUpdate
+    ) -> None:
+        """Настройки центра — отдельной задачей: проверка COM-порта с
+        возможным откатом длится секунды, heartbeat замирать не должен."""
+        handler = self._on_scale_config
+
+        async def handle() -> None:
+            if handler is None:
+                logger.warning("scale_config получен, но обработчик не настроен")
+                return
+            status = await handler(update)
+            with contextlib.suppress(Exception):
+                await connection.send(status.model_dump_json())
+
+        task = asyncio.create_task(handle(), name="scale-config")
+        self._request_tasks.add(task)
+        task.add_done_callback(self._request_tasks.discard)
 
     def _spawn_update_handler(
         self, connection: websockets.ClientConnection, command: UpdateCommand

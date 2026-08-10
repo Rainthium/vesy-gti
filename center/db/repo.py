@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from center.db.models import (
     Agent,
     AgentStatus,
+    Camera,
     Scale,
     TareRegistry,
     User,
@@ -24,7 +25,15 @@ from center.db.models import (
     weighing_checksum,
 )
 from shared.enums import CameraRole, ErrorCode, Operation
-from shared.messages import OperatorRecord, PhotoMeta, TareRecord, WeighingRecord
+from shared.messages import (
+    CameraSettings,
+    CycleSettings,
+    OperatorRecord,
+    PhotoMeta,
+    ScaleSettingsPayload,
+    TareRecord,
+    WeighingRecord,
+)
 from shared.tare import three_months_before
 
 logger = logging.getLogger(__name__)
@@ -230,6 +239,50 @@ def load_operators_for_scale(session: Session, scale_id: int) -> list[OperatorRe
         )
         for user in rows
     ]
+
+
+def agent_versions(session: Session) -> dict[int, str | None]:
+    """Версии агентов по scale_id (для гейта снимков с секретами)."""
+    return {agent.scale_id: agent.version for agent in session.execute(select(Agent)).scalars()}
+
+
+def load_scale_settings(session: Session, scale_id: int) -> ScaleSettingsPayload | None:
+    """Снимок настроек весов для доставки агенту (решение Игоря 10.08.2026).
+
+    Источники: scales.thresholds (параметры цикла, полный набор — пишется
+    страницей настроек), scales.port_cfg ({"port", "baudrate"}), камеры
+    из справочника. None — в центре ничего не задано, агент живёт
+    по локальному конфигу.
+    """
+    scale = session.get(Scale, scale_id)
+    if scale is None:
+        return None
+    cycle = None
+    if scale.thresholds:
+        try:
+            cycle = CycleSettings.model_validate(scale.thresholds)
+        except ValueError:
+            logger.warning("весы %d: thresholds в БД не разбираются — пропущены", scale_id)
+    port = None
+    baudrate = None
+    if scale.port_cfg:
+        raw_port = scale.port_cfg.get("port")
+        raw_baudrate = scale.port_cfg.get("baudrate")
+        port = str(raw_port) if raw_port else None
+        baudrate = int(raw_baudrate) if isinstance(raw_baudrate, int) else None
+    camera_rows = list(
+        session.execute(
+            select(Camera).where(Camera.scale_id == scale_id).order_by(Camera.role)
+        ).scalars()
+    )
+    cameras = [
+        CameraSettings(role=c.role, snapshot_url=c.snapshot_url, rtsp_url=c.rtsp_url)
+        for c in camera_rows
+        if c.snapshot_url or c.rtsp_url
+    ] or None
+    if cycle is None and port is None and cameras is None:
+        return None
+    return ScaleSettingsPayload(cycle=cycle, cameras=cameras, scale_port=port, baudrate=baudrate)
 
 
 def find_active_tare(

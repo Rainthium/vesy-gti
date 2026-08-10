@@ -33,8 +33,21 @@ from center.db.models import (
     Site,
 )
 from shared.enums import CameraRole
+from shared.messages import CycleSettings
 
 logger = logging.getLogger(__name__)
+
+# дефолты цикла = дефолты agent/config.py (выгрузка Кызыл-Кыи 07.08.2026);
+# agent в образ центра не входит, поэтому значения продублированы
+DEFAULT_CYCLE = CycleSettings(
+    zero_threshold_kg=200.0,
+    vehicle_threshold_kg=500.0,
+    zero_timeout_s=10.0,
+    vehicle_timeout_s=90.0,
+    stable_duration_s=5.0,
+    stable_timeout_s=30.0,
+    no_data_timeout_s=5.0,
+)
 
 # код объекта попадает в пути фото и конфиги — только слаг
 SITE_CODE_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
@@ -211,6 +224,42 @@ def upsert_camera(
     session.commit()
     # URL камер содержат пароли — в лог только факт изменения (правило №7)
     logger.info("справочники: камера %s весов id=%d обновлена", role.value, scale_id)
+    return None
+
+
+def save_scale_settings(
+    session: Session,
+    scale_id: int,
+    *,
+    cycle: CycleSettings,
+    port: str,
+    baudrate: int | None,
+) -> str | None:
+    """Сохранить настройки весов (страница настроек, решение Игоря 10.08.2026).
+
+    Цикл — полный набор в scales.thresholds; COM-порт/скорость —
+    в scales.port_cfg (пустой порт = порт остаётся локальным на весовом ПК).
+    Доставку агенту делает маршрут (push + при каждом hello).
+    """
+    scale = session.get(Scale, scale_id)
+    if scale is None:
+        return "весы не найдены"
+    values = cycle.model_dump()
+    if any(v <= 0 for v in values.values()):
+        return "все параметры цикла должны быть больше нуля"
+    if cycle.vehicle_threshold_kg <= cycle.zero_threshold_kg:
+        return "порог заезда должен быть больше порога пустых весов"
+    if cycle.stable_duration_s > cycle.stable_timeout_s:
+        return "время стабильности не может превышать её таймаут"
+    port = port.strip()
+    if len(port) > 64:
+        return "COM-порт: не длиннее 64 символов"
+    if baudrate is not None and not 300 <= baudrate <= 921600:
+        return "скорость порта вне разумного диапазона"
+    scale.thresholds = values
+    scale.port_cfg = {"port": port, "baudrate": baudrate or 9600} if port else None
+    session.commit()
+    logger.info("справочники: настройки весов id=%d сохранены", scale_id)
     return None
 
 

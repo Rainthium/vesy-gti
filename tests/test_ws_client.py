@@ -16,6 +16,9 @@
 - tare_registry: полная замена реплики реестра тарирований;
 - operators_registry: обновление реплики операторов (вход по новой учётке,
   снятый оператор исчезает, заблокированный не входит офлайн);
+- scale_config: снимок настроек → обработчик → config_status центру (включая
+  отчёт об откате порта); долгий обработчик не блокирует heartbeat; без
+  обработчика клиент жив и отчёт не шлётся;
 - реконнект: сервер недоступен → клиент жив и подключается позже; разрыв
   соединения → повторный hello и досылка накопленного; мусорные сообщения
   не роняют клиента; отмена run()/run_forever — штатная остановка.
@@ -41,6 +44,8 @@ from shared.enums import ErrorCode, Operation, ScaleStatus, WeighingSource
 from shared.messages import (
     PROTOCOL_VERSION,
     AgentMessage,
+    ConfigStatus,
+    CycleSettings,
     EquipmentStatus,
     Heartbeat,
     Hello,
@@ -48,6 +53,8 @@ from shared.messages import (
     OfflineSyncAck,
     OperatorRecord,
     OperatorsRegistryUpdate,
+    ScaleConfigUpdate,
+    ScaleSettingsPayload,
     TareRecord,
     TareRegistryUpdate,
     WeighingRecord,
@@ -773,5 +780,143 @@ def test_run_forever_cancel_while_reconnecting() -> None:
             # отмена в фазе backoff-паузы: run_forever гасит её и завершается штатно
             await asyncio.wait_for(task, timeout=2.0)
             assert task.done() and not task.cancelled()
+
+    run_scenario(scenario())
+
+
+# --- настройки весов из центра (scale_config) ---
+
+
+class ConfigScene(Scene):
+    """Сцена с обработчиком scale_config (Scene его не пробрасывает)."""
+
+    def __init__(self, config_handler: Any, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._config_handler = config_handler
+
+    async def __aenter__(self) -> "ConfigScene":
+        await super().__aenter__()
+        # клиент пересобирается с обработчиком настроек (сигнатура CenterClient)
+        if self.run_task is not None and not self.run_task.done():
+            self.run_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.run_task
+        self.client = CenterClient(
+            make_config(self.center.url),
+            self.storage,
+            equipment_status=make_equipment,
+            on_weigh_request=echo_weigh_handler,
+            on_scale_config=self._config_handler,
+        )
+        self.start_client()
+        return self
+
+
+def make_scale_config(**overrides: Any) -> ScaleConfigUpdate:
+    """Типичный снимок настроек: полный цикл + COM-порт."""
+    fields: dict[str, Any] = {
+        "cycle": CycleSettings(
+            zero_threshold_kg=150.0,
+            vehicle_threshold_kg=600.0,
+            zero_timeout_s=10.0,
+            vehicle_timeout_s=90.0,
+            stable_duration_s=5.0,
+            stable_timeout_s=30.0,
+            no_data_timeout_s=5.0,
+        ),
+        "scale_port": "COM11",
+        "baudrate": 19200,
+    }
+    fields.update(overrides)
+    return ScaleConfigUpdate(settings=ScaleSettingsPayload(**fields))
+
+
+def test_scale_config_dispatched_and_status_sent_to_center() -> None:
+    """scale_config от центра: обработчик получает разобранный снимок,
+    его ConfigStatus уходит центру."""
+    received: list[ScaleConfigUpdate] = []
+
+    async def config_handler(update: ScaleConfigUpdate) -> ConfigStatus:
+        received.append(update)
+        return ConfigStatus(ok=True)
+
+    async def scenario() -> None:
+        async with ConfigScene(config_handler) as scene:
+            await scene.center.expect(Hello)
+            update = make_scale_config()
+            await scene.center.connection.send(update.model_dump_json())
+            status = await scene.center.expect(ConfigStatus)
+            # отчёт обработчика дошёл центру как config_status
+            assert status.ok is True
+            assert status.rolled_back is False
+            # обработчик получил снимок со всеми полями
+            assert len(received) == 1
+            settings = received[0].settings
+            assert settings.scale_port == "COM11"
+            assert settings.baudrate == 19200
+            assert settings.cycle is not None
+            assert settings.cycle.vehicle_threshold_kg == 600.0
+            # соединение живо: применение настроек его не рвёт
+            assert scene.client.connected is True
+            assert len(scene.center.connections) == 1
+
+    run_scenario(scenario())
+
+
+def test_scale_config_rollback_status_reaches_center() -> None:
+    """Откат COM-порта на агенте: центр получает ok=False + rolled_back=True."""
+
+    async def config_handler(update: ScaleConfigUpdate) -> ConfigStatus:
+        return ConfigStatus(ok=False, rolled_back=True, error="индикатор молчит на порту COM11")
+
+    async def scenario() -> None:
+        async with ConfigScene(config_handler) as scene:
+            await scene.center.expect(Hello)
+            await scene.center.connection.send(make_scale_config().model_dump_json())
+            status = await scene.center.expect(ConfigStatus)
+            assert status.ok is False
+            assert status.rolled_back is True
+            assert status.error and "COM11" in status.error
+
+    run_scenario(scenario())
+
+
+def test_slow_scale_config_handler_does_not_block_heartbeat() -> None:
+    """Проверка порта длится секунды (до 12 с) — heartbeat не замирает."""
+
+    async def slow_handler(update: ScaleConfigUpdate) -> ConfigStatus:
+        await asyncio.sleep(0.5)  # имитация ожидания «индикатор ожил»
+        return ConfigStatus(ok=True)
+
+    async def scenario() -> None:
+        async with ConfigScene(slow_handler) as scene:
+            await scene.center.expect(Hello)
+            await scene.center.connection.send(make_scale_config().model_dump_json())
+            heartbeats_during = 0
+            while True:
+                message = await scene.center.next_message()
+                if isinstance(message, Heartbeat):
+                    heartbeats_during += 1
+                elif isinstance(message, ConfigStatus):
+                    assert message.ok is True
+                    break
+            assert heartbeats_during >= 2, "heartbeat заблокированы применением настроек"
+
+    run_scenario(scenario())
+
+
+def test_scale_config_without_handler_does_not_kill_client() -> None:
+    """Обработчик не настроен: scale_config логируется и пропускается,
+    клиент жив, config_status центру не уходит."""
+
+    async def scenario() -> None:
+        async with Scene() as scene:  # обычная сцена — без on_scale_config
+            await scene.center.expect(Hello)
+            await scene.center.connection.send(make_scale_config().model_dump_json())
+            # ответа нет, но соединение живо и heartbeat продолжаются
+            await scene.center.assert_no_message(ConfigStatus, during_s=0.3)
+            await scene.center.expect(Heartbeat)
+            assert scene.client.connected is True
+            assert len(scene.center.connections) == 1
 
     run_scenario(scenario())

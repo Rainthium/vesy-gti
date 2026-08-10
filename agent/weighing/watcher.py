@@ -65,6 +65,19 @@ class ScaleWatcher:
     def phase(self) -> WatcherPhase:
         return self._phase
 
+    def reconfigure(self, config: CycleConfig) -> None:
+        """Применить новые пороги/таймауты (настройки из центра).
+
+        Наблюдение начинается заново с WAIT_EMPTY: старая фиксация могла
+        быть снята по прежним порогам — стоящая машина потребует пересъезда
+        (та же семантика, что после рестарта агента)."""
+        self._config = config
+        self._phase = WatcherPhase.WAIT_EMPTY
+        self._fixation = None
+        self._no_data_since = None
+        self._candidate_weight = None
+        self._candidate_since = 0.0
+
     @property
     def fixation(self) -> Fixation | None:
         """Готовая фиксация, пока АТС стоит на весах; иначе None."""

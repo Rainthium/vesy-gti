@@ -720,6 +720,25 @@ def push_env(db: sessionmaker[Session], tmp_path: Path) -> Iterator[PushEnv]:
         )
         session.add_all([scale, other_scale])
         session.commit()
+        # версии агентов ≥ 0.4.0: гейт снимков с секретами пропускает push
+        from center.db import repo as center_repo
+        from center.db.models import Agent
+
+        session.add_all(
+            [
+                Agent(
+                    scale_id=scale.id,
+                    token_hash=center_repo.hash_agent_token("tok-push-a"),
+                    version="0.4.0",
+                ),
+                Agent(
+                    scale_id=other_scale.id,
+                    token_hash=center_repo.hash_agent_token("tok-push-b"),
+                    version="0.4.0",
+                ),
+            ]
+        )
+        session.commit()
         operator = _add_user(
             session,
             OPERATOR_LOGIN,

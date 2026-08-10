@@ -92,6 +92,14 @@ class ManualOperationFlow:
         self._lock = threading.Lock()
         self._pending: ManualPreview | None = None
 
+    def set_cameras(self, cameras: list[CameraConfig]) -> None:
+        """Новый список камер (настройки из центра)."""
+        self._cameras = cameras
+
+    def set_vehicle_threshold(self, threshold_kg: float) -> None:
+        """Новый порог заезда (настройки из центра)."""
+        self._vehicle_threshold_kg = threshold_kg
+
     # --- шаг 1: фиксация (кнопка «Взвесить») ---
 
     def ready(self) -> bool:

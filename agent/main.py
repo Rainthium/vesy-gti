@@ -34,6 +34,7 @@ from agent.cameras.capture import CameraConfig, CameraShot, capture
 from agent.config import AgentConfig, load_config
 from agent.drivers.base import ScaleState
 from agent.drivers.cas22 import Cas22Driver
+from agent.settings import SettingsManager, merge_center_settings
 from agent.sync.photo_uploader import PhotoUploader
 from agent.sync.storage import AgentStorage
 from agent.sync.ws_client import CenterClient, ClientConfig, run_forever
@@ -44,7 +45,15 @@ from agent.weighing.auto import AutoConfig, AutoOperationRunner
 from agent.weighing.manual import ManualOperationFlow, ManualPreview
 from agent.weighing.watcher import ScaleWatcher
 from shared.enums import CameraRole, Operation
-from shared.messages import CameraStatus, EquipmentStatus, TareRecord, WeighingRecord
+from shared.messages import (
+    CameraStatus,
+    ConfigStatus,
+    EquipmentStatus,
+    ScaleConfigUpdate,
+    ScaleSettingsPayload,
+    TareRecord,
+    WeighingRecord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +104,12 @@ class CameraHealth:
     @property
     def statuses(self) -> list[CameraStatus]:
         return list(self._statuses.values())
+
+    def set_cameras(self, cameras: list[CameraConfig]) -> None:
+        """Новый список камер (настройки из центра); статусы обнуляются
+        и заполнятся ближайшей проверкой."""
+        self._cameras = cameras
+        self._statuses = {}
 
     async def check_once(self) -> None:
         for camera in self._cameras:
@@ -267,6 +282,14 @@ def build_runtime(
         token=config.center.token,
         busy=runner.busy,
     )
+
+    # SettingsManager собирается ниже (ему нужен manual, а manual — клиенту);
+    # колбэк связывает их через late-binding
+    manager_ref: list[SettingsManager] = []
+
+    async def on_scale_config(update: ScaleConfigUpdate) -> ConfigStatus:
+        return await manager_ref[0].handle(update)
+
     client = CenterClient(
         ClientConfig(
             url=config.center.url,
@@ -280,6 +303,7 @@ def build_runtime(
         equipment_status=equipment_status,
         on_weigh_request=runner.handle,
         on_update_command=updater.handle,
+        on_scale_config=on_scale_config,
     )
     uploader = PhotoUploader(
         storage,
@@ -296,8 +320,45 @@ def build_runtime(
         vehicle_threshold_kg=config.cycle.vehicle_threshold_kg,
         ffmpeg_path=config.ffmpeg_path,
     )
+    manager_ref.append(
+        SettingsManager(
+            driver=driver,
+            watcher=watcher,
+            runner=runner,
+            manual=manual,
+            camera_health=camera_health,
+            storage=storage,
+        )
+    )
     runtime = AgentRuntime(config, driver=driver, storage=storage, client=client, manual=manual)
     return runtime, driver, storage, client, uploader, camera_health, watcher, auto_config
+
+
+def apply_stored_settings(config: AgentConfig) -> AgentConfig:
+    """Накатить последний применённый снимок настроек центра на config.toml.
+
+    Снимок сохраняется SettingsManager'ом при каждом scale_config —
+    настройки центра переживают рестарт агента и офлайн. Битый снимок
+    просто пропускается (агент стартует по локальному конфигу).
+    """
+    if not Path(config.storage.db_path).exists():
+        return config  # первая установка: БД ещё нет
+    settings_storage = AgentStorage(config.storage.db_path)
+    try:
+        raw = settings_storage.load_center_settings()
+    finally:
+        settings_storage.close()
+    if raw is None:
+        return config
+    try:
+        payload = ScaleSettingsPayload.model_validate_json(raw)
+        merged = merge_center_settings(config, payload)
+    except ValueError:
+        # битый или несовместимый снимок не должен мешать старту агента
+        logger.warning("сохранённые настройки центра не разбираются — пропущены")
+        return config
+    logger.info("применён сохранённый снимок настроек центра")
+    return merged
 
 
 async def watch_scale(watcher: ScaleWatcher, driver: Cas22Driver, interval_s: float) -> None:
@@ -383,6 +444,7 @@ def main() -> None:
     if args.command == "add-operator":
         _add_operator(config, args.login, args.full_name)
         return
+    config = apply_stored_settings(config)
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(run_agent(config))
 

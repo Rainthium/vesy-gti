@@ -5,9 +5,10 @@
 отдельно (бинарные кадры либо HTTP-загрузка на центр).
 
 Направления:
-- агент → центр: hello, heartbeat, weigh_result, offline_sync, update_status;
+- агент → центр: hello, heartbeat, weigh_result, offline_sync, update_status,
+  config_status;
 - центр → агент: weigh_request, offline_sync_ack, tare_registry,
-  operators_registry, update_command.
+  operators_registry, scale_config, update_command.
 
 Состав полей — черновик v1 (этап 0); уточняется по мере реализации,
 но существующие поля не переименовываются без записи в docs/decisions.md.
@@ -22,6 +23,23 @@ from pydantic import BaseModel, Field, TypeAdapter
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
 
 PROTOCOL_VERSION = 1
+
+# Минимальная версия агента, понимающая снимки с секретами
+# (operators_registry с pw_hash, scale_config с URL камер). Более старым
+# агентам центр их НЕ шлёт: старый ws_client логирует незнакомые сообщения
+# первыми 200 символами — секреты попали бы в лог весового ПК (правило №7).
+SECURE_SYNC_MIN_VERSION = (0, 4, 0)
+
+
+def supports_secure_sync(version: str | None) -> bool:
+    """Можно ли агенту этой версии слать снимки с секретами."""
+    if not version:
+        return False
+    try:
+        parts = tuple(int(p) for p in version.split(".")[:3])
+    except ValueError:
+        return False
+    return parts >= SECURE_SYNC_MIN_VERSION
 
 
 class CameraStatus(BaseModel):
@@ -198,6 +216,61 @@ class OperatorRecord(BaseModel):
     is_active: bool = True
 
 
+class CycleSettings(BaseModel):
+    """Параметры цикла взвешивания, задаваемые в центре (страница весов).
+
+    Все поля обязательны: центр шлёт полный набор (частичных обновлений
+    нет — семантика полного снимка, как у реестров).
+    """
+
+    zero_threshold_kg: float
+    vehicle_threshold_kg: float
+    zero_timeout_s: float
+    vehicle_timeout_s: float
+    stable_duration_s: float
+    stable_timeout_s: float
+    no_data_timeout_s: float
+
+
+class CameraSettings(BaseModel):
+    """Камера весов из справочника центра (URL содержат пароли — секретны)."""
+
+    role: CameraRole
+    snapshot_url: str | None = Field(default=None, repr=False)
+    rtsp_url: str | None = Field(default=None, repr=False)
+
+
+class ScaleSettingsPayload(BaseModel):
+    """Снимок настроек весов из центра (решение Игоря 10.08.2026: настраивать
+    объекты без AnyDesk — включая камеры и COM-порт).
+
+    None в поле — «в центре не задано, агент живёт по локальному конфигу».
+    Токен агента через канал НЕ передаётся (ключ самого канала).
+    """
+
+    cycle: CycleSettings | None = None
+    cameras: list[CameraSettings] | None = None
+    scale_port: str | None = None  # «COM11» либо pyserial-URL
+    baudrate: int | None = None
+
+
+class ScaleConfigUpdate(BaseModel):
+    """Центр → агент: применить настройки весов (при hello и после правки)."""
+
+    type: Literal["scale_config"] = "scale_config"
+    settings: ScaleSettingsPayload
+
+
+class ConfigStatus(BaseModel):
+    """Агент → центр: отчёт о применении настроек."""
+
+    type: Literal["config_status"] = "config_status"
+    ok: bool
+    error: str | None = None
+    # смена COM-порта, после которой индикатор замолчал, откатывается
+    rolled_back: bool = False
+
+
 class OperatorsRegistryUpdate(BaseModel):
     """Полный снимок операторов весов (решение Игоря 10.08.2026: учётки
     операторов заводятся и блокируются в центре, агент хранит реплику
@@ -210,11 +283,16 @@ class OperatorsRegistryUpdate(BaseModel):
 # --- дискриминированные объединения и разбор ---
 
 AgentMessage = Annotated[
-    Hello | Heartbeat | WeighResult | OfflineSync | UpdateStatus,
+    Hello | Heartbeat | WeighResult | OfflineSync | UpdateStatus | ConfigStatus,
     Field(discriminator="type"),
 ]
 CenterMessage = Annotated[
-    WeighRequest | OfflineSyncAck | TareRegistryUpdate | OperatorsRegistryUpdate | UpdateCommand,
+    WeighRequest
+    | OfflineSyncAck
+    | TareRegistryUpdate
+    | OperatorsRegistryUpdate
+    | ScaleConfigUpdate
+    | UpdateCommand,
     Field(discriminator="type"),
 ]
 

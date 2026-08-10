@@ -10,7 +10,9 @@
 - персистентность файла БД и потокобезопасность при параллельной записи;
 - реплика операторов центра (operators_registry): миграция схемы local_users,
   полный снимок replace_center_operators, сохранение локальных учёток,
-  блокировка is_active=0, CLI upsert_operator поверх реплики.
+  блокировка is_active=0, CLI upsert_operator поверх реплики;
+- снимок настроек центра (scale_config): save/load_center_settings —
+  нет снимка → None, перезапись последним, персистентность файла БД.
 """
 
 import sqlite3
@@ -843,3 +845,35 @@ class TestUpsertOperatorAfterReplica:
         assert storage.verify_operator("op.x", CENTER_PASSWORD) is None
         storage.upsert_operator("op.x", CLI_PASSWORD)
         assert storage.verify_operator("op.x", CLI_PASSWORD) == "op.x"
+
+
+class TestCenterSettingsStore:
+    """Снимок настроек центра (scale_config): save/load_center_settings."""
+
+    def test_load_without_save_returns_none(self, storage: AgentStorage) -> None:
+        """Свежая БД: снимка нет — None, без исключений."""
+        assert storage.load_center_settings() is None
+
+    def test_save_then_load_round_trip(self, storage: AgentStorage) -> None:
+        """Сохранённый JSON возвращается байт-в-байт (разбор — дело settings)."""
+        payload = '{"cycle": null, "scale_port": "COM11", "baudrate": 19200}'
+        storage.save_center_settings(payload)
+        assert storage.load_center_settings() == payload
+
+    def test_second_save_overwrites_first(self, storage: AgentStorage) -> None:
+        """Повторный снимок замещает предыдущий: хранится только последний."""
+        storage.save_center_settings('{"scale_port": "COM7"}')
+        storage.save_center_settings('{"scale_port": "COM11"}')
+        assert storage.load_center_settings() == '{"scale_port": "COM11"}'
+
+    def test_settings_survive_reopen(self, tmp_path: Path) -> None:
+        """Снимок переживает рестарт агента (файл БД перечитывается)."""
+        db_path = tmp_path / "agent.db"
+        first = AgentStorage(db_path)
+        first.save_center_settings('{"scale_port": "COM11"}')
+        first.close()
+        second = AgentStorage(db_path)
+        try:
+            assert second.load_center_settings() == '{"scale_port": "COM11"}'
+        finally:
+            second.close()

@@ -94,6 +94,15 @@ class AutoOperationRunner:
         """Идёт ли операция прямо сейчас (автообновление ждёт её конца)."""
         return self._lock.locked()
 
+    def set_cycle(self, cycle: CycleConfig) -> None:
+        """Новые параметры цикла (настройки из центра)."""
+        self._config = AutoConfig(cycle=cycle, tick_interval_s=self._config.tick_interval_s)
+
+    def set_cameras(self, cameras: list[CameraConfig]) -> None:
+        """Новый список камер (настройки из центра); текущую операцию
+        не трогает — применится со следующей."""
+        self._cameras = cameras
+
     async def handle(self, request: WeighRequest) -> WeighResult:
         """Обработчик для CenterClient: команда → результат операции."""
         if self._lock.locked():

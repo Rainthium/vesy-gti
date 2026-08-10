@@ -13,6 +13,7 @@
 """
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -28,11 +29,18 @@ from sqlalchemy.orm import Session
 
 from center.agents_ws.hub import AgentHub, AgentHubError
 from center.db import repo
-from center.db.models import ReleaseChannel, ScaleKind, UserRole
+from center.db.models import ReleaseChannel, Scale, ScaleKind, Site, UserRole
 from center.releases import AgentRelease, latest_release
 from center.web import queries, refs_admin, users_admin
 from shared.enums import CameraRole, WeighingSource
-from shared.messages import EquipmentStatus, OperatorsRegistryUpdate, UpdateCommand
+from shared.messages import (
+    CycleSettings,
+    EquipmentStatus,
+    OperatorsRegistryUpdate,
+    ScaleConfigUpdate,
+    UpdateCommand,
+    supports_secure_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -459,6 +467,104 @@ def create_panel_router(
             return _refs_redirect("весы обновлены")
         return _refs_redirect(error)
 
+    async def _push_scale_config(scale_id: int) -> str:
+        """Доставить агенту свежие настройки; текст-хвост для note."""
+        settings = await asyncio.to_thread(_db, lambda s: repo.load_scale_settings(s, scale_id))
+        if settings is None:
+            return ""
+        if not hub.connected(scale_id):
+            return " — агент офлайн, применятся при следующем подключении"
+        versions = await asyncio.to_thread(_db, repo.agent_versions)
+        if not supports_secure_sync(versions.get(scale_id)):
+            # старому агенту секреты не шлём (правило №7) — он получит
+            # снимок при первом hello после автообновления
+            return (
+                " — агент старой версии: обновите его из панели, "
+                "настройки применятся после обновления"
+            )
+        sent = await hub.send_scale_config(scale_id, ScaleConfigUpdate(settings=settings))
+        if sent:
+            return " — отправлены агенту (отчёт о применении в логах центра)"
+        return " — агент офлайн, применятся при следующем подключении"
+
+    @router.get("/refs/scales/{scale_id}/settings", response_class=HTMLResponse)
+    async def scale_settings_page(
+        request: Request, user: PanelUser, admin: PanelAdmin, scale_id: int
+    ) -> HTMLResponse:
+        row = await asyncio.to_thread(
+            _db,
+            lambda s: (
+                None
+                if (scale := s.get(Scale, scale_id)) is None
+                else (scale, s.get(Site, scale.site_id))
+            ),
+        )
+        if row is None:
+            raise HTTPException(status_code=404)
+        scale, site = row
+        cycle = refs_admin.DEFAULT_CYCLE
+        if scale.thresholds:
+            with contextlib.suppress(ValueError):
+                cycle = CycleSettings.model_validate(scale.thresholds)
+        port_cfg = scale.port_cfg or {}
+        return render(
+            "scale_settings.html",
+            request,
+            user=user,
+            scale=scale,
+            site=site,
+            cycle=cycle,
+            has_center_cycle=bool(scale.thresholds),
+            port=port_cfg.get("port") or "",
+            baudrate=port_cfg.get("baudrate") or 9600,
+            note=request.query_params.get("note"),
+        )
+
+    @router.post("/refs/scales/{scale_id}/settings")
+    async def scale_settings_save(
+        request: Request,
+        admin: PanelAdmin,
+        scale_id: int,
+        zero_threshold_kg: Annotated[float, Form()],
+        vehicle_threshold_kg: Annotated[float, Form()],
+        zero_timeout_s: Annotated[float, Form()],
+        vehicle_timeout_s: Annotated[float, Form()],
+        stable_duration_s: Annotated[float, Form()],
+        stable_timeout_s: Annotated[float, Form()],
+        no_data_timeout_s: Annotated[float, Form()],
+        port: Annotated[str, Form()] = "",
+        baudrate: Annotated[str, Form()] = "",
+    ) -> RedirectResponse:
+        def back(note: str) -> RedirectResponse:
+            return RedirectResponse(
+                f"/panel/refs/scales/{scale_id}/settings?note={quote(note)}",
+                status_code=303,
+            )
+
+        parsed_baudrate, baudrate_ok = _parse_opt_int(baudrate)
+        if not baudrate_ok:
+            return back("скорость порта — число")
+        cycle = CycleSettings(
+            zero_threshold_kg=zero_threshold_kg,
+            vehicle_threshold_kg=vehicle_threshold_kg,
+            zero_timeout_s=zero_timeout_s,
+            vehicle_timeout_s=vehicle_timeout_s,
+            stable_duration_s=stable_duration_s,
+            stable_timeout_s=stable_timeout_s,
+            no_data_timeout_s=no_data_timeout_s,
+        )
+        error = await asyncio.to_thread(
+            _db,
+            lambda s: refs_admin.save_scale_settings(
+                s, scale_id, cycle=cycle, port=port, baudrate=parsed_baudrate
+            ),
+        )
+        if error is not None:
+            return back(error)
+        logger.info("панель (%s): настройки весов id=%d сохранены", admin, scale_id)
+        tail = await _push_scale_config(scale_id)
+        return back(f"настройки сохранены{tail}")
+
     @router.post("/refs/scales/{scale_id}/camera")
     async def refs_camera_upsert(
         request: Request,
@@ -484,7 +590,9 @@ def create_panel_router(
         )
         if error is None:
             logger.info("панель (%s): камера %s весов id=%d обновлена", admin, role, scale_id)
-            return _refs_redirect("камера сохранена")
+            # смена URL камер — часть настроек весов: доставляем агенту сразу
+            tail = await _push_scale_config(scale_id)
+            return _refs_redirect(f"камера сохранена{tail}")
         return _refs_redirect(error)
 
     def _parse_channel(raw: str) -> ReleaseChannel | None:
@@ -554,8 +662,12 @@ def create_panel_router(
     async def _push_operators() -> None:
         """Разослать подключённым агентам свежие снимки их операторов —
         сразу после изменения учёток (блокировка/пароль долетают мгновенно;
-        офлайн-агент получит актуальный снимок при следующем hello)."""
+        офлайн-агент получит актуальный снимок при следующем hello).
+        Старым агентам снимки с секретами не шлются (правило №7)."""
+        versions = await asyncio.to_thread(_db, repo.agent_versions)
         for scale_id in hub.connected_scale_ids():
+            if not supports_secure_sync(versions.get(scale_id)):
+                continue
             records = await asyncio.to_thread(
                 _db, lambda s, sid=scale_id: repo.load_operators_for_scale(s, sid)
             )

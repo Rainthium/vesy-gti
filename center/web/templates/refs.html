@@ -114,7 +114,10 @@
                   <input class="cell-input narrow" form="scale-{{ scale.id }}" name="legacy_port" value="{{ scale.legacy_port if scale.legacy_port is not none else '' }}" maxlength="5" placeholder="порт">
                   <input class="cell-input narrow" form="scale-{{ scale.id }}" name="legacy_autoscale" value="{{ scale.legacy_autoscale if scale.legacy_autoscale is not none else '' }}" maxlength="3" placeholder="as">
                 </td>
-                <td class="cell-actions"><button type="submit" form="scale-{{ scale.id }}" class="btn-row btn-row-primary">Сохранить</button></td>
+                <td class="cell-actions">
+                  <button type="submit" form="scale-{{ scale.id }}" class="btn-row btn-row-primary">Сохранить</button>
+                  <a href="/panel/refs/scales/{{ scale.id }}/settings" class="btn-row btn-link">Настройки</a>
+                </td>
                 {% else %}
                 <td>{{ scale.name }}</td>
                 <td class="cell-muted">{{ kind_names.get(scale.kind.value, scale.kind.value) }}</td>

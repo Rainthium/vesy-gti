@@ -799,3 +799,31 @@ table.users .cell-input.narrow { max-width: 76px; }
 .legacy-cell { white-space: nowrap; }
 .legacy-cell .cell-input { max-width: 130px; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+/* --- страница настроек весов --- */
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+  padding: 14px 18px 4px;
+}
+.settings-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.settings-grid input {
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 14px;
+}
+.settings-grid input:focus { outline: none; background: #fff; border-color: var(--primary); }
+.settings-actions { display: flex; gap: 10px; align-items: center; margin: 16px 0 32px; }
+.btn-link { text-decoration: none; display: inline-block; }

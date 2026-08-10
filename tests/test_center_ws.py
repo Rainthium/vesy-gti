@@ -18,7 +18,12 @@
 - репликация операторов (решение 10.08.2026): hub.send_operators (адресность,
   best-effort), repo.load_operators_for_scale (фильтры по роли/объекту,
   pw_hash байт-в-байт), после hello — tare_registry и следом
-  operators_registry в фиксированном порядке.
+  operators_registry в фиксированном порядке;
+- настройки весов из центра (решение 10.08.2026): repo.load_scale_settings
+  (полный/частичный снимок, кривые thresholds, камеры только с URL,
+  пусто → None), после hello — scale_config ТРЕТЬИМ и только при заданных
+  настройках, hub.send_scale_config (адресность, best-effort), config_status
+  от агента не рвёт соединение.
 
 Инфраструктура БД повторяет tests/test_center_db.py (временная БД + миграции
 alembic + TRUNCATE между тестами), но с собственным именем БД, чтобы не
@@ -53,6 +58,7 @@ from center.db import repo
 from center.db.models import (
     Agent,
     AgentStatus,
+    Camera,
     Scale,
     ScaleKind,
     Site,
@@ -66,12 +72,15 @@ from center.db.models import (
 from center.db.session import database_url, make_session_factory
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
 from shared.messages import (
+    ConfigStatus,
     EquipmentStatus,
     Hello,
     OfflineSync,
     OperatorRecord,
     OperatorsRegistryUpdate,
     PhotoMeta,
+    ScaleConfigUpdate,
+    ScaleSettingsPayload,
     TareRegistryUpdate,
     WeighingRecord,
     WeighRequest,
@@ -1309,3 +1318,275 @@ class TestAgentsWsOperatorsRegistry:
             ws.send_text(_hello_json())
             assert json.loads(ws.receive_text())["type"] == "tare_registry"
             assert json.loads(ws.receive_text())["type"] == "operators_registry"
+
+
+# ---------------------------------------------------------------------------
+# repo: снимок настроек весов для доставки агенту (load_scale_settings)
+# ---------------------------------------------------------------------------
+
+# полный набор параметров цикла, как его сохраняет страница настроек
+CYCLE_THRESHOLDS: dict[str, float] = {
+    "zero_threshold_kg": 150.0,
+    "vehicle_threshold_kg": 600.0,
+    "zero_timeout_s": 10.0,
+    "vehicle_timeout_s": 90.0,
+    "stable_duration_s": 5.0,
+    "stable_timeout_s": 30.0,
+    "no_data_timeout_s": 5.0,
+}
+
+
+def _set_scale_settings(
+    session: Session,
+    scale_id: int,
+    *,
+    thresholds: dict[str, Any] | None = None,
+    port_cfg: dict[str, Any] | None = None,
+) -> None:
+    """Записать thresholds/port_cfg прямо в строку весов (как это делает
+    save_scale_settings, но без его валидаций — для кривых данных)."""
+    scale = session.get(Scale, scale_id)
+    assert scale is not None
+    scale.thresholds = thresholds
+    scale.port_cfg = port_cfg
+    session.commit()
+
+
+def _add_camera(
+    session: Session,
+    scale_id: int,
+    role: CameraRole,
+    *,
+    snapshot_url: str | None = None,
+    rtsp_url: str | None = None,
+) -> None:
+    session.add(Camera(scale_id=scale_id, role=role, snapshot_url=snapshot_url, rtsp_url=rtsp_url))
+    session.commit()
+
+
+class TestRepoLoadScaleSettings:
+    def test_nothing_configured_returns_none(self, repo_env: tuple[Session, int, int]) -> None:
+        """В центре ничего не задано → None (агент живёт локальным конфигом)."""
+        session, scale_id, _ = repo_env
+        assert repo.load_scale_settings(session, scale_id) is None
+
+    def test_unknown_scale_returns_none(self, repo_env: tuple[Session, int, int]) -> None:
+        """Несуществующие весы → None, а не падение."""
+        session, _, _ = repo_env
+        assert repo.load_scale_settings(session, 987654) is None
+
+    def test_full_settings_loaded(self, repo_env: tuple[Session, int, int]) -> None:
+        """Полный набор: цикл, порт со скоростью и камеры с URL."""
+        session, scale_id, _ = repo_env
+        _set_scale_settings(
+            session,
+            scale_id,
+            thresholds=dict(CYCLE_THRESHOLDS),
+            port_cfg={"port": "COM11", "baudrate": 19200},
+        )
+        _add_camera(
+            session,
+            scale_id,
+            CameraRole.FRONT,
+            snapshot_url="http://u:p@10.0.0.5/front",
+            rtsp_url="rtsp://u:p@10.0.0.5/stream",
+        )
+        _add_camera(session, scale_id, CameraRole.REAR, rtsp_url="rtsp://u:p@10.0.0.6/rear")
+
+        settings = repo.load_scale_settings(session, scale_id)
+        assert settings is not None
+        assert settings.cycle is not None
+        assert settings.cycle.model_dump() == CYCLE_THRESHOLDS
+        assert settings.scale_port == "COM11"
+        assert settings.baudrate == 19200
+        assert settings.cameras is not None
+        assert [(c.role, c.snapshot_url, c.rtsp_url) for c in settings.cameras] == [
+            (CameraRole.FRONT, "http://u:p@10.0.0.5/front", "rtsp://u:p@10.0.0.5/stream"),
+            (CameraRole.REAR, None, "rtsp://u:p@10.0.0.6/rear"),
+        ]
+
+    def test_cycle_only(self, repo_env: tuple[Session, int, int]) -> None:
+        """Задан только цикл: порт и камеры — None."""
+        session, scale_id, _ = repo_env
+        _set_scale_settings(session, scale_id, thresholds=dict(CYCLE_THRESHOLDS))
+        settings = repo.load_scale_settings(session, scale_id)
+        assert settings is not None
+        assert settings.cycle is not None
+        assert settings.scale_port is None
+        assert settings.baudrate is None
+        assert settings.cameras is None
+
+    def test_port_only(self, repo_env: tuple[Session, int, int]) -> None:
+        """Задан только порт: цикл и камеры — None."""
+        session, scale_id, _ = repo_env
+        _set_scale_settings(session, scale_id, port_cfg={"port": "COM7", "baudrate": 9600})
+        settings = repo.load_scale_settings(session, scale_id)
+        assert settings is not None
+        assert settings.cycle is None
+        assert settings.scale_port == "COM7"
+        assert settings.baudrate == 9600
+        assert settings.cameras is None
+
+    def test_port_without_baudrate(self, repo_env: tuple[Session, int, int]) -> None:
+        """port_cfg без скорости: порт есть, baudrate None (скорость локальная)."""
+        session, scale_id, _ = repo_env
+        _set_scale_settings(session, scale_id, port_cfg={"port": "COM7"})
+        settings = repo.load_scale_settings(session, scale_id)
+        assert settings is not None
+        assert settings.scale_port == "COM7"
+        assert settings.baudrate is None
+
+    def test_camera_without_urls_excluded(self, repo_env: tuple[Session, int, int]) -> None:
+        """Камера из справочника без единого URL в снимок не входит; если
+        других настроек нет — снимок пустой (None)."""
+        session, scale_id, _ = repo_env
+        _add_camera(session, scale_id, CameraRole.FRONT)  # URL не заданы
+        assert repo.load_scale_settings(session, scale_id) is None
+
+    def test_camera_with_url_only_is_enough(self, repo_env: tuple[Session, int, int]) -> None:
+        """Одна камера с URL — уже непустой снимок (только cameras)."""
+        session, scale_id, _ = repo_env
+        _add_camera(session, scale_id, CameraRole.FRONT)  # без URL — отсеется
+        _add_camera(session, scale_id, CameraRole.REAR, snapshot_url="http://c/rear")
+        settings = repo.load_scale_settings(session, scale_id)
+        assert settings is not None
+        assert settings.cycle is None and settings.scale_port is None
+        assert settings.cameras is not None
+        assert [(c.role, c.snapshot_url) for c in settings.cameras] == [
+            (CameraRole.REAR, "http://c/rear")
+        ]
+
+    def test_corrupt_thresholds_skipped(self, repo_env: tuple[Session, int, int]) -> None:
+        """Кривой JSON в thresholds пропускается с warning: если больше ничего
+        не задано — None, а не падение всей раздачи настроек."""
+        session, scale_id, _ = repo_env
+        _set_scale_settings(session, scale_id, thresholds={"garbage": True})
+        assert repo.load_scale_settings(session, scale_id) is None
+
+    def test_corrupt_thresholds_do_not_hide_port(self, repo_env: tuple[Session, int, int]) -> None:
+        """Кривой цикл не мешает доставке остальных настроек (порта)."""
+        session, scale_id, _ = repo_env
+        _set_scale_settings(
+            session,
+            scale_id,
+            thresholds={"zero_threshold_kg": "мусор"},
+            port_cfg={"port": "COM7", "baudrate": 9600},
+        )
+        settings = repo.load_scale_settings(session, scale_id)
+        assert settings is not None
+        assert settings.cycle is None
+        assert settings.scale_port == "COM7"
+
+
+# ---------------------------------------------------------------------------
+# WS-эндпоинт: доставка scale_config после hello
+# ---------------------------------------------------------------------------
+
+
+class TestAgentsWsScaleConfig:
+    def test_hello_sends_scale_config_third_when_configured(self, ws_env: WsEnv) -> None:
+        """Настройки заданы: после hello агент получает ТРИ снимка в
+        фиксированном порядке — тары, операторы, затем scale_config."""
+        with ws_env.factory() as session:
+            _set_scale_settings(
+                session,
+                ws_env.scale_id,
+                thresholds=dict(CYCLE_THRESHOLDS),
+                port_cfg={"port": "COM11", "baudrate": 19200},
+            )
+            _add_camera(session, ws_env.scale_id, CameraRole.FRONT, snapshot_url="http://c/front")
+
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            _hello_and_registry(ws)  # первые два: tare_registry + operators_registry
+            third = json.loads(ws.receive_text())
+            assert third["type"] == "scale_config", "третьим должен идти scale_config"
+            settings = third["settings"]
+            assert settings["cycle"] == CYCLE_THRESHOLDS
+            assert settings["scale_port"] == "COM11"
+            assert settings["baudrate"] == 19200
+            assert [c["role"] for c in settings["cameras"]] == ["front"]
+            assert settings["cameras"][0]["snapshot_url"] == "http://c/front"
+
+    def test_hello_without_settings_sends_no_scale_config(self, ws_env: WsEnv) -> None:
+        """Настроек в центре нет: scale_config после hello НЕ отправляется —
+        следующий hello сразу отвечает реестром тар."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            _hello_and_registry(ws)
+            # если бы scale_config был отправлен, он лежал бы в буфере первым
+            ws.send_text(_hello_json())
+            after = json.loads(ws.receive_text())
+            assert after["type"] == "tare_registry", (
+                f"после hello без настроек пришло лишнее сообщение: {after['type']}"
+            )
+            assert json.loads(ws.receive_text())["type"] == "operators_registry"
+
+    def test_repeated_hello_resends_scale_config(self, ws_env: WsEnv) -> None:
+        """Каждый hello раздаёт настройки заново (переподключение агента)."""
+        with ws_env.factory() as session:
+            _set_scale_settings(session, ws_env.scale_id, thresholds=dict(CYCLE_THRESHOLDS))
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            for _ in range(2):
+                _hello_and_registry(ws)
+                config = json.loads(ws.receive_text())
+                assert config["type"] == "scale_config"
+                assert config["settings"]["cycle"] == CYCLE_THRESHOLDS
+
+    def test_config_status_from_agent_keeps_connection(self, ws_env: WsEnv) -> None:
+        """config_status от агента (ok и откат) логируется, соединение живо."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            ws.send_text(ConfigStatus(ok=True).model_dump_json())
+            ws.send_text(
+                ConfigStatus(ok=False, rolled_back=True, error="индикатор молчит").model_dump_json()
+            )
+            # цикл приёма жив: hello после отчётов обслуживается
+            registry = _hello_and_registry(ws)
+            assert registry["records"] == []
+
+
+# ---------------------------------------------------------------------------
+# AgentHub: адресная отправка настроек весов (send_scale_config)
+# ---------------------------------------------------------------------------
+
+
+def _make_scale_config_update() -> ScaleConfigUpdate:
+    return ScaleConfigUpdate(settings=ScaleSettingsPayload(scale_port="COM11", baudrate=19200))
+
+
+class TestAgentHubSendScaleConfig:
+    def test_connected_agent_receives_config(self) -> None:
+        """Подключённый агент получает настройки; соседние весы — нет."""
+
+        async def scenario() -> None:
+            hub = AgentHub()
+            target, bystander = FakeLink(), FakeLink()
+            hub.attach(1, target)
+            hub.attach(2, bystander)
+            assert await hub.send_scale_config(1, _make_scale_config_update()) is True
+            assert len(target.sent) == 1
+            parsed = parse_center_message(target.sent[0])
+            assert isinstance(parsed, ScaleConfigUpdate)
+            assert parsed.settings.scale_port == "COM11"
+            assert parsed.settings.baudrate == 19200
+            # отправка адресная: настройки одних весов не уходят другим
+            assert bystander.sent == []
+
+        asyncio.run(scenario())
+
+    def test_offline_agent_returns_false(self) -> None:
+        """Агент офлайн → False без исключений (best-effort: получит при hello)."""
+
+        async def scenario() -> None:
+            hub = AgentHub()
+            assert await hub.send_scale_config(99, _make_scale_config_update()) is False
+
+        asyncio.run(scenario())
+
+    def test_dead_link_returns_false_without_raise(self) -> None:
+        """Умерший TCP (send_text бросает) → False, а не исключение наружу."""
+
+        async def scenario() -> None:
+            hub = AgentHub()
+            hub.attach(1, DeadLink())
+            assert await hub.send_scale_config(1, _make_scale_config_update()) is False
+
+        asyncio.run(scenario())
