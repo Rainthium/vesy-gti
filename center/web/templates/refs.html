@@ -3,79 +3,230 @@
 {% block body %}
 {% set active_tab = 'refs' %}
 {% include "_header.html" %}
+{% set kind_names = {'static': 'статические', 'dynamic': 'динамические', 'platform': 'платформенные'} %}
+{# карта камер: (scale_id, role) → camera #}
+{% set cam_map = {} %}
+{% for camera, scale in refs.cameras %}{% set _ = cam_map.update({scale.id ~ ':' ~ camera.role.value: camera}) %}{% endfor %}
+{% set agent_scale_ids = [] %}
+{% for agent, scale in refs.agents %}{% set _ = agent_scale_ids.append(scale.id) %}{% endfor %}
 <main class="content">
   <div class="page-head">
     <h1>Справочники</h1>
-    <span class="page-meta">только чтение · изменения — через tools/center_admin.py</span>
+    <span class="page-meta">{% if can_edit %}редактирование доступно администратору{% else %}только чтение · изменения вносит администратор{% endif %}</span>
   </div>
+  {% if note %}<div class="flash-note">{{ note }}</div>{% endif %}
+  {% if agent_token %}
+  <div class="token-note">
+    <b>Токен агента (показывается один раз, в БД хранится только хеш):</b>
+    <code>{{ agent_token }}</code>
+    <span>Впишите его в config.toml на весовом ПК. После ухода со страницы токен восстановить нельзя — только перевыпустить.</span>
+  </div>
+  {% endif %}
   <div class="refs-layout">
     <nav class="refs-menu">
-      <a href="#refs-scales">Объекты и весы</a>
+      <a href="#refs-sites">Объекты</a>
+      <a href="#refs-scales">Весы</a>
       <a href="#refs-agents">Агенты</a>
       <a href="#refs-cameras">Камеры</a>
     </nav>
     <div class="refs-sections">
-      <section class="table-card" id="refs-scales">
-        <div class="card-title">Объекты и весы</div>
+
+      <section class="table-card" id="refs-sites">
+        <div class="card-title">Объекты</div>
+        {% if can_edit %}
+        <form class="user-create" method="post" action="/panel/refs/sites/create">
+          <label>Код (слаг) <input name="code" required maxlength="32" placeholder="kyzyl-kyia" pattern="[a-z0-9][a-z0-9-]*"></label>
+          <label>Название <input name="name" required maxlength="200" placeholder="СВХ «Кызыл-Кыя»"></label>
+          <button type="submit" class="btn-primary">Создать объект</button>
+        </form>
+        <div class="card-hint">Код объекта входит в пути хранения фото и после создания не меняется. Объекты не удаляются.</div>
+        {% endif %}
         <div class="journal-scroll">
-          <table class="journal">
-            <thead><tr><th>Объект</th><th>Весы</th><th>Драйвер</th><th>Маршрут АИС (legacy)</th></tr></thead>
+          <table class="journal users">
+            <thead><tr><th>Код</th><th>Название</th><th>Часовой пояс</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
             <tbody>
-              {% for scale, site in refs.scales %}
+              {% for site in refs.sites %}
               <tr>
-                <td class="cell-gross">{{ site.name }}</td>
-                <td>{{ scale.name }}</td>
-                <td class="cell-muted">{{ scale.driver }}</td>
-                <td class="cell-muted">{% if scale.legacy_ip %}{{ scale.legacy_ip }}:{{ scale.legacy_port or '—' }} · autoscale {{ scale.legacy_autoscale }}{% else %}—{% endif %}</td>
+                <td class="cell-gross">{{ site.code }}</td>
+                {% if can_edit %}
+                <td>
+                  <form id="site-{{ site.id }}" method="post" action="/panel/refs/sites/{{ site.id }}/edit"></form>
+                  <input class="cell-input wide" form="site-{{ site.id }}" name="name" value="{{ site.name }}" maxlength="200" required>
+                </td>
+                <td class="cell-muted">{{ site.timezone }}</td>
+                <td class="cell-actions"><button type="submit" form="site-{{ site.id }}" class="btn-row btn-row-primary">Сохранить</button></td>
+                {% else %}
+                <td>{{ site.name }}</td>
+                <td class="cell-muted">{{ site.timezone }}</td>
+                {% endif %}
               </tr>
               {% else %}
-              <tr><td colspan="4" class="empty">Весы не заведены</td></tr>
+              <tr><td colspan="{{ 4 if can_edit else 3 }}" class="empty">Объекты не заведены</td></tr>
               {% endfor %}
             </tbody>
           </table>
         </div>
       </section>
+
+      <section class="table-card" id="refs-scales">
+        <div class="card-title">Весы</div>
+        {% if can_edit %}
+        <form class="user-create" method="post" action="/panel/refs/scales/create">
+          <label>Объект
+            <select name="site_id" required>
+              {% for site in refs.sites %}<option value="{{ site.id }}">{{ site.name }}</option>{% endfor %}
+            </select>
+          </label>
+          <label>Название <input name="name" required maxlength="200" placeholder="Весы SCS-80"></label>
+          <label>Тип
+            <select name="kind">
+              {% for k in scale_kinds %}<option value="{{ k.value }}">{{ kind_names.get(k.value, k.value) }}</option>{% endfor %}
+            </select>
+          </label>
+          <label>Драйвер <input name="driver" value="cas22" required maxlength="32"></label>
+          <label>Legacy IP (АИС) <input name="legacy_ip" maxlength="45" placeholder="192.168.158.20"></label>
+          <label>Порт <input name="legacy_port" inputmode="numeric" maxlength="5" class="narrow"></label>
+          <label>autoscale <input name="legacy_autoscale" inputmode="numeric" maxlength="3" class="narrow"></label>
+          <button type="submit" class="btn-primary">Создать весы</button>
+        </form>
+        <div class="card-hint">Legacy-маршрут — адрес, на который АИС слала запросы UniServer: заполняется целиком (IP + порт + autoscale) или не заполняется вовсе. Пороги и таймауты цикла — на будущей странице настроек весов.</div>
+        {% endif %}
+        <div class="journal-scroll">
+          <table class="journal users">
+            <thead><tr><th>Объект</th><th>Весы</th><th>Тип</th><th>Драйвер</th><th>Маршрут АИС (legacy)</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
+            <tbody>
+              {% for scale, site in refs.scales %}
+              <tr>
+                <td class="cell-gross">{{ site.name }}</td>
+                {% if can_edit %}
+                <td>
+                  <form id="scale-{{ scale.id }}" method="post" action="/panel/refs/scales/{{ scale.id }}/edit"></form>
+                  <input class="cell-input" form="scale-{{ scale.id }}" name="name" value="{{ scale.name }}" maxlength="200" required>
+                </td>
+                <td>
+                  <select class="cell-input" form="scale-{{ scale.id }}" name="kind">
+                    {% for k in scale_kinds %}<option value="{{ k.value }}" {{ 'selected' if scale.kind.value == k.value else '' }}>{{ kind_names.get(k.value, k.value) }}</option>{% endfor %}
+                  </select>
+                </td>
+                <td><input class="cell-input narrow" form="scale-{{ scale.id }}" name="driver" value="{{ scale.driver }}" maxlength="32" required></td>
+                <td class="legacy-cell">
+                  <input class="cell-input" form="scale-{{ scale.id }}" name="legacy_ip" value="{{ scale.legacy_ip or '' }}" maxlength="45" placeholder="IP">
+                  <input class="cell-input narrow" form="scale-{{ scale.id }}" name="legacy_port" value="{{ scale.legacy_port if scale.legacy_port is not none else '' }}" maxlength="5" placeholder="порт">
+                  <input class="cell-input narrow" form="scale-{{ scale.id }}" name="legacy_autoscale" value="{{ scale.legacy_autoscale if scale.legacy_autoscale is not none else '' }}" maxlength="3" placeholder="as">
+                </td>
+                <td class="cell-actions"><button type="submit" form="scale-{{ scale.id }}" class="btn-row btn-row-primary">Сохранить</button></td>
+                {% else %}
+                <td>{{ scale.name }}</td>
+                <td class="cell-muted">{{ kind_names.get(scale.kind.value, scale.kind.value) }}</td>
+                <td class="cell-muted">{{ scale.driver }}</td>
+                <td class="cell-muted">{% if scale.legacy_ip %}{{ scale.legacy_ip }}:{{ scale.legacy_port or '—' }} · autoscale {{ scale.legacy_autoscale }}{% else %}—{% endif %}</td>
+                {% endif %}
+              </tr>
+              {% else %}
+              <tr><td colspan="{{ 6 if can_edit else 5 }}" class="empty">Весы не заведены</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="table-card" id="refs-agents">
         <div class="card-title">Агенты</div>
+        {% if can_edit %}
+        {% set scales_without_agent = [] %}
+        {% for scale, site in refs.scales %}{% if scale.id not in agent_scale_ids %}{% set _ = scales_without_agent.append((scale, site)) %}{% endif %}{% endfor %}
+        {% if scales_without_agent %}
+        <form class="user-create" method="post" action="/panel/refs/agents/create">
+          <label>Весы (без агента)
+            <select name="scale_id" required>
+              {% for scale, site in scales_without_agent %}<option value="{{ scale.id }}">{{ site.name }} · {{ scale.name }}</option>{% endfor %}
+            </select>
+          </label>
+          <label>Канал
+            <select name="channel">
+              {% for c in channels %}<option value="{{ c.value }}">{{ c.value }}</option>{% endfor %}
+            </select>
+          </label>
+          <button type="submit" class="btn-primary">Создать агента и выпустить токен</button>
+        </form>
+        <div class="card-hint">Токен показывается один раз после создания — сразу впишите его в config.toml на весовом ПК.</div>
+        {% endif %}
+        {% endif %}
         <div class="journal-scroll">
-          <table class="journal">
-            <thead><tr><th>Весы</th><th>Статус</th><th>Версия</th><th>Канал</th><th>Последняя связь</th></tr></thead>
+          <table class="journal users">
+            <thead><tr><th>Весы</th><th>Статус</th><th>Версия</th><th>Канал</th><th>Последняя связь</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
             <tbody>
               {% for agent, scale in refs.agents %}
               <tr>
                 <td class="cell-gross">{{ scale.name }}</td>
                 <td><span class="pill {{ 'pill-ok' if agent.status.value == 'online' else 'pill-err' }}"><span class="dot"></span>{{ 'Онлайн' if agent.status.value == 'online' else 'Офлайн' }}</span></td>
                 <td>{{ agent.version or '—' }}</td>
+                {% if can_edit %}
+                <td>
+                  <form id="agent-{{ agent.id }}" method="post" action="/panel/refs/agents/{{ agent.id }}/channel"></form>
+                  <select class="cell-input narrow" form="agent-{{ agent.id }}" name="channel">
+                    {% for c in channels %}<option value="{{ c.value }}" {{ 'selected' if agent.channel.value == c.value else '' }}>{{ c.value }}</option>{% endfor %}
+                  </select>
+                  <button type="submit" form="agent-{{ agent.id }}" class="btn-row">Сменить</button>
+                </td>
+                <td class="cell-muted">{{ agent.last_seen_at | fmt_dt }}</td>
+                <td class="cell-actions">
+                  <form method="post" action="/panel/refs/agents/{{ agent.id }}/reissue-token" class="inline-form"
+                        onsubmit="return confirm('Перевыпустить токен? Работающий агент сразу потеряет связь с центром — новый токен нужно будет вписать в его конфиг.')">
+                    <button type="submit" class="btn-row btn-row-danger">Перевыпустить токен</button>
+                  </form>
+                </td>
+                {% else %}
                 <td class="cell-muted">{{ agent.channel.value }}</td>
                 <td class="cell-muted">{{ agent.last_seen_at | fmt_dt }}</td>
+                {% endif %}
               </tr>
               {% else %}
-              <tr><td colspan="5" class="empty">Агенты не заведены</td></tr>
+              <tr><td colspan="{{ 6 if can_edit else 5 }}" class="empty">Агенты не заведены</td></tr>
               {% endfor %}
             </tbody>
           </table>
         </div>
       </section>
+
       <section class="table-card" id="refs-cameras">
         <div class="card-title">Камеры</div>
+        {% if can_edit %}
+        <div class="card-hint">URL камер содержат пароли доступа — вводите полностью (например <span class="mono">http://логин:пароль@192.168.158.120/ISAPI/Streaming/channels/101/picture</span>). Пустые поля — камера не настроена.</div>
+        {% endif %}
         <div class="journal-scroll">
-          <table class="journal">
-            <thead><tr><th>Весы</th><th>Роль</th><th>Snapshot</th><th>RTSP</th></tr></thead>
+          <table class="journal users">
+            <thead><tr><th>Весы</th><th>Роль</th><th>Snapshot (HTTP)</th><th>RTSP</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
             <tbody>
-              {% for camera, scale in refs.cameras %}
+              {% for scale, site in refs.scales %}
+              {% for role in camera_roles %}
+              {% set camera = cam_map.get(scale.id ~ ':' ~ role.value) %}
               <tr>
                 <td class="cell-gross">{{ scale.name }}</td>
-                <td>{{ 'ПЕРЕД' if camera.role.value == 'front' else 'ЗАД' }}</td>
-                <td>{% if camera.snapshot_url %}<span class="pill pill-ok"><span class="dot"></span>настроен</span>{% else %}<span class="pill"><span class="dot"></span>—</span>{% endif %}</td>
-                <td>{% if camera.rtsp_url %}<span class="pill pill-ok"><span class="dot"></span>настроен</span>{% else %}<span class="pill"><span class="dot"></span>—</span>{% endif %}</td>
+                <td>{{ 'ПЕРЕД' if role.value == 'front' else 'ЗАД' }}</td>
+                {% if can_edit %}
+                <td>
+                  <form id="cam-{{ scale.id }}-{{ role.value }}" method="post" action="/panel/refs/scales/{{ scale.id }}/camera">
+                    <input type="hidden" name="role" value="{{ role.value }}">
+                  </form>
+                  <input class="cell-input wide" form="cam-{{ scale.id }}-{{ role.value }}" name="snapshot_url" value="{{ camera.snapshot_url if camera and camera.snapshot_url else '' }}" placeholder="http://…">
+                </td>
+                <td><input class="cell-input wide" form="cam-{{ scale.id }}-{{ role.value }}" name="rtsp_url" value="{{ camera.rtsp_url if camera and camera.rtsp_url else '' }}" placeholder="rtsp://…"></td>
+                <td class="cell-actions"><button type="submit" form="cam-{{ scale.id }}-{{ role.value }}" class="btn-row btn-row-primary">Сохранить</button></td>
+                {% else %}
+                <td>{% if camera and camera.snapshot_url %}<span class="pill pill-ok"><span class="dot"></span>настроен</span>{% else %}<span class="pill"><span class="dot"></span>—</span>{% endif %}</td>
+                <td>{% if camera and camera.rtsp_url %}<span class="pill pill-ok"><span class="dot"></span>настроен</span>{% else %}<span class="pill"><span class="dot"></span>—</span>{% endif %}</td>
+                {% endif %}
               </tr>
+              {% endfor %}
               {% else %}
-              <tr><td colspan="4" class="empty">Камеры не заведены</td></tr>
+              <tr><td colspan="{{ 5 if can_edit else 4 }}" class="empty">Весы не заведены</td></tr>
               {% endfor %}
             </tbody>
           </table>
         </div>
       </section>
+
     </div>
   </div>
 </main>

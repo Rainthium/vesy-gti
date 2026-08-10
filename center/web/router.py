@@ -27,10 +27,10 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from center.agents_ws.hub import AgentHub, AgentHubError
-from center.db.models import UserRole
+from center.db.models import ReleaseChannel, ScaleKind, UserRole
 from center.releases import AgentRelease, latest_release
-from center.web import queries, users_admin
-from shared.enums import WeighingSource
+from center.web import queries, refs_admin, users_admin
+from shared.enums import CameraRole, WeighingSource
 from shared.messages import EquipmentStatus, UpdateCommand
 
 logger = logging.getLogger(__name__)
@@ -314,7 +314,236 @@ def create_panel_router(
     @router.get("/refs", response_class=HTMLResponse)
     async def refs(request: Request, user: PanelUser) -> HTMLResponse:
         data = await asyncio.to_thread(_db, queries.refs_data)
-        return render("refs.html", request, user=user, refs=data)
+        # токен агента из flash-сессии: показывается ОДИН раз после выпуска
+        # (в URL секретам не место, поэтому не query-параметром)
+        agent_token = request.session.pop("refs_agent_token", None)
+        response = render(
+            "refs.html",
+            request,
+            user=user,
+            refs=data,
+            can_edit=request.session.get("panel_role") == "admin",
+            agent_token=agent_token,
+            scale_kinds=list(ScaleKind),
+            camera_roles=list(CameraRole),
+            channels=list(ReleaseChannel),
+            note=request.query_params.get("note"),
+        )
+        if agent_token is not None:
+            # страница с токеном не должна оседать в кэше/bfcache браузера
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    # --- редактирование справочников (только администратор) ---
+
+    def _refs_redirect(note: str) -> RedirectResponse:
+        return RedirectResponse(f"/panel/refs?note={quote(note)}", status_code=303)
+
+    def _parse_opt_int(raw: str) -> tuple[int | None, bool]:
+        """(значение, ok): пустая строка — None, мусор — ошибка."""
+        raw = raw.strip()
+        if not raw:
+            return None, True
+        try:
+            return int(raw), True
+        except ValueError:
+            return None, False
+
+    @router.post("/refs/sites/create")
+    async def refs_site_create(
+        request: Request,
+        admin: PanelAdmin,
+        code: Annotated[str, Form()],
+        name: Annotated[str, Form()],
+    ) -> RedirectResponse:
+        error = await asyncio.to_thread(
+            _db, lambda s: refs_admin.create_site(s, code=code, name=name)
+        )
+        if error is None:
+            logger.info("панель (%s): создан объект %s", admin, code.strip())
+            return _refs_redirect(f"объект {name.strip()} создан")
+        return _refs_redirect(error)
+
+    @router.post("/refs/sites/{site_id}/edit")
+    async def refs_site_edit(
+        request: Request,
+        admin: PanelAdmin,
+        site_id: int,
+        name: Annotated[str, Form()],
+    ) -> RedirectResponse:
+        error = await asyncio.to_thread(
+            _db, lambda s: refs_admin.update_site(s, site_id, name=name)
+        )
+        if error is None:
+            logger.info("панель (%s): объект id=%d переименован", admin, site_id)
+            return _refs_redirect("объект переименован")
+        return _refs_redirect(error)
+
+    def _parse_scale_form(
+        kind: str, legacy_port: str, legacy_autoscale: str
+    ) -> tuple[ScaleKind | None, int | None, int | None, str | None]:
+        try:
+            parsed_kind = ScaleKind(kind)
+        except ValueError:
+            return None, None, None, "неизвестный тип весов"
+        port, port_ok = _parse_opt_int(legacy_port)
+        autoscale, autoscale_ok = _parse_opt_int(legacy_autoscale)
+        if not port_ok or not autoscale_ok:
+            return None, None, None, "legacy-маршрут АИС: порт и autoscale — числа"
+        return parsed_kind, port, autoscale, None
+
+    @router.post("/refs/scales/create")
+    async def refs_scale_create(
+        request: Request,
+        admin: PanelAdmin,
+        site_id: int = Form(),
+        name: Annotated[str, Form()] = "",
+        kind: Annotated[str, Form()] = ScaleKind.STATIC.value,
+        driver: Annotated[str, Form()] = "cas22",
+        legacy_ip: Annotated[str, Form()] = "",
+        legacy_port: Annotated[str, Form()] = "",
+        legacy_autoscale: Annotated[str, Form()] = "",
+    ) -> RedirectResponse:
+        parsed_kind, port, autoscale, error = _parse_scale_form(kind, legacy_port, legacy_autoscale)
+        if error is None:
+            assert parsed_kind is not None
+            error = await asyncio.to_thread(
+                _db,
+                lambda s: refs_admin.create_scale(
+                    s,
+                    site_id=site_id,
+                    name=name,
+                    kind=parsed_kind,
+                    driver=driver,
+                    legacy_ip=legacy_ip,
+                    legacy_port=port,
+                    legacy_autoscale=autoscale,
+                ),
+            )
+        if error is None:
+            logger.info("панель (%s): созданы весы «%s»", admin, name.strip())
+            return _refs_redirect(f"весы {name.strip()} созданы")
+        return _refs_redirect(error)
+
+    @router.post("/refs/scales/{scale_id}/edit")
+    async def refs_scale_edit(
+        request: Request,
+        admin: PanelAdmin,
+        scale_id: int,
+        name: Annotated[str, Form()] = "",
+        kind: Annotated[str, Form()] = ScaleKind.STATIC.value,
+        driver: Annotated[str, Form()] = "cas22",
+        legacy_ip: Annotated[str, Form()] = "",
+        legacy_port: Annotated[str, Form()] = "",
+        legacy_autoscale: Annotated[str, Form()] = "",
+    ) -> RedirectResponse:
+        parsed_kind, port, autoscale, error = _parse_scale_form(kind, legacy_port, legacy_autoscale)
+        if error is None:
+            assert parsed_kind is not None
+            error = await asyncio.to_thread(
+                _db,
+                lambda s: refs_admin.update_scale(
+                    s,
+                    scale_id,
+                    name=name,
+                    kind=parsed_kind,
+                    driver=driver,
+                    legacy_ip=legacy_ip,
+                    legacy_port=port,
+                    legacy_autoscale=autoscale,
+                ),
+            )
+        if error is None:
+            logger.info("панель (%s): весы id=%d обновлены", admin, scale_id)
+            return _refs_redirect("весы обновлены")
+        return _refs_redirect(error)
+
+    @router.post("/refs/scales/{scale_id}/camera")
+    async def refs_camera_upsert(
+        request: Request,
+        admin: PanelAdmin,
+        scale_id: int,
+        role: Annotated[str, Form()],
+        snapshot_url: Annotated[str, Form()] = "",
+        rtsp_url: Annotated[str, Form()] = "",
+    ) -> RedirectResponse:
+        try:
+            parsed_role = CameraRole(role)
+        except ValueError:
+            return _refs_redirect("неизвестная роль камеры")
+        error = await asyncio.to_thread(
+            _db,
+            lambda s: refs_admin.upsert_camera(
+                s,
+                scale_id=scale_id,
+                role=parsed_role,
+                snapshot_url=snapshot_url,
+                rtsp_url=rtsp_url,
+            ),
+        )
+        if error is None:
+            logger.info("панель (%s): камера %s весов id=%d обновлена", admin, role, scale_id)
+            return _refs_redirect("камера сохранена")
+        return _refs_redirect(error)
+
+    def _parse_channel(raw: str) -> ReleaseChannel | None:
+        try:
+            return ReleaseChannel(raw)
+        except ValueError:
+            return None
+
+    @router.post("/refs/agents/create")
+    async def refs_agent_create(
+        request: Request,
+        admin: PanelAdmin,
+        scale_id: int = Form(),
+        channel: Annotated[str, Form()] = ReleaseChannel.PILOT.value,
+    ) -> RedirectResponse:
+        parsed_channel = _parse_channel(channel)
+        if parsed_channel is None:
+            return _refs_redirect("неизвестный канал")
+        error, token = await asyncio.to_thread(
+            _db,
+            lambda s: refs_admin.create_agent(s, scale_id=scale_id, channel=parsed_channel),
+        )
+        if error is not None:
+            return _refs_redirect(error)
+        request.session["refs_agent_token"] = token
+        logger.info("панель (%s): создан агент весов id=%d", admin, scale_id)
+        return _refs_redirect("агент создан — токен показан один раз ниже")
+
+    @router.post("/refs/agents/{agent_id}/reissue-token")
+    async def refs_agent_reissue(
+        request: Request, admin: PanelAdmin, agent_id: int
+    ) -> RedirectResponse:
+        error, token = await asyncio.to_thread(
+            _db, lambda s: refs_admin.reissue_agent_token(s, agent_id)
+        )
+        if error is not None:
+            return _refs_redirect(error)
+        request.session["refs_agent_token"] = token
+        logger.info("панель (%s): перевыпущен токен агента id=%d", admin, agent_id)
+        return _refs_redirect(
+            "токен перевыпущен — старый больше не действует, новый показан один раз ниже"
+        )
+
+    @router.post("/refs/agents/{agent_id}/channel")
+    async def refs_agent_channel(
+        request: Request,
+        admin: PanelAdmin,
+        agent_id: int,
+        channel: Annotated[str, Form()],
+    ) -> RedirectResponse:
+        parsed_channel = _parse_channel(channel)
+        if parsed_channel is None:
+            return _refs_redirect("неизвестный канал")
+        error = await asyncio.to_thread(
+            _db, lambda s: refs_admin.set_agent_channel(s, agent_id, parsed_channel)
+        )
+        if error is None:
+            logger.info("панель (%s): канал агента id=%d изменён", admin, agent_id)
+            return _refs_redirect("канал агента изменён")
+        return _refs_redirect(error)
 
     # --- пользователи (только администратор; права сверяются с БД) ---
 

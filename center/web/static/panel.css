@@ -768,3 +768,34 @@ table.users tr.row-off td .btn-row { opacity: 1; }
 .btn-row-primary:hover { background: var(--primary); color: #fff; }
 .btn-row-danger { border-color: #E3B9B9; color: #A33; }
 .btn-row-danger:hover { background: #A33; border-color: #A33; color: #fff; }
+
+/* --- редактирование справочников (админ) --- */
+.token-note {
+  background: #FFF8E8;
+  border: 1px solid #EAD9A8;
+  color: #6B5310;
+  border-radius: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.token-note code {
+  font-size: 14px;
+  font-weight: 700;
+  word-break: break-all;
+  background: #fff;
+  border: 1px dashed #EAD9A8;
+  border-radius: 8px;
+  padding: 8px 10px;
+  user-select: all;
+}
+.token-note span { font-size: 12px; }
+table.users .cell-input.wide { max-width: none; width: 100%; min-width: 220px; }
+table.users .cell-input.narrow { max-width: 76px; }
+.user-create input.narrow { min-width: 90px; }
+.legacy-cell { white-space: nowrap; }
+.legacy-cell .cell-input { max-width: 130px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }

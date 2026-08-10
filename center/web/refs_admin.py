@@ -1,0 +1,257 @@
+"""Редактирование справочников из панели (вкладка «Справочники», только admin).
+
+Мутации возвращают текст ошибки по-русски или None при успехе — как в
+``users_admin``. Правила:
+
+- объекты и весы не удаляются (на них ссылаются записи журнала) — только
+  правятся; код объекта после создания не меняется (входит в канонические
+  пути фото);
+- legacy-маршрут АИС задаётся целиком (ip + port + autoscale) или никак:
+  частично заполненный маршрут не находился бы v1-маршрутизацией;
+- камеры — upsert по (весы, роль): у весов не больше одной камеры ПЕРЕД
+  и одной ЗАД (ограничение БД);
+- агент — один на весы; токен генерируется здесь, наружу отдаётся ОДИН раз,
+  в БД хранится только sha256 (правило №7). Перевыпуск токена сразу
+  обрывает связь со старым агентом — только по явному действию админа.
+"""
+
+import logging
+import re
+import secrets
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from center.db import repo
+from center.db.models import (
+    Agent,
+    Camera,
+    ReleaseChannel,
+    Scale,
+    ScaleKind,
+    Site,
+)
+from shared.enums import CameraRole
+
+logger = logging.getLogger(__name__)
+
+# код объекта попадает в пути фото и конфиги — только слаг
+SITE_CODE_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+# драйвер — имя модуля agent/drivers/*
+DRIVER_RE = re.compile(r"[a-z0-9_]{1,32}")
+
+
+def _valid_ip(ip: str) -> bool:
+    # isascii + isdigit: юникодные «цифры» проходят isdigit, но либо роняют
+    # int(), либо дают мусорный маршрут, который АИС никогда не пришлёт
+    parts = ip.split(".")
+    return len(parts) == 4 and all(
+        p.isascii() and p.isdigit() and len(p) <= 3 and int(p) <= 255 for p in parts
+    )
+
+
+def create_site(session: Session, *, code: str, name: str) -> str | None:
+    code = code.strip().lower()
+    name = name.strip()
+    if not SITE_CODE_RE.fullmatch(code):
+        return "код объекта: латиница/цифры/дефис, до 32 символов"
+    if not name:
+        return "название объекта пустое"
+    if session.execute(select(Site).where(Site.code == code)).scalar_one_or_none():
+        return f"код {code} уже занят"
+    session.add(Site(code=code, name=name))
+    try:
+        session.commit()
+    except IntegrityError:  # гонка двух админов: unique sites.code
+        session.rollback()
+        return f"код {code} уже занят"
+    logger.info("справочники: создан объект %s (%s)", name, code)
+    return None
+
+
+def update_site(session: Session, site_id: int, *, name: str) -> str | None:
+    """Правится только название: код входит в канонические пути фото."""
+    site = session.get(Site, site_id)
+    if site is None:
+        return "объект не найден"
+    name = name.strip()
+    if not name:
+        return "название объекта пустое"
+    site.name = name
+    session.commit()
+    logger.info("справочники: объект %s переименован в «%s»", site.code, name)
+    return None
+
+
+def _check_legacy(
+    ip: str, port: int | None, autoscale: int | None
+) -> tuple[str | None, int | None, int | None, str | None]:
+    """Нормализация legacy-маршрута: всё или ничего; (ip, port, autoscale, ошибка)."""
+    ip = ip.strip()
+    if not ip and port is None and autoscale is None:
+        return None, None, None, None
+    if not ip or port is None or autoscale is None:
+        return None, None, None, "legacy-маршрут АИС: заполните ip, порт и autoscale вместе"
+    if not _valid_ip(ip):
+        return None, None, None, "legacy-маршрут АИС: некорректный IP"
+    if not 1 <= port <= 65535:
+        return None, None, None, "legacy-маршрут АИС: некорректный порт"
+    if not 1 <= autoscale <= 999:
+        return None, None, None, "legacy-маршрут АИС: autoscale от 1 до 999"
+    return ip, port, autoscale, None
+
+
+def create_scale(
+    session: Session,
+    *,
+    site_id: int,
+    name: str,
+    kind: ScaleKind,
+    driver: str,
+    legacy_ip: str = "",
+    legacy_port: int | None = None,
+    legacy_autoscale: int | None = None,
+) -> str | None:
+    if session.get(Site, site_id) is None:
+        return "объект не найден"
+    name = name.strip()
+    if not name:
+        return "название весов пустое"
+    driver = driver.strip().lower()
+    if not DRIVER_RE.fullmatch(driver):
+        return "драйвер: латиница/цифры/подчёркивание, до 32 символов"
+    ip, port, autoscale, error = _check_legacy(legacy_ip, legacy_port, legacy_autoscale)
+    if error:
+        return error
+    session.add(
+        Scale(
+            site_id=site_id,
+            name=name,
+            kind=kind,
+            driver=driver,
+            legacy_ip=ip,
+            legacy_port=port,
+            legacy_autoscale=autoscale,
+        )
+    )
+    try:
+        session.commit()
+    except IntegrityError:  # уникальный индекс legacy-маршрута
+        session.rollback()
+        return "такой legacy-маршрут уже назначен другим весам"
+    logger.info("справочники: созданы весы «%s» (driver %s)", name, driver)
+    return None
+
+
+def update_scale(
+    session: Session,
+    scale_id: int,
+    *,
+    name: str,
+    kind: ScaleKind,
+    driver: str,
+    legacy_ip: str = "",
+    legacy_port: int | None = None,
+    legacy_autoscale: int | None = None,
+) -> str | None:
+    scale = session.get(Scale, scale_id)
+    if scale is None:
+        return "весы не найдены"
+    name = name.strip()
+    if not name:
+        return "название весов пустое"
+    driver = driver.strip().lower()
+    if not DRIVER_RE.fullmatch(driver):
+        return "драйвер: латиница/цифры/подчёркивание, до 32 символов"
+    ip, port, autoscale, error = _check_legacy(legacy_ip, legacy_port, legacy_autoscale)
+    if error:
+        return error
+    scale.name = name
+    scale.kind = kind
+    scale.driver = driver
+    scale.legacy_ip = ip
+    scale.legacy_port = port
+    scale.legacy_autoscale = autoscale
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        return "такой legacy-маршрут уже назначен другим весам"
+    logger.info("справочники: весы id=%d обновлены («%s»)", scale_id, name)
+    return None
+
+
+def upsert_camera(
+    session: Session,
+    *,
+    scale_id: int,
+    role: CameraRole,
+    snapshot_url: str,
+    rtsp_url: str,
+) -> str | None:
+    """Создать/обновить камеру весов по роли; пустые URL допустимы
+    (камера остаётся в справочнике, но пути к ней не заданы)."""
+    if session.get(Scale, scale_id) is None:
+        return "весы не найдены"
+    snapshot_url = snapshot_url.strip()
+    rtsp_url = rtsp_url.strip()
+    if snapshot_url and not snapshot_url.startswith(("http://", "https://")):
+        return "snapshot-URL должен начинаться с http:// или https://"
+    if rtsp_url and not rtsp_url.startswith("rtsp://"):
+        return "RTSP-URL должен начинаться с rtsp://"
+    camera = session.execute(
+        select(Camera).where(Camera.scale_id == scale_id, Camera.role == role)
+    ).scalar_one_or_none()
+    if camera is None:
+        camera = Camera(scale_id=scale_id, role=role)
+        session.add(camera)
+    camera.snapshot_url = snapshot_url or None
+    camera.rtsp_url = rtsp_url or None
+    session.commit()
+    # URL камер содержат пароли — в лог только факт изменения (правило №7)
+    logger.info("справочники: камера %s весов id=%d обновлена", role.value, scale_id)
+    return None
+
+
+def create_agent(
+    session: Session, *, scale_id: int, channel: ReleaseChannel
+) -> tuple[str | None, str | None]:
+    """Создать агента и выпустить токен; (ошибка, токен) — токен показывается
+    один раз, в БД остаётся только хеш."""
+    if session.get(Scale, scale_id) is None:
+        return "весы не найдены", None
+    exists = session.execute(select(Agent).where(Agent.scale_id == scale_id)).scalar_one_or_none()
+    if exists is not None:
+        return "у этих весов уже есть агент (токен можно перевыпустить)", None
+    token = secrets.token_urlsafe(32)
+    session.add(Agent(scale_id=scale_id, token_hash=repo.hash_agent_token(token), channel=channel))
+    try:
+        session.commit()
+    except IntegrityError:  # гонка двух админов: unique agents.scale_id
+        session.rollback()
+        return "у этих весов уже есть агент (токен можно перевыпустить)", None
+    logger.info("справочники: создан агент весов id=%d (канал %s)", scale_id, channel.value)
+    return None, token
+
+
+def reissue_agent_token(session: Session, agent_id: int) -> tuple[str | None, str | None]:
+    """Перевыпустить токен агента; старый токен перестаёт действовать сразу."""
+    agent = session.get(Agent, agent_id)
+    if agent is None:
+        return "агент не найден", None
+    token = secrets.token_urlsafe(32)
+    agent.token_hash = repo.hash_agent_token(token)
+    session.commit()
+    logger.info("справочники: перевыпущен токен агента id=%d", agent_id)
+    return None, token
+
+
+def set_agent_channel(session: Session, agent_id: int, channel: ReleaseChannel) -> str | None:
+    agent = session.get(Agent, agent_id)
+    if agent is None:
+        return "агент не найден"
+    agent.channel = channel
+    session.commit()
+    logger.info("справочники: агент id=%d переведён на канал %s", agent_id, channel.value)
+    return None
