@@ -78,6 +78,8 @@ def create_panel_router(
     templates.env.filters["fmt_time"] = _fmt_time
     templates.env.filters["fmt_kg"] = _fmt_kg
     templates.env.globals["expires"] = queries.tare_expires_at
+    # метка старта процесса — сброс браузерного кэша статики при деплое
+    templates.env.globals["static_v"] = str(int(datetime.now(UTC).timestamp()))
 
     def _db[T](fn: Callable[[Session], T]) -> T:
         with session_factory() as session:

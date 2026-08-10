@@ -26,7 +26,9 @@
           <a class="photo-frame js-lightbox" href="/panel/photos{{ photo.path }}"
              data-full="/panel/photos{{ photo.path }}"
              data-caption="Камера {{ 'ПЕРЕД' if photo.role.value == 'front' else 'ЗАД' }} · запись №{{ w.id }} · {{ w.weighed_at | fmt_dt }}">
-            <img src="/panel/photos{{ photo.path | replace('.jpeg', '_thumb.jpeg') }}"
+            {# в карточке — полноразмерное фото (браузер ужмёт под рамку),
+               миниатюра тут была бы мыльной (замечание Игоря 10.08.2026) #}
+            <img src="/panel/photos{{ photo.path }}" loading="lazy"
                  alt="Снимок камеры {{ 'ПЕРЕД' if photo.role.value == 'front' else 'ЗАД' }}"
                  onerror="this.classList.add('failed')">
             <span class="photo-missing">снимок недоступен</span>

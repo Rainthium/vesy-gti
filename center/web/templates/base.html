@@ -5,9 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Весовая система — центр{% endblock %}</title>
   <link rel="icon" type="image/png" href="/panel/static/logo.png">
-  <link rel="stylesheet" href="/panel/static/panel.css">
-  <script src="/panel/static/htmx.min.js"></script>
-  <script src="/panel/static/lightbox.js" defer></script>
+  {# ?v= — сброс кэша браузера при каждом деплое (метка старта процесса):
+     без него после обновления центра стили/скрипты берутся из кэша #}
+  <link rel="stylesheet" href="/panel/static/panel.css?v={{ static_v }}">
+  <script src="/panel/static/htmx.min.js?v={{ static_v }}"></script>
+  <script src="/panel/static/lightbox.js?v={{ static_v }}" defer></script>
 </head>
 <body class="{% block body_class %}panel{% endblock %}">
 {% block body %}{% endblock %}

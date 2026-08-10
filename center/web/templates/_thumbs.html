@@ -5,7 +5,8 @@
 <span class="thumb-pair">
   {% for role, label in [('front', 'ПЕРЕД'), ('rear', 'ЗАД')] %}
   {% if row_photos.get(role) %}
-  <img class="thumb js-lightbox" loading="lazy"
+  {# размеры зашиты атрибутами: миниатюра не зависит от загрузки CSS #}
+  <img class="thumb js-lightbox" loading="lazy" width="58" height="38"
        src="/panel/photos{{ row_photos[role] | replace('.jpeg', '_thumb.jpeg') }}"
        data-full="/panel/photos{{ row_photos[role] }}"
        data-caption="Камера {{ label }}{% if caption_tail %} · {{ caption_tail }}{% endif %}"
