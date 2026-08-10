@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -82,6 +83,11 @@ def create_app() -> FastAPI:
     async def healthz() -> dict[str, str]:
         """Живость процесса для healthcheck'ов compose и nginx (без похода в БД)."""
         return {"status": "ok"}
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        """Корень домена ведёт в панель (человек, набравший vesy.gti.kg)."""
+        return RedirectResponse("/panel/", status_code=307)
 
     # сессии панели (подписанная cookie); секрет — из env, dev-дефолт для стенда
     app.add_middleware(
