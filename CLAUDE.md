@@ -40,6 +40,7 @@
 - Проверки перед коммитом: `uv run ruff format . && uv run ruff check . && uv run mypy . && uv run pytest -q` (все должны быть зелёными; mypy strict на shared/ и agent/drivers/).
 - Запуск стендов и CLI — раздел «Запуск в разработке» в README.md.
 - Git push по SSH работает; статус CI смотреть: `curl -s 'https://api.github.com/repos/Rainthium/vesy-gti/actions/runs?per_page=1'` (gh не авторизован).
+- **Боевая ВМ центра (сеть предприятия): `ssh vesy@192.168.140.70`** (ключ настроен). Центр в `~/vesy-gti/deploy` (docker-compose), секреты в `deploy/.env` НА ВМ (в git их нет), пароль панели — `~/panel-user.txt`, токен агента Кызыл-Кыи — `~/agent-token-kyzyl-kyia.txt`. Обновление центра: `./deploy/ship.sh vesy@192.168.140.70` (образ собирается на маке под linux/amd64 — на ВМ НЕ собирать, это слишком долго). ВМ видна только из сети предприятия.
 - Субагенты проекта: reviewer (перед каждым коммитом), qa-tester (тесты ядра), ui-maketchik (вёрстка по макетам), protocol-analyst (новые индикаторы, этап 2).
 
 ## Рабочий цикл (обязательно)
