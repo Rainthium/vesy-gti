@@ -46,16 +46,26 @@ jobs:
       - name: Дымовая проверка exe
         run: |
           # --help импортирует весь агент (uvicorn, драйверы, веб) — ловит
-          # недостающие hiddenimports ещё на сборке
-          & dist\ves-agent\ves-agent.exe --help
-          if ($LASTEXITCODE -ne 0) { throw "exe не запустился" }
+          # недостающие hiddenimports ещё на сборке; вывод при сбое — в
+          # аннотации (логи запусков анонимно недоступны)
+          $out = & dist\ves-agent\ves-agent.exe --help 2>&1 | ForEach-Object { "$_" }
+          $code = $LASTEXITCODE
+          $out | ForEach-Object { Write-Output $_ }
+          if ($code -ne 0) {
+            $out | Select-Object -Last 10 | ForEach-Object { Write-Output "::error::$_" }
+            Write-Output "::error::exe завершился с кодом $code"
+            exit 1
+          }
           # ресурсы, которые модули ищут через Path(__file__).parent
           foreach ($p in @(
             "dist\ves-agent\_internal\agent\web\templates\base.html",
             "dist\ves-agent\_internal\agent\web\static\htmx.min.js",
             "dist\ves-agent\_internal\agent\cameras\fonts\DejaVuSans-Bold-subset.ttf"
           )) {
-            if (-not (Test-Path $p)) { throw "в сборке нет ресурса: $p" }
+            if (-not (Test-Path $p)) {
+              Write-Output "::error::в сборке нет ресурса: $p"
+              exit 1
+            }
           }
 
       - name: Комплект установки (zip)
