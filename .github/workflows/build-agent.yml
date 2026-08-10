@@ -14,6 +14,10 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      # Windows по умолчанию читает файлы в cp1252 — русские комментарии
+      # (spec, конфиги) требуют UTF-8 во всех текстовых операциях Python
+      PYTHONUTF8: "1"
     defaults:
       run:
         shell: pwsh
@@ -29,7 +33,15 @@ jobs:
         run: uv sync
 
       - name: Сборка PyInstaller (onedir)
-        run: uv run --with pyinstaller pyinstaller packaging/agent/ves-agent.spec --noconfirm
+        run: |
+          uv run --with pyinstaller pyinstaller packaging/agent/ves-agent.spec --noconfirm 2>&1 |
+            Tee-Object -FilePath pyinstaller.log
+          if ($LASTEXITCODE -ne 0) {
+            # хвост лога — в аннотации: их видно анонимно через публичный API,
+            # в отличие от логов запуска (лимит GitHub: 10 error на шаг)
+            Get-Content pyinstaller.log -Tail 10 | ForEach-Object { Write-Output "::error::$_" }
+            exit 1
+          }
 
       - name: Дымовая проверка exe
         run: |
