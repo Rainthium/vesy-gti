@@ -7,7 +7,10 @@
   даже при прямом SQL-доступе; разрешён только переход synced 0 → 1;
 - реплика реестра тарирований и правило «тара не старше 3 месяцев» (№4);
 - календарная арифметика three_months_before с поджатием дня месяца;
-- персистентность файла БД и потокобезопасность при параллельной записи.
+- персистентность файла БД и потокобезопасность при параллельной записи;
+- реплика операторов центра (operators_registry): миграция схемы local_users,
+  полный снимок replace_center_operators, сохранение локальных учёток,
+  блокировка is_active=0, CLI upsert_operator поверх реплики.
 """
 
 import sqlite3
@@ -30,6 +33,8 @@ from shared import (
     WeighingRecord,
     WeighingSource,
 )
+from shared.messages import OperatorRecord
+from shared.passwords import hash_password
 from shared.tare import three_months_before
 
 
@@ -656,3 +661,185 @@ def test_find_active_tare_with_naive_at_treated_as_utc() -> None:
     tare = storage.find_active_tare("01KG888ZZZ", naive_now)
     assert tare is not None and tare.tare_value == 6900.0
     storage.close()
+
+
+# ---------------------------------------------------------------------------
+# Реплика операторов центра (operators_registry) и миграция local_users
+# ---------------------------------------------------------------------------
+
+# PBKDF2 дорогой (200k итераций) — считаем хеши один раз на модуль
+CENTER_PASSWORD = "center-pass-111"
+CENTER_PW_HASH = hash_password(CENTER_PASSWORD)
+CLI_PASSWORD = "cli-pass-222"
+
+
+def make_operator(
+    login: str,
+    *,
+    pw_hash: str = CENTER_PW_HASH,
+    full_name: str = "",
+    is_active: bool = True,
+) -> OperatorRecord:
+    """Учётка оператора из снимка центра (пароль по умолчанию общий,
+    чтобы не пересчитывать PBKDF2 в каждом тесте)."""
+    return OperatorRecord(login=login, pw_hash=pw_hash, full_name=full_name, is_active=is_active)
+
+
+class TestLocalUsersMigration:
+    """Старая БД без колонок is_active/from_center мигрирует при открытии,
+    учётки НЕ теряются (в отличие от расходной реплики тар)."""
+
+    OLD_LOGIN = "old.operator"
+
+    def _create_old_db(self, db_path: Path) -> None:
+        """Файл со СТАРОЙ схемой local_users (до репликации из центра,
+        10.08.2026) и одной учёткой оператора."""
+        conn = sqlite3.connect(db_path)
+        with conn:
+            conn.execute(
+                "CREATE TABLE local_users ("
+                " login TEXT PRIMARY KEY,"
+                " pw_hash TEXT NOT NULL,"
+                " full_name TEXT NOT NULL DEFAULT '')"
+            )
+            conn.execute(
+                "INSERT INTO local_users VALUES (?, ?, ?)",
+                (self.OLD_LOGIN, hash_password(CLI_PASSWORD), "Старый Оператор"),
+            )
+        conn.close()
+
+    def test_columns_added_and_old_operator_alive(self, tmp_path: Path) -> None:
+        """Открытие старой БД добавляет колонки; старый оператор жив и входит."""
+        db_path = tmp_path / "agent.db"
+        self._create_old_db(db_path)
+        storage = AgentStorage(db_path)
+        try:
+            columns = {
+                row["name"] for row in storage._conn.execute("PRAGMA table_info(local_users)")
+            }
+            assert {"is_active", "from_center"} <= columns
+            # DEFAULT 1 / DEFAULT 0: учётка активна и считается локальной
+            row = storage._conn.execute(
+                "SELECT is_active, from_center FROM local_users WHERE login = ?",
+                (self.OLD_LOGIN,),
+            ).fetchone()
+            assert (row["is_active"], row["from_center"]) == (1, 0)
+            # вход работает как до миграции
+            assert storage.verify_operator(self.OLD_LOGIN, CLI_PASSWORD) == "Старый Оператор"
+            assert storage.verify_operator(self.OLD_LOGIN, "wrong-pass") is None
+        finally:
+            storage.close()
+
+    def test_migrated_operator_survives_center_snapshot(self, tmp_path: Path) -> None:
+        """Мигрированная учётка — локальная (from_center=0): снимок центра
+        без этого логина её не удаляет (аварийный доступ сохраняется)."""
+        db_path = tmp_path / "agent.db"
+        self._create_old_db(db_path)
+        storage = AgentStorage(db_path)
+        try:
+            storage.replace_center_operators([make_operator("center.only")])
+            assert storage.verify_operator(self.OLD_LOGIN, CLI_PASSWORD) == "Старый Оператор"
+            assert storage.verify_operator("center.only", CENTER_PASSWORD) == "center.only"
+        finally:
+            storage.close()
+
+    def test_reopen_after_migration_is_noop(self, tmp_path: Path) -> None:
+        """Повторное открытие мигрированной БД идемпотентно (без ошибок
+        duplicate column и без потери данных)."""
+        db_path = tmp_path / "agent.db"
+        self._create_old_db(db_path)
+        AgentStorage(db_path).close()
+        storage = AgentStorage(db_path)
+        try:
+            assert storage.verify_operator(self.OLD_LOGIN, CLI_PASSWORD) == "Старый Оператор"
+        finally:
+            storage.close()
+
+
+class TestReplaceCenterOperators:
+    """Полный снимок операторов из центра: замена, удаление снятых,
+    сохранение локальных, перекрытие совпадающего логина."""
+
+    def test_snapshot_replaces_previous_completely(self, storage: AgentStorage) -> None:
+        """Новый снимок вытесняет прошлый: снятые с объекта удаляются."""
+        assert storage.replace_center_operators([make_operator("op.a"), make_operator("op.b")]) == 2
+        assert storage.replace_center_operators([make_operator("op.b"), make_operator("op.c")]) == 2
+        assert storage.operators_size() == 2
+        assert storage.verify_operator("op.a", CENTER_PASSWORD) is None, "снятый оператор остался"
+        assert storage.verify_operator("op.b", CENTER_PASSWORD) == "op.b"
+        assert storage.verify_operator("op.c", CENTER_PASSWORD) == "op.c"
+
+    def test_repeat_snapshot_idempotent(self, storage: AgentStorage) -> None:
+        """Один и тот же снимок дважды — без ошибок и без дублей."""
+        snapshot = [make_operator("op.a", full_name="Оператор А"), make_operator("op.b")]
+        assert storage.replace_center_operators(snapshot) == 2
+        assert storage.replace_center_operators(snapshot) == 2
+        assert storage.operators_size() == 2
+        assert storage.verify_operator("op.a", CENTER_PASSWORD) == "Оператор А"
+
+    def test_empty_snapshot_removes_center_keeps_local(self, storage: AgentStorage) -> None:
+        """Пустой снимок удаляет всех центровых, но не локальных (CLI)."""
+        storage.upsert_operator("local.op", CLI_PASSWORD, "Локальный")
+        storage.replace_center_operators([make_operator("center.op")])
+        assert storage.replace_center_operators([]) == 0
+        assert storage.verify_operator("center.op", CENTER_PASSWORD) is None
+        assert storage.verify_operator("local.op", CLI_PASSWORD) == "Локальный"
+        assert storage.operators_size() == 1
+
+    def test_matching_login_overwritten_by_center(self, storage: AgentStorage) -> None:
+        """Совпадающий логин перезаписывается центром: центр главнее,
+        локальный пароль перестаёт подходить, from_center становится 1."""
+        storage.upsert_operator("shared.login", CLI_PASSWORD, "Локальное имя")
+        storage.replace_center_operators([make_operator("shared.login", full_name="Имя из центра")])
+        assert storage.verify_operator("shared.login", CLI_PASSWORD) is None
+        assert storage.verify_operator("shared.login", CENTER_PASSWORD) == "Имя из центра"
+        # from_center=1: следующий снимок без этого логина его удаляет
+        storage.replace_center_operators([])
+        assert storage.verify_operator("shared.login", CENTER_PASSWORD) is None
+        assert storage.operators_size() == 0
+
+    def test_inactive_operator_cannot_login(self, storage: AgentStorage) -> None:
+        """Заблокированная в центре учётка (is_active=False) не входит даже
+        с верным паролем; разблокировка новым снимком возвращает вход."""
+        storage.replace_center_operators([make_operator("blocked.op", is_active=False)])
+        assert storage.verify_operator("blocked.op", CENTER_PASSWORD) is None
+        # учётка при этом хранится (снимок полный), а не отброшена
+        assert storage.operators_size() == 1
+        storage.replace_center_operators([make_operator("blocked.op", is_active=True)])
+        assert storage.verify_operator("blocked.op", CENTER_PASSWORD) == "blocked.op"
+
+
+class TestUpsertOperatorAfterReplica:
+    """CLI add-operator поверх реплики центра: локальная учётка перекрывает
+    центровую, но следующий снимок возвращает центрового."""
+
+    def test_cli_upsert_overrides_center_and_resets_from_center(
+        self, storage: AgentStorage
+    ) -> None:
+        storage.replace_center_operators([make_operator("op.x", full_name="Центровой")])
+        storage.upsert_operator("op.x", CLI_PASSWORD, "Аварийный")
+        # входит по CLI-паролю, центровой пароль перестал подходить
+        assert storage.verify_operator("op.x", CENTER_PASSWORD) is None
+        assert storage.verify_operator("op.x", CLI_PASSWORD) == "Аварийный"
+        # from_center сброшен: пустой снимок центра учётку НЕ удаляет
+        storage.replace_center_operators([])
+        assert storage.verify_operator("op.x", CLI_PASSWORD) == "Аварийный"
+
+    def test_next_snapshot_returns_center_operator(self, storage: AgentStorage) -> None:
+        """Следующий снимок с этим логином возвращает центровые учётные данные."""
+        storage.replace_center_operators([make_operator("op.x", full_name="Центровой")])
+        storage.upsert_operator("op.x", CLI_PASSWORD, "Аварийный")
+        storage.replace_center_operators([make_operator("op.x", full_name="Центровой")])
+        assert storage.verify_operator("op.x", CLI_PASSWORD) is None
+        assert storage.verify_operator("op.x", CENTER_PASSWORD) == "Центровой"
+        # и учётка снова центровая: пустой снимок её удаляет
+        storage.replace_center_operators([])
+        assert storage.verify_operator("op.x", CENTER_PASSWORD) is None
+
+    def test_cli_upsert_reactivates_blocked_center_operator(self, storage: AgentStorage) -> None:
+        """CLI-upsert ставит is_active=1: заблокированный центром логин
+        после аварийного пересоздания входит (локальная учётка)."""
+        storage.replace_center_operators([make_operator("op.x", is_active=False)])
+        assert storage.verify_operator("op.x", CENTER_PASSWORD) is None
+        storage.upsert_operator("op.x", CLI_PASSWORD)
+        assert storage.verify_operator("op.x", CLI_PASSWORD) == "op.x"

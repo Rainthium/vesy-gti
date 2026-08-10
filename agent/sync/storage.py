@@ -25,7 +25,7 @@ from pathlib import Path
 from uuid import UUID
 
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
-from shared.messages import PhotoMeta, TareRecord, WeighingRecord
+from shared.messages import OperatorRecord, PhotoMeta, TareRecord, WeighingRecord
 from shared.passwords import hash_password, verify_password
 from shared.tare import TARE_VALIDITY_MONTHS, three_months_before  # noqa: F401 — реэкспорт
 
@@ -77,12 +77,16 @@ CREATE TABLE IF NOT EXISTS tare_registry_replica (
     PRIMARY KEY (vehicle_number, trailer_number)
 );
 
--- Локальные операторы (architecture §3.4: список синхронизируется с центром;
--- пока центр не готов — заводятся из конфига агента при старте)
+-- Операторы весов (architecture §3.4). from_center=1 — реплика учёток
+-- из центра (operators_registry, полный снимок); from_center=0 — заведённые
+-- локально CLI add-operator (аварийный доступ). is_active=0 — заблокирован
+-- в центре: вход невозможен и офлайн.
 CREATE TABLE IF NOT EXISTS local_users (
     login TEXT PRIMARY KEY,
     pw_hash TEXT NOT NULL,
-    full_name TEXT NOT NULL DEFAULT ''
+    full_name TEXT NOT NULL DEFAULT '',
+    is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+    from_center INTEGER NOT NULL DEFAULT 0 CHECK (from_center IN (0, 1))
 );
 
 -- Правило №2: запись неизменяема. Разрешён только переход synced 0 -> 1;
@@ -178,6 +182,21 @@ class AgentStorage:
             }
             if columns and "trailer_number" not in columns:
                 self._conn.execute("DROP TABLE tare_registry_replica")
+            # операторы старой схемы (до репликации из центра, 10.08.2026):
+            # учётки НЕ расходные — дополняем колонками, не пересоздаём
+            user_columns = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(local_users)").fetchall()
+            }
+            if user_columns and "is_active" not in user_columns:
+                self._conn.execute(
+                    "ALTER TABLE local_users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
+                    " CHECK (is_active IN (0, 1))"
+                )
+                self._conn.execute(
+                    "ALTER TABLE local_users ADD COLUMN from_center INTEGER NOT NULL DEFAULT 0"
+                    " CHECK (from_center IN (0, 1))"
+                )
             self._conn.executescript(_SCHEMA)
 
     def close(self) -> None:
@@ -421,23 +440,53 @@ class AgentStorage:
     # --- локальные операторы ---
 
     def upsert_operator(self, login: str, password: str, full_name: str = "") -> None:
-        """Создать или обновить оператора (пароль хранится хешем PBKDF2)."""
+        """Создать или обновить ЛОКАЛЬНОГО оператора (CLI add-operator,
+        аварийный доступ; пароль хранится хешем PBKDF2). Основной путь —
+        реплика из центра, см. replace_center_operators."""
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO local_users (login, pw_hash, full_name) VALUES (?, ?, ?)"
+                "INSERT INTO local_users (login, pw_hash, full_name, is_active, from_center)"
+                " VALUES (?, ?, ?, 1, 0)"
                 " ON CONFLICT (login) DO UPDATE SET pw_hash = excluded.pw_hash,"
-                " full_name = excluded.full_name",
+                " full_name = excluded.full_name, is_active = 1, from_center = 0",
                 (login, hash_password(password), full_name),
             )
+
+    def replace_center_operators(self, records: Iterable[OperatorRecord]) -> int:
+        """Заменить реплику операторов центра целиком (полный снимок).
+
+        Строки from_center=1, отсутствующие в снимке, удаляются (оператора
+        сняли с объекта). Локальные учётки (from_center=0) не трогаются,
+        кроме совпадающего логина — центр главнее. Возвращает размер реплики.
+        """
+        rows = [(r.login, r.pw_hash, r.full_name, int(r.is_active)) for r in records]
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM local_users WHERE from_center = 1")
+            self._conn.executemany(
+                "INSERT INTO local_users (login, pw_hash, full_name, is_active, from_center)"
+                " VALUES (?, ?, ?, ?, 1)"
+                " ON CONFLICT (login) DO UPDATE SET pw_hash = excluded.pw_hash,"
+                " full_name = excluded.full_name, is_active = excluded.is_active,"
+                " from_center = 1",
+                rows,
+            )
+        return len(rows)
+
+    def operators_size(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM local_users").fetchone()
+        return int(row["n"])
 
     def verify_operator(self, login: str, password: str) -> str | None:
         """Проверить пароль; вернуть отображаемое имя оператора или None.
 
+        Заблокированная в центре учётка (is_active=0) не входит и офлайн.
         Возвращаемое имя — full_name, а при его отсутствии сам login.
         """
         with self._lock:
             row = self._conn.execute(
-                "SELECT pw_hash, full_name FROM local_users WHERE login = ?", (login,)
+                "SELECT pw_hash, full_name FROM local_users WHERE login = ? AND is_active = 1",
+                (login,),
             ).fetchone()
         if row is None or not verify_password(password, row["pw_hash"]):
             return None

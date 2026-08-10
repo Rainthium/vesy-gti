@@ -5,8 +5,9 @@
 отдельно (бинарные кадры либо HTTP-загрузка на центр).
 
 Направления:
-- агент → центр: hello, heartbeat, weigh_result, offline_sync;
-- центр → агент: weigh_request, offline_sync_ack, tare_registry.
+- агент → центр: hello, heartbeat, weigh_result, offline_sync, update_status;
+- центр → агент: weigh_request, offline_sync_ack, tare_registry,
+  operators_registry, update_command.
 
 Состав полей — черновик v1 (этап 0); уточняется по мере реализации,
 но существующие поля не переименовываются без записи в docs/decisions.md.
@@ -180,6 +181,32 @@ class TareRegistryUpdate(BaseModel):
     records: list[TareRecord]
 
 
+class OperatorRecord(BaseModel):
+    """Учётка оператора весов, реплицируемая на агента.
+
+    Пароль передаётся ХЕШЕМ (pbkdf2$..., формат shared.passwords —
+    общий для центра и агента); сам пароль по каналу не ходит никогда.
+    Отключённые учётки реплицируются с ``is_active=False``, чтобы агент
+    заблокировал и офлайн-вход.
+    """
+
+    login: str
+    # repr=False — страховка от попадания хеша в логи через repr модели
+    # (хеш офлайн-подбираем, правило №7); в JSON-сериализацию поле входит
+    pw_hash: str = Field(repr=False)
+    full_name: str = ""
+    is_active: bool = True
+
+
+class OperatorsRegistryUpdate(BaseModel):
+    """Полный снимок операторов весов (решение Игоря 10.08.2026: учётки
+    операторов заводятся и блокируются в центре, агент хранит реплику
+    для офлайн-входа)."""
+
+    type: Literal["operators_registry"] = "operators_registry"
+    records: list[OperatorRecord]
+
+
 # --- дискриминированные объединения и разбор ---
 
 AgentMessage = Annotated[
@@ -187,7 +214,7 @@ AgentMessage = Annotated[
     Field(discriminator="type"),
 ]
 CenterMessage = Annotated[
-    WeighRequest | OfflineSyncAck | TareRegistryUpdate | UpdateCommand,
+    WeighRequest | OfflineSyncAck | TareRegistryUpdate | OperatorsRegistryUpdate | UpdateCommand,
     Field(discriminator="type"),
 ]
 

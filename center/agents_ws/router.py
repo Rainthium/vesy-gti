@@ -33,6 +33,7 @@ from shared.messages import (
     Hello,
     OfflineSync,
     OfflineSyncAck,
+    OperatorsRegistryUpdate,
     TareRegistryUpdate,
     UpdateStatus,
     WeighResult,
@@ -69,6 +70,10 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
     async def broadcast_tare_registry() -> None:
         records = await asyncio.to_thread(_db, repo.load_tare_registry)
         await hub.broadcast_tare_registry(TareRegistryUpdate(records=records))
+
+    async def send_operators(link: AgentLink, scale_id: int) -> None:
+        records = await asyncio.to_thread(_db, lambda s: repo.load_operators_for_scale(s, scale_id))
+        await link.send_text(OperatorsRegistryUpdate(records=records).model_dump_json())
 
     @router.websocket("/agents/ws")
     async def agents_ws(websocket: WebSocket) -> None:
@@ -110,8 +115,9 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                             s, agent_id, AgentStatus.ONLINE, version=m.version
                         ),
                     )
-                    # раздача реестра тарирований при каждом подключении
+                    # раздача реестров при каждом подключении: тары и операторы
                     await send_tare_registry(link)
+                    await send_operators(link, scale_id)
 
                 elif isinstance(message, Heartbeat):
                     hub.update_equipment(scale_id, message.equipment)

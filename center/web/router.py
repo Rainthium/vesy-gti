@@ -27,11 +27,12 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from center.agents_ws.hub import AgentHub, AgentHubError
+from center.db import repo
 from center.db.models import ReleaseChannel, ScaleKind, UserRole
 from center.releases import AgentRelease, latest_release
 from center.web import queries, refs_admin, users_admin
 from shared.enums import CameraRole, WeighingSource
-from shared.messages import EquipmentStatus, UpdateCommand
+from shared.messages import EquipmentStatus, OperatorsRegistryUpdate, UpdateCommand
 
 logger = logging.getLogger(__name__)
 
@@ -550,6 +551,16 @@ def create_panel_router(
     def _users_redirect(note: str) -> RedirectResponse:
         return RedirectResponse(f"/panel/users?note={quote(note)}", status_code=303)
 
+    async def _push_operators() -> None:
+        """Разослать подключённым агентам свежие снимки их операторов —
+        сразу после изменения учёток (блокировка/пароль долетают мгновенно;
+        офлайн-агент получит актуальный снимок при следующем hello)."""
+        for scale_id in hub.connected_scale_ids():
+            records = await asyncio.to_thread(
+                _db, lambda s, sid=scale_id: repo.load_operators_for_scale(s, sid)
+            )
+            await hub.send_operators(scale_id, OperatorsRegistryUpdate(records=records))
+
     def _parse_role(raw: str) -> UserRole | None:
         try:
             return UserRole(raw)
@@ -611,6 +622,7 @@ def create_panel_router(
         )
         if error is None:
             logger.info("панель (%s): создан пользователь %s", admin, login.strip())
+            await _push_operators()
             return _users_redirect(f"пользователь {login.strip()} создан")
         return _users_redirect(error)
 
@@ -641,6 +653,7 @@ def create_panel_router(
         )
         if error is None:
             logger.info("панель (%s): пользователь id=%d обновлён", admin, user_id)
+            await _push_operators()
             return _users_redirect("изменения сохранены")
         return _users_redirect(error)
 
@@ -656,6 +669,7 @@ def create_panel_router(
         )
         if error is None:
             logger.info("панель (%s): пароль пользователя id=%d сброшен", admin, user_id)
+            await _push_operators()
             return _users_redirect("пароль изменён")
         return _users_redirect(error)
 
@@ -666,6 +680,7 @@ def create_panel_router(
         )
         if error is None:
             logger.info("панель (%s): пользователь id=%d включён/отключён", admin, user_id)
+            await _push_operators()
             return _users_redirect("статус учётки изменён")
         return _users_redirect(error)
 

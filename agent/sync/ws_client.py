@@ -9,7 +9,8 @@
 - приём ``weigh_request`` → вызов обработчика → отправка ``weigh_result``;
 - досылка офлайн-записей порциями (``offline_sync`` → ``offline_sync_ack``
   → пометка synced в локальной БД → следующая порция);
-- приём ``tare_registry`` → полная замена локальной реплики;
+- приём ``tare_registry`` и ``operators_registry`` → полная замена
+  локальных реплик (тары и учётки операторов из центра);
 - бесконечный реконнект с экспоненциальным backoff — потеря связи не
   роняет агента, офлайн-записи копятся в локальной БД (правило §2 п.2).
 
@@ -40,6 +41,7 @@ from shared.messages import (
     Hello,
     OfflineSync,
     OfflineSyncAck,
+    OperatorsRegistryUpdate,
     TareRegistryUpdate,
     UpdateCommand,
     UpdateStatus,
@@ -192,6 +194,9 @@ class CenterClient:
             elif isinstance(message, TareRegistryUpdate):
                 count = self._storage.replace_tare_registry(message.records)
                 logger.info("реплика реестра тарирований обновлена: %d записей", count)
+            elif isinstance(message, OperatorsRegistryUpdate):
+                count = self._storage.replace_center_operators(message.records)
+                logger.info("реплика операторов обновлена: %d учёток", count)
             elif isinstance(message, UpdateCommand):
                 self._spawn_update_handler(connection, message)
 

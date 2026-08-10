@@ -13,16 +13,20 @@
 - is_active_admin: актуальная проверка прав по БД;
 - маршруты /panel/users*: 303 без сессии, 403 для диспетчера и для
   разжалованного при живой сессии, страница и мутации для админа,
-  вкладка «Пользователи» только у роли admin.
+  вкладка «Пользователи» только у роли admin;
+- рассылка операторов агентам (_push_operators): персональные снимки после
+  каждой успешной мутации create/edit/password/toggle, тишина при ошибке.
 
 Инфраструктура БД — по образцу tests/test_center_panel.py: одноразовая БД
 ves_test_users_<pid> + миграции alembic + TRUNCATE между тестами.
 """
 
+import json
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
@@ -36,7 +40,7 @@ from sqlalchemy.pool import NullPool
 from starlette.middleware.sessions import SessionMiddleware
 
 from center.agents_ws.hub import AgentHub
-from center.db.models import Site, User, UserRole
+from center.db.models import Scale, ScaleKind, Site, User, UserRole
 from center.db.session import database_url, make_session_factory
 from center.web import queries, users_admin
 from center.web.router import create_panel_router
@@ -656,3 +660,231 @@ class TestUsersRoutesAdmin:
         dispatcher_page = users_env.client.get("/panel/")
         assert dispatcher_page.status_code == 200
         assert "/panel/users" not in dispatcher_page.text
+
+
+# ---------------------------------------------------------------------------
+# Рассылка снимков операторов агентам после мутаций (_push_operators)
+# ---------------------------------------------------------------------------
+
+
+OPERATOR_LOGIN = "scale.operator"
+OPERATOR_PASSWORD = "oper-pass-123"
+
+
+class RecordingLink:
+    """Фейковое соединение агента (протокол AgentLink): копит сообщения центра."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def send_text(self, data: str) -> None:
+        self.sent.append(data)
+
+    def snapshots(self) -> list[dict[str, Any]]:
+        """Разобранные сообщения (при мутациях ждём только operators_registry)."""
+        return [json.loads(item) for item in self.sent]
+
+    def last_logins(self) -> dict[str, dict[str, Any]]:
+        """Записи последнего снимка операторов по логину."""
+        snapshot = self.snapshots()[-1]
+        assert snapshot["type"] == "operators_registry"
+        return {record["login"]: record for record in snapshot["records"]}
+
+
+@dataclass
+class PushEnv:
+    """Окружение тестов рассылки: панель + хаб с двумя «подключёнными»
+    агентами разных объектов."""
+
+    client: TestClient
+    factory: sessionmaker[Session]
+    site_id: int  # объект первых весов (к нему привязан посеянный оператор)
+    other_site_id: int
+    link: RecordingLink  # агент весов объекта site_id
+    other_link: RecordingLink  # агент весов другого объекта
+    operator_id: int
+
+
+@pytest.fixture
+def push_env(db: sessionmaker[Session], tmp_path: Path) -> Iterator[PushEnv]:
+    """Приложение панели как в panel_env + реальный AgentHub с фейковыми
+    линками, привязанными к весам двух разных объектов."""
+    hub = AgentHub()
+    with db() as session:
+        _add_user(session, ADMIN_LOGIN, ADMIN_PASSWORD, role=UserRole.ADMIN)
+        site = _add_site(session)
+        other_site = _add_site(session, code="osh", name="СВХ «ОШ»")
+        scale = Scale(site_id=site.id, name="Весы КАНТ", kind=ScaleKind.STATIC, driver="cas22")
+        other_scale = Scale(
+            site_id=other_site.id, name="Весы ОШ", kind=ScaleKind.STATIC, driver="cas22"
+        )
+        session.add_all([scale, other_scale])
+        session.commit()
+        operator = _add_user(
+            session,
+            OPERATOR_LOGIN,
+            OPERATOR_PASSWORD,
+            role=UserRole.OPERATOR,
+            site_id=site.id,
+            full_name="Оператор Весов",
+        )
+        site_id, other_site_id = site.id, other_site.id
+        scale_id, other_scale_id, operator_id = scale.id, other_scale.id, operator.id
+
+    link, other_link = RecordingLink(), RecordingLink()
+    hub.attach(scale_id, link)
+    hub.attach(other_scale_id, other_link)
+
+    app = FastAPI()
+    app.add_middleware(SessionMiddleware, secret_key="test-secret", session_cookie="ves_test")
+    app.include_router(create_panel_router(db, hub, photos_dir=tmp_path))
+    client = TestClient(app)
+    yield PushEnv(client, db, site_id, other_site_id, link, other_link, operator_id)
+    client.close()
+
+
+def _login_push(env: PushEnv) -> None:
+    response = env.client.post(
+        "/panel/login",
+        data={"login": ADMIN_LOGIN, "password": ADMIN_PASSWORD},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303, "вход админа не удался"
+
+
+class TestOperatorsPushOnMutations:
+    def test_create_operator_pushes_personal_snapshots(self, push_env: PushEnv) -> None:
+        """Создание оператора объекта → каждому подключённому агенту уходит
+        ЕГО персональный снимок: свой агент видит новый логин, чужой — нет."""
+        _login_push(push_env)
+        response = push_env.client.post(
+            "/panel/users/create",
+            data={
+                "login": "new.oper",
+                "password": "strong-pass-9",
+                "full_name": "Новый Оператор",
+                "role": "operator",
+                "site_id": str(push_env.site_id),
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert "создан" in _note_from(response)
+
+        # оба агента получили ровно по одному снимку operators_registry
+        assert len(push_env.link.sent) == 1
+        assert len(push_env.other_link.sent) == 1
+        own = push_env.link.last_logins()
+        assert set(own) == {OPERATOR_LOGIN, "new.oper"}
+        assert own["new.oper"]["full_name"] == "Новый Оператор"
+        assert own["new.oper"]["is_active"] is True
+        # у агента чужого объекта — свой снимок, без операторов этого объекта
+        assert push_env.other_link.last_logins() == {}
+
+    def test_create_unbound_operator_reaches_all_agents(self, push_env: PushEnv) -> None:
+        """Оператор без привязки (site_id пустой) попадает в снимки ВСЕХ агентов."""
+        _login_push(push_env)
+        response = push_env.client.post(
+            "/panel/users/create",
+            data={
+                "login": "roaming.oper",
+                "password": "strong-pass-9",
+                "role": "operator",
+                "site_id": "",
+            },
+            follow_redirects=False,
+        )
+        assert "создан" in _note_from(response)
+        assert "roaming.oper" in push_env.link.last_logins()
+        assert "roaming.oper" in push_env.other_link.last_logins()
+
+    def test_create_dispatcher_pushes_snapshot_without_him(self, push_env: PushEnv) -> None:
+        """Мутация над не-оператором тоже рассылает снимки, но диспетчер
+        в реплику операторов не попадает."""
+        _login_push(push_env)
+        response = push_env.client.post(
+            "/panel/users/create",
+            data={
+                "login": "new.dispatcher",
+                "password": "strong-pass-9",
+                "role": "dispatcher",
+                "site_id": "",
+            },
+            follow_redirects=False,
+        )
+        assert "создан" in _note_from(response)
+        assert len(push_env.link.sent) == 1
+        assert "new.dispatcher" not in push_env.link.last_logins()
+
+    def test_toggle_operator_pushes_inactive(self, push_env: PushEnv) -> None:
+        """Блокировка оператора → агенту сразу уходит снимок с is_active=False
+        (офлайн-вход блокируется без ожидания hello)."""
+        _login_push(push_env)
+        response = push_env.client.post(
+            f"/panel/users/{push_env.operator_id}/toggle", follow_redirects=False
+        )
+        assert "изменён" in _note_from(response)
+        own = push_env.link.last_logins()
+        assert own[OPERATOR_LOGIN]["is_active"] is False
+
+    def test_password_change_pushes_fresh_hash(self, push_env: PushEnv) -> None:
+        """Смена пароля → в снимке новый pw_hash (равный хешу из БД),
+        старый пароль по реплике перестаёт подходить."""
+        with push_env.factory() as session:
+            old_hash = _get_user(session, OPERATOR_LOGIN).pw_hash
+        _login_push(push_env)
+        response = push_env.client.post(
+            f"/panel/users/{push_env.operator_id}/password",
+            data={"password": "new-oper-pass-77"},
+            follow_redirects=False,
+        )
+        assert "пароль изменён" in _note_from(response)
+        pushed_hash = push_env.link.last_logins()[OPERATOR_LOGIN]["pw_hash"]
+        assert pushed_hash != old_hash, "в снимок ушёл старый хеш"
+        with push_env.factory() as session:
+            db_hash = _get_user(session, OPERATOR_LOGIN).pw_hash
+        assert pushed_hash == db_hash, "хеш в снимке не совпал с хешем в БД"
+        assert verify_password("new-oper-pass-77", pushed_hash)
+        assert not verify_password(OPERATOR_PASSWORD, pushed_hash)
+
+    def test_edit_moves_operator_between_sites(self, push_env: PushEnv) -> None:
+        """Перевод оператора на другой объект → он исчезает из снимка
+        старого агента и появляется в снимке нового."""
+        _login_push(push_env)
+        response = push_env.client.post(
+            f"/panel/users/{push_env.operator_id}/edit",
+            data={
+                "full_name": "Оператор Весов",
+                "role": "operator",
+                "site_id": str(push_env.other_site_id),
+            },
+            follow_redirects=False,
+        )
+        assert "сохранены" in _note_from(response)
+        assert OPERATOR_LOGIN not in push_env.link.last_logins()
+        assert OPERATOR_LOGIN in push_env.other_link.last_logins()
+
+    @pytest.mark.parametrize(
+        ("path", "data", "note_part"),
+        [
+            (
+                "/panel/users/create",
+                {"login": OPERATOR_LOGIN, "password": "strong-pass-9", "role": "operator"},
+                "занят",
+            ),
+            ("/panel/users/create", {"login": "x.y", "password": "short"}, "короче 8"),
+            ("/panel/users/987654/toggle", {}, "не найден"),
+            ("/panel/users/987654/password", {"password": "strong-pass-9"}, "не найден"),
+        ],
+        ids=["duplicate-login", "short-password", "toggle-missing", "password-missing"],
+    )
+    def test_failed_mutation_sends_nothing(
+        self, push_env: PushEnv, path: str, data: dict[str, str], note_part: str
+    ) -> None:
+        """Неуспешная мутация (дубль логина и пр.) — рассылки НЕТ: агентам
+        не должен уходить снимок, если состояние учёток не изменилось."""
+        _login_push(push_env)
+        response = push_env.client.post(path, data=data, follow_redirects=False)
+        assert note_part in _note_from(response)
+        assert push_env.link.sent == [], "рассылка ушла при неуспешной мутации"
+        assert push_env.other_link.sent == []

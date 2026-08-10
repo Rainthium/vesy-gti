@@ -15,13 +15,16 @@ from sqlalchemy.orm import Session
 from center.db.models import (
     Agent,
     AgentStatus,
+    Scale,
     TareRegistry,
+    User,
+    UserRole,
     Weighing,
     WeighingPhoto,
     weighing_checksum,
 )
 from shared.enums import CameraRole, ErrorCode, Operation
-from shared.messages import PhotoMeta, TareRecord, WeighingRecord
+from shared.messages import OperatorRecord, PhotoMeta, TareRecord, WeighingRecord
 from shared.tare import three_months_before
 
 logger = logging.getLogger(__name__)
@@ -198,6 +201,34 @@ def load_tare_registry(session: Session, *, now: datetime | None = None) -> list
             weighing_uuid=weighing_uuid,
         )
         for tare, weighing_uuid in rows
+    ]
+
+
+def load_operators_for_scale(session: Session, scale_id: int) -> list[OperatorRecord]:
+    """Снимок операторов для реплики на агента весов (решение Игоря 10.08.2026).
+
+    Операторы — учётки users с ролью operator: привязанные к объекту этих
+    весов или без привязки (site_id NULL — работают на всех объектах).
+    Отключённые учётки входят в снимок с is_active=False, чтобы агент
+    заблокировал и офлайн-вход. Пароли — только хешами (правило №7).
+    """
+    scale = session.get(Scale, scale_id)
+    if scale is None:
+        return []
+    rows = session.execute(
+        select(User)
+        .where(User.role == UserRole.OPERATOR)
+        .where((User.site_id.is_(None)) | (User.site_id == scale.site_id))
+        .order_by(User.login)
+    ).scalars()
+    return [
+        OperatorRecord(
+            login=user.login,
+            pw_hash=user.pw_hash,
+            full_name=user.full_name,
+            is_active=user.is_active,
+        )
+        for user in rows
     ]
 
 

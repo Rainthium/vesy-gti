@@ -32,7 +32,7 @@
       <label>Пароль <input name="password" type="password" required minlength="{{ min_password }}" autocomplete="new-password"></label>
       <button type="submit" class="btn-primary">Создать</button>
     </form>
-    <div class="card-hint">Пароль — не короче {{ min_password }} символов; логин (латиница, цифры, . _ -) после создания не меняется. Пользователи не удаляются — только отключаются.</div>
+    <div class="card-hint">Пароль — не короче {{ min_password }} символов; логин (латиница, цифры, . _ -) после создания не меняется. Пользователи не удаляются — только отключаются. Учётки с ролью «оператор» реплицируются на весовые ПК выбранного объекта («— все —» = всех объектов): создание, блокировка и смена пароля доходят до агентов сразу, офлайн-вход работает по реплике.</div>
   </section>
 
   <section class="table-card">

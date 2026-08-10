@@ -14,7 +14,11 @@
 - WS-эндпоинт через TestClient: закрытие 4401 без/с неверным токеном,
   hello → tare_registry + статус online, журнал без дублей, offline_sync
   с ack на все uuid, живучесть после мусора, offline при разрыве,
-  вытеснение старого соединения новым.
+  вытеснение старого соединения новым;
+- репликация операторов (решение 10.08.2026): hub.send_operators (адресность,
+  best-effort), repo.load_operators_for_scale (фильтры по роли/объекту,
+  pw_hash байт-в-байт), после hello — tare_registry и следом
+  operators_registry в фиксированном порядке.
 
 Инфраструктура БД повторяет tests/test_center_db.py (временная БД + миграции
 alembic + TRUNCATE между тестами), но с собственным именем БД, чтобы не
@@ -53,6 +57,8 @@ from center.db.models import (
     ScaleKind,
     Site,
     TareRegistry,
+    User,
+    UserRole,
     Weighing,
     WeighingPhoto,
     weighing_checksum,
@@ -63,6 +69,8 @@ from shared.messages import (
     EquipmentStatus,
     Hello,
     OfflineSync,
+    OperatorRecord,
+    OperatorsRegistryUpdate,
     PhotoMeta,
     TareRegistryUpdate,
     WeighingRecord,
@@ -835,12 +843,15 @@ def _wait_until(predicate: Callable[[], bool], timeout: float = 10.0) -> bool:
 
 
 def _hello_and_registry(ws: WebSocketTestSession) -> dict[str, Any]:
-    """hello → ответный tare_registry; также барьер: предыдущие сообщения
-    обработаны (цикл приёма последователен)."""
+    """hello → ответные tare_registry + operators_registry (порядок фиксирован
+    циклом приёма); также барьер: предыдущие сообщения обработаны. Возвращает
+    снимок реестра тарирований."""
     ws.send_text(_hello_json())
-    message: dict[str, Any] = json.loads(ws.receive_text())
-    assert message["type"] == "tare_registry"
-    return message
+    tares: dict[str, Any] = json.loads(ws.receive_text())
+    assert tares["type"] == "tare_registry"
+    operators: dict[str, Any] = json.loads(ws.receive_text())
+    assert operators["type"] == "operators_registry"
+    return tares
 
 
 def _seed_tare(env: WsEnv, vehicle_number: str = "01KG555TT") -> WeighingRecord:
@@ -1083,3 +1094,218 @@ class TestAgentsWsDisplacement:
             )
         finally:
             ws2.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# AgentHub: адресная отправка снимка операторов (send_operators)
+# ---------------------------------------------------------------------------
+
+
+class TestAgentHubSendOperators:
+    def test_connected_agent_receives_snapshot(self) -> None:
+        """Подключённый агент получает снимок; send_operators → True."""
+
+        async def scenario() -> None:
+            hub = AgentHub()
+            target, bystander = FakeLink(), FakeLink()
+            hub.attach(1, target)
+            hub.attach(2, bystander)
+            update = OperatorsRegistryUpdate(
+                records=[OperatorRecord(login="op1", pw_hash="pbkdf2$1$aa$bb")]
+            )
+            assert await hub.send_operators(1, update) is True
+            assert len(target.sent) == 1
+            parsed = parse_center_message(target.sent[0])
+            assert isinstance(parsed, OperatorsRegistryUpdate)
+            assert parsed.records[0].login == "op1"
+            # отправка адресная: соседние весы снимок НЕ получают
+            assert bystander.sent == []
+
+        asyncio.run(scenario())
+
+    def test_offline_agent_returns_false(self) -> None:
+        """Агент офлайн → False, исключение не бросается (best-effort)."""
+
+        async def scenario() -> None:
+            hub = AgentHub()
+            assert await hub.send_operators(99, OperatorsRegistryUpdate(records=[])) is False
+
+        asyncio.run(scenario())
+
+    def test_dead_link_returns_false_without_raise(self) -> None:
+        """Умерший TCP (send_text бросает) → False, а не исключение наружу."""
+
+        async def scenario() -> None:
+            hub = AgentHub()
+            hub.attach(1, DeadLink())
+            assert await hub.send_operators(1, OperatorsRegistryUpdate(records=[])) is False
+
+        asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# repo: снимок операторов для реплики на агента (load_operators_for_scale)
+# ---------------------------------------------------------------------------
+
+# готовый хеш в формате shared.passwords: пароль по каналу не ходит,
+# репо обязан отдать значение из БД байт-в-байт, не пересчитывая
+OPERATOR_PW_HASH = "pbkdf2$200000$" + "ab" * 16 + "$" + "cd" * 32
+
+
+def _seed_user(
+    session: Session,
+    login: str,
+    *,
+    role: UserRole = UserRole.OPERATOR,
+    site_id: int | None = None,
+    is_active: bool = True,
+    full_name: str = "",
+    pw_hash: str = OPERATOR_PW_HASH,
+) -> User:
+    """Пользователь центра (по умолчанию — активный оператор без привязки)."""
+    user = User(
+        login=login,
+        pw_hash=pw_hash,
+        full_name=full_name,
+        role=role,
+        site_id=site_id,
+        is_active=is_active,
+    )
+    session.add(user)
+    session.commit()
+    return user
+
+
+def _site_of_scale(session: Session, scale_id: int) -> int:
+    scale = session.get(Scale, scale_id)
+    assert scale is not None
+    return scale.site_id
+
+
+def _seed_other_site(session: Session) -> int:
+    """Второй объект (для чужих операторов)."""
+    site = Site(code="other-site", name="Чужой объект")
+    session.add(site)
+    session.commit()
+    return site.id
+
+
+class TestRepoLoadOperators:
+    def test_own_site_operator_included(self, repo_env: tuple[Session, int, int]) -> None:
+        """Оператор, привязанный к объекту этих весов, входит в снимок
+        со всеми полями."""
+        session, scale_id, _ = repo_env
+        site_id = _site_of_scale(session, scale_id)
+        _seed_user(session, "op.own", site_id=site_id, full_name="Свой Оператор")
+        records = repo.load_operators_for_scale(session, scale_id)
+        assert [(r.login, r.full_name, r.is_active) for r in records] == [
+            ("op.own", "Свой Оператор", True)
+        ]
+
+    def test_foreign_site_operator_excluded(self, repo_env: tuple[Session, int, int]) -> None:
+        """Оператор чужого объекта в снимок этих весов не попадает."""
+        session, scale_id, _ = repo_env
+        other_site_id = _seed_other_site(session)
+        _seed_user(session, "op.foreign", site_id=other_site_id)
+        assert repo.load_operators_for_scale(session, scale_id) == []
+
+    def test_unbound_operator_included(self, repo_env: tuple[Session, int, int]) -> None:
+        """Оператор без привязки (site_id NULL) работает на всех объектах."""
+        session, scale_id, _ = repo_env
+        _seed_user(session, "op.everywhere", site_id=None)
+        records = repo.load_operators_for_scale(session, scale_id)
+        assert [r.login for r in records] == ["op.everywhere"]
+
+    def test_disabled_operator_included_with_flag(self, repo_env: tuple[Session, int, int]) -> None:
+        """Отключённая учётка входит в снимок с is_active=False — агент
+        должен заблокировать и офлайн-вход, а не «не знать» о блокировке."""
+        session, scale_id, _ = repo_env
+        site_id = _site_of_scale(session, scale_id)
+        _seed_user(session, "op.blocked", site_id=site_id, is_active=False)
+        records = repo.load_operators_for_scale(session, scale_id)
+        assert [(r.login, r.is_active) for r in records] == [("op.blocked", False)]
+
+    def test_admin_and_dispatcher_excluded(self, repo_env: tuple[Session, int, int]) -> None:
+        """Не-операторы (admin/dispatcher) не реплицируются, даже привязанные
+        к объекту весов: на весовом ПК им делать нечего."""
+        session, scale_id, _ = repo_env
+        site_id = _site_of_scale(session, scale_id)
+        _seed_user(session, "chief", role=UserRole.ADMIN, site_id=site_id)
+        _seed_user(session, "dispatcher", role=UserRole.DISPATCHER, site_id=site_id)
+        _seed_user(session, "unbound.admin", role=UserRole.ADMIN, site_id=None)
+        assert repo.load_operators_for_scale(session, scale_id) == []
+
+    def test_unknown_scale_returns_empty(self, repo_env: tuple[Session, int, int]) -> None:
+        """Несуществующие весы → пустой снимок, а не падение."""
+        session, _, _ = repo_env
+        _seed_user(session, "op.everywhere", site_id=None)
+        assert repo.load_operators_for_scale(session, 987654) == []
+
+    def test_pw_hash_passed_verbatim(self, repo_env: tuple[Session, int, int]) -> None:
+        """pw_hash в снимке равен хешу из БД байт-в-байт: пароль не
+        пересчитывается и не подменяется."""
+        session, scale_id, _ = repo_env
+        _seed_user(session, "op.hash", site_id=None, pw_hash=OPERATOR_PW_HASH)
+        records = repo.load_operators_for_scale(session, scale_id)
+        assert records[0].pw_hash == OPERATOR_PW_HASH
+
+    def test_sorted_by_login(self, repo_env: tuple[Session, int, int]) -> None:
+        """Снимок отсортирован по логину — порядок детерминирован."""
+        session, scale_id, _ = repo_env
+        site_id = _site_of_scale(session, scale_id)
+        _seed_user(session, "zeta.op", site_id=site_id)
+        _seed_user(session, "alpha.op", site_id=None)
+        _seed_user(session, "mid.op", site_id=site_id)
+        records = repo.load_operators_for_scale(session, scale_id)
+        assert [r.login for r in records] == ["alpha.op", "mid.op", "zeta.op"]
+
+
+# ---------------------------------------------------------------------------
+# WS-эндпоинт: репликация операторов после hello
+# ---------------------------------------------------------------------------
+
+
+class TestAgentsWsOperatorsRegistry:
+    def test_hello_sends_tares_then_operators_in_order(self, ws_env: WsEnv) -> None:
+        """После hello агенту уходят ДВА снимка подряд в фиксированном
+        порядке: сначала tare_registry, затем operators_registry с
+        операторами именно этого объекта."""
+        with ws_env.factory() as session:
+            site_id = _site_of_scale(session, ws_env.scale_id)
+            _seed_user(session, "op.own", site_id=site_id, full_name="Свой Оператор")
+            _seed_user(session, "op.blocked", site_id=site_id, is_active=False)
+            other_site_id = _seed_other_site(session)
+            _seed_user(session, "op.foreign", site_id=other_site_id)
+
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            ws.send_text(_hello_json())
+            first = json.loads(ws.receive_text())
+            assert first["type"] == "tare_registry", "первым должен идти реестр тар"
+            second = json.loads(ws.receive_text())
+            assert second["type"] == "operators_registry", "вторым должен идти снимок операторов"
+            by_login = {r["login"]: r for r in second["records"]}
+            # свои операторы (включая заблокированного) есть, чужого нет
+            assert set(by_login) == {"op.own", "op.blocked"}
+            assert by_login["op.own"]["full_name"] == "Свой Оператор"
+            assert by_login["op.own"]["is_active"] is True
+            assert by_login["op.own"]["pw_hash"] == OPERATOR_PW_HASH
+            assert by_login["op.blocked"]["is_active"] is False
+
+    def test_hello_without_operators_sends_empty_snapshot(self, ws_env: WsEnv) -> None:
+        """Операторов нет → после hello всё равно приходит пустой снимок
+        (агент очистит устаревшую реплику)."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            ws.send_text(_hello_json())
+            assert json.loads(ws.receive_text())["type"] == "tare_registry"
+            operators = json.loads(ws.receive_text())
+            assert operators["type"] == "operators_registry"
+            assert operators["records"] == []
+
+    def test_repeated_hello_resends_both_registries(self, ws_env: WsEnv) -> None:
+        """Каждый hello (переподключение агента) заново раздаёт оба снимка."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            _hello_and_registry(ws)
+            # второй hello в том же соединении — снова пара снимков по порядку
+            ws.send_text(_hello_json())
+            assert json.loads(ws.receive_text())["type"] == "tare_registry"
+            assert json.loads(ws.receive_text())["type"] == "operators_registry"

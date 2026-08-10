@@ -16,6 +16,7 @@ from uuid import UUID
 from shared.enums import ErrorCode
 from shared.messages import (
     EquipmentStatus,
+    OperatorsRegistryUpdate,
     TareRegistryUpdate,
     UpdateCommand,
     WeighRequest,
@@ -180,6 +181,19 @@ class AgentHub:
             self._pending.pop(request_id, None)
 
     # --- рассылка реестра тарирований ---
+
+    async def send_operators(self, scale_id: int, update: OperatorsRegistryUpdate) -> bool:
+        """Отправить агенту снимок его операторов (лучшее из возможного:
+        офлайн-агент получит актуальный снимок при следующем hello)."""
+        link = self._links.get(scale_id)
+        if link is None:
+            return False
+        try:
+            await link.send_text(update.model_dump_json())
+            return True
+        except Exception:
+            logger.warning("не удалось отправить операторов агенту весов %d", scale_id)
+            return False
 
     async def broadcast_tare_registry(self, update: TareRegistryUpdate) -> int:
         """Разослать снимок реестра всем подключённым агентам; вернуть число."""

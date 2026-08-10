@@ -14,6 +14,8 @@
   (2+2+1 при batch=2), пометка synced после ack, частичный ack, пустая очередь,
   записи, добавленные во время сессии (фиксация фактического поведения);
 - tare_registry: полная замена реплики реестра тарирований;
+- operators_registry: обновление реплики операторов (вход по новой учётке,
+  снятый оператор исчезает, заблокированный не входит офлайн);
 - реконнект: сервер недоступен → клиент жив и подключается позже; разрыв
   соединения → повторный hello и досылка накопленного; мусорные сообщения
   не роняют клиента; отмена run()/run_forever — штатная остановка.
@@ -44,6 +46,8 @@ from shared.messages import (
     Hello,
     OfflineSync,
     OfflineSyncAck,
+    OperatorRecord,
+    OperatorsRegistryUpdate,
     TareRecord,
     TareRegistryUpdate,
     WeighingRecord,
@@ -51,6 +55,7 @@ from shared.messages import (
     WeighResult,
     parse_agent_message,
 )
+from shared.passwords import hash_password
 
 # Общий лимит на один сценарий: тесты событийные, реальное время много меньше.
 SCENARIO_TIMEOUT_S = 15.0
@@ -609,6 +614,42 @@ def test_tare_registry_replaces_replica_entirely() -> None:
             assert found is not None
             assert found.tare_value == 7250.0
             assert found.weighing_uuid == new_tare.weighing_uuid
+
+    run_scenario(scenario())
+
+
+def test_operators_registry_replaces_center_replica() -> None:
+    """operators_registry от центра: реплика операторов обновляется, вход
+    по новой учётке работает, заблокированная — отклоняется офлайн."""
+
+    async def scenario() -> None:
+        storage = AgentStorage(":memory:")
+        # старый центровый оператор, которого сняли с объекта
+        storage.replace_center_operators(
+            [OperatorRecord(login="old.operator", pw_hash=hash_password("old-pass-123"))]
+        )
+        async with Scene(storage=storage) as scene:
+            await scene.center.expect(Hello)
+            update = OperatorsRegistryUpdate(
+                records=[
+                    OperatorRecord(
+                        login="a.aliev",
+                        pw_hash=hash_password("new-pass-123"),
+                        full_name="Алиев А.",
+                    ),
+                    OperatorRecord(
+                        login="blocked.op",
+                        pw_hash=hash_password("blocked-pass-1"),
+                        is_active=False,
+                    ),
+                ]
+            )
+            await scene.center.connection.send(update.model_dump_json())
+            await wait_until(lambda: storage.verify_operator("a.aliev", "new-pass-123") is not None)
+            assert storage.verify_operator("a.aliev", "new-pass-123") == "Алиев А."
+            # снятый оператор исчез, заблокированный не входит даже с верным паролем
+            assert storage.verify_operator("old.operator", "old-pass-123") is None
+            assert storage.verify_operator("blocked.op", "blocked-pass-1") is None
 
     run_scenario(scenario())
 
