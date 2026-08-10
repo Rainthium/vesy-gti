@@ -51,6 +51,7 @@ from agent.sync.storage import AgentStorage
 from agent.sync.ws_client import CenterClient, ClientConfig
 from agent.weighing.auto import AutoConfig, AutoOperationRunner
 from agent.weighing.cycle import CycleConfig
+from agent.weighing.watcher import ScaleWatcher
 from center.app import create_app
 from center.db import repo
 from center.db.models import Agent, Scale, ScaleKind, Site, Weighing
@@ -257,7 +258,9 @@ def test_full_chain_emulator_agent_center_ais(
         weight = target["kg"]
         yield from empty_scale(builder, 0.8, EMULATOR_RATE)
         yield from drive_on(builder, weight, 0.5, EMULATOR_RATE)
-        yield from stable_weight(builder, weight, 2.5, EMULATOR_RATE)
+        # окно стабильности с запасом: команда шлётся по готовой фиксации
+        # наблюдателя и должна успеть отработать до съезда
+        yield from stable_weight(builder, weight, 4.0, EMULATOR_RATE)
         yield from drive_off(builder, weight, 0.4, EMULATOR_RATE)
 
     async def run_scenario() -> None:
@@ -275,26 +278,35 @@ def test_full_chain_emulator_agent_center_ais(
         driver = Cas22Driver(f"socket://127.0.0.1:{emulator_port}")
         driver.start()
         storage = AgentStorage(tmp_path / "agent.sqlite3")
+        cycle_config = CycleConfig(
+            zero_threshold_kg=200.0,
+            vehicle_threshold_kg=500.0,
+            zero_timeout_s=15.0,
+            vehicle_timeout_s=15.0,
+            stable_duration_s=0.5,
+            stable_timeout_s=15.0,
+            no_data_timeout_s=3.0,
+        )
+        # наблюдатель платформы — как в боевом main.py: тикается фоном,
+        # команды срабатывают по его готовой фиксации
+        watcher = ScaleWatcher(cycle_config)
+
+        async def tick_watcher() -> None:
+            while True:
+                watcher.tick(driver.state)
+                await asyncio.sleep(0.05)
+
+        watcher_task = asyncio.create_task(tick_watcher())
         runner = AutoOperationRunner(
             scale_state=lambda: driver.state,
+            watcher=watcher,
             storage=storage,
             cameras=[
                 CameraConfig(role=CameraRole.FRONT, snapshot_url=f"{camera_server}/front"),
                 CameraConfig(role=CameraRole.REAR, snapshot_url=f"{camera_server}/rear"),
             ],
             photos_dir=tmp_path / "agent_photos",
-            config=AutoConfig(
-                cycle=CycleConfig(
-                    zero_threshold_kg=200.0,
-                    vehicle_threshold_kg=500.0,
-                    zero_timeout_s=15.0,
-                    vehicle_timeout_s=15.0,
-                    stable_duration_s=0.5,
-                    stable_timeout_s=15.0,
-                    no_data_timeout_s=3.0,
-                ),
-                tick_interval_s=0.05,
-            ),
+            config=AutoConfig(cycle=cycle_config, tick_interval_s=0.05),
         )
 
         def equipment() -> EquipmentStatus:
@@ -332,6 +344,13 @@ def test_full_chain_emulator_agent_center_ais(
             )
 
             # --- 1. тарирование: АИС фиксирует тару 8 000 кг ---
+            # команда заезда не ждёт (решение 10.08.2026): шлём её, когда
+            # машина стоит на платформе с готовой фиксацией наблюдателя
+            await _wait_for(
+                lambda: watcher.fixation is not None,
+                timeout_s=15,
+                what="фиксация тары на платформе",
+            )
             taring = await asyncio.to_thread(_post_v1, base_url, "taring")
             assert taring["code"] == "OK", taring
             assert taring["massa"] == TARE_KG
@@ -349,6 +368,11 @@ def test_full_chain_emulator_agent_center_ais(
 
             # --- 2. взвешивание: брутто 20 000, нетто по правилу №4 ---
             target["kg"] = BRUTTO_KG
+            await _wait_for(
+                lambda: (fx := watcher.fixation) is not None and fx.weight_kg == BRUTTO_KG,
+                timeout_s=15,
+                what="фиксация брутто на платформе",
+            )
             weighing = await asyncio.to_thread(_post_v1, base_url, "weighing")
             assert weighing["code"] == "OK", weighing
             assert weighing["massa"] == BRUTTO_KG
@@ -393,10 +417,12 @@ def test_full_chain_emulator_agent_center_ais(
         finally:
             # драйвер первым: обработчик эмулятора увидит разрыв соединения
             await asyncio.to_thread(driver.stop)
-            for task in (client_task, uploader_task, emulator_task):
+            for task in (client_task, uploader_task, emulator_task, watcher_task):
                 task.cancel()
             await asyncio.wait_for(
-                asyncio.gather(client_task, uploader_task, emulator_task, return_exceptions=True),
+                asyncio.gather(
+                    client_task, uploader_task, emulator_task, watcher_task, return_exceptions=True
+                ),
                 timeout=15,
             )
             storage.close()

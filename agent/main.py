@@ -41,6 +41,7 @@ from agent.web.app import create_app
 from agent.web.services import AgentInfo
 from agent.weighing.auto import AutoConfig, AutoOperationRunner
 from agent.weighing.manual import ManualOperationFlow, ManualPreview
+from agent.weighing.watcher import ScaleWatcher
 from shared.enums import CameraRole, Operation
 from shared.messages import CameraStatus, EquipmentStatus, TareRecord, WeighingRecord
 
@@ -214,7 +215,16 @@ class AgentRuntime:
 
 def build_runtime(
     config: AgentConfig,
-) -> tuple[AgentRuntime, Cas22Driver, AgentStorage, CenterClient, PhotoUploader, CameraHealth]:
+) -> tuple[
+    AgentRuntime,
+    Cas22Driver,
+    AgentStorage,
+    CenterClient,
+    PhotoUploader,
+    CameraHealth,
+    ScaleWatcher,
+    AutoConfig,
+]:
     """Собрать все кирпичи агента (без запуска фоновых задач)."""
     driver = Cas22Driver(config.scale.port, baudrate=config.scale.baudrate)
     storage = AgentStorage(config.storage.db_path)
@@ -225,12 +235,18 @@ def build_runtime(
         ffmpeg_path=config.ffmpeg_path,
     )
 
+    # непрерывное наблюдение за платформой (схема UniServer): команда
+    # срабатывает мгновенно по готовой фиксации стоящей машины, заезда
+    # не ждёт (решение Игоря 10.08.2026)
+    auto_config = AutoConfig(cycle=config.cycle.to_cycle_config())
+    watcher = ScaleWatcher(auto_config.cycle)
     runner = AutoOperationRunner(
         scale_state=lambda: driver.state,
+        watcher=watcher,
         storage=storage,
         cameras=config.camera_configs(),
         photos_dir=config.storage.photos_dir,
-        config=AutoConfig(cycle=config.cycle.to_cycle_config()),
+        config=auto_config,
         ffmpeg_path=config.ffmpeg_path,
     )
 
@@ -273,12 +289,21 @@ def build_runtime(
         ffmpeg_path=config.ffmpeg_path,
     )
     runtime = AgentRuntime(config, driver=driver, storage=storage, client=client, manual=manual)
-    return runtime, driver, storage, client, uploader, camera_health
+    return runtime, driver, storage, client, uploader, camera_health, watcher, auto_config
+
+
+async def watch_scale(watcher: ScaleWatcher, driver: Cas22Driver, interval_s: float) -> None:
+    """Фоновый опрос драйвера для наблюдателя платформы (5–10 раз/с)."""
+    while True:
+        watcher.tick(driver.state)
+        await asyncio.sleep(interval_s)
 
 
 async def run_agent(config: AgentConfig) -> None:
     """Запустить агента целиком; остановка — отменой (Ctrl-C / stop службы)."""
-    runtime, driver, storage, client, uploader, camera_health = build_runtime(config)
+    runtime, driver, storage, client, uploader, camera_health, watcher, auto_config = build_runtime(
+        config
+    )
     driver.start()
     cleanup_orphan_photos(storage, config.storage.photos_dir)
 
@@ -298,6 +323,9 @@ async def run_agent(config: AgentConfig) -> None:
         asyncio.create_task(run_forever(client), name="center-client"),
         asyncio.create_task(uploader.run(), name="photo-uploader"),
         asyncio.create_task(camera_health.run(), name="camera-health"),
+        asyncio.create_task(
+            watch_scale(watcher, driver, auto_config.tick_interval_s), name="scale-watcher"
+        ),
         asyncio.create_task(server.serve(), name="operator-web"),
     ]
     try:
