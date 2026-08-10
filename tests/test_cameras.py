@@ -12,8 +12,10 @@ JPEG отдаётся байт-в-байт без перекодирования
 """
 
 import base64
+import hashlib
 import http.server
 import itertools
+import re
 import socket
 import threading
 import time
@@ -49,6 +51,20 @@ def _make_handler(requests: list[RecordedRequest]) -> type[http.server.BaseHTTPR
                     self._send(200, b"<html>not a jpeg</html>")
                 elif self.path == "/status/401":
                     self._send(401, b"Unauthorized")
+                elif self.path == "/digest.jpg":
+                    # имитация Hikvision ISAPI: Basic отвергается, принимается
+                    # только корректный Digest (MD5, qop=auth) с верным хешем
+                    auth = self.headers.get("Authorization", "")
+                    if auth.startswith("Digest ") and self._digest_valid(auth):
+                        self._send(200, JPEG_BODY)
+                    else:
+                        self.send_response(401)
+                        self.send_header(
+                            "WWW-Authenticate",
+                            'Digest realm="cam", nonce="abc123", qop="auth"',
+                        )
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
                 elif self.path == "/status/500":
                     self._send(500, b"Internal Server Error")
                 elif self.path == "/slow":
@@ -60,6 +76,21 @@ def _make_handler(requests: list[RecordedRequest]) -> type[http.server.BaseHTTPR
             except BrokenPipeError:
                 # клиент отвалился по таймауту — для сервера это не ошибка
                 pass
+
+        def _digest_valid(self, auth: str) -> bool:
+            """Проверить Digest-ответ клиента по RFC 2617 (admin/secret)."""
+            fields = dict(
+                (m.group(1), m.group(2) or m.group(3))
+                for m in re.finditer(r'(\w+)=(?:"([^"]*)"|([^",\s]+))', auth)
+            )
+            ha1 = hashlib.md5(b"admin:cam:secret").hexdigest()
+            ha2 = hashlib.md5(b"GET:/digest.jpg").hexdigest()
+            expected = hashlib.md5(
+                (
+                    f"{ha1}:abc123:{fields.get('nc', '')}:{fields.get('cnonce', '')}:auth:{ha2}"
+                ).encode()
+            ).hexdigest()
+            return fields.get("response") == expected
 
         def _send(self, code: int, body: bytes) -> None:
             self.send_response(code)
@@ -247,6 +278,32 @@ class TestHttpSnapshot:
         _, headers = requests[-1]
         expected = "Basic " + base64.b64encode(b"admin:p@ss:w").decode()
         assert headers.get("Authorization") == expected
+
+    def test_digest_only_camera_works(self, http_camera: tuple[str, list[RecordedRequest]]) -> None:
+        """Камера, принимающая только Digest (Hikvision ISAPI): первый запрос
+        уходит с превентивным Basic, на 401-challenge повтор идёт с Digest."""
+        base, requests = http_camera
+        url = base.replace("http://", "http://admin:secret@") + "/digest.jpg"
+        shot = capture(CameraConfig(role=CameraRole.FRONT, snapshot_url=url))
+        assert shot.ok
+        assert shot.jpeg == JPEG_BODY
+        first_auth = requests[-2][1].get("Authorization", "")
+        retry_auth = requests[-1][1].get("Authorization", "")
+        assert first_auth.startswith("Basic ")
+        assert retry_auth.startswith("Digest ")
+        # Basic не должен уехать вместе с Digest в повторном запросе
+        assert "Basic" not in retry_auth
+
+    def test_digest_wrong_password_is_error(
+        self, http_camera: tuple[str, list[RecordedRequest]]
+    ) -> None:
+        """Неверный пароль на digest-камере — ошибка 401 без пароля в тексте."""
+        base, _ = http_camera
+        url = base.replace("http://", "http://admin:wrongpass@") + "/digest.jpg"
+        shot = capture(CameraConfig(role=CameraRole.FRONT, snapshot_url=url))
+        assert not shot.ok
+        assert shot.error is not None and "401" in shot.error
+        assert "wrongpass" not in shot.error
 
     def test_error_text_has_no_password(
         self, http_camera: tuple[str, list[RecordedRequest]]

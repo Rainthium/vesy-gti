@@ -90,9 +90,17 @@ def sanitize_url(url: str) -> str:
 
 
 def _http_snapshot(url: str, timeout_s: float) -> bytes:
-    """Получить JPEG по HTTP; учётные данные из URL идут в Basic-заголовок."""
+    """Получить JPEG по HTTP; учётные данные из URL — Basic сразу, Digest по challenge.
+
+    Basic отправляется превентивно первым же запросом (камеры без challenge,
+    лишнего круга обмена нет). Hikvision ISAPI по заводской настройке
+    принимает ТОЛЬКО Digest (проверено на Кызыл-Кые 10.08.2026): на 401
+    с Digest-challenge запрос повторяет HTTPDigestAuthHandler — его
+    Authorization кладётся в unredirected_hdrs и вытесняет Basic.
+    """
     parts = urllib.parse.urlsplit(url)
     headers = {}
+    handlers: list[urllib.request.BaseHandler] = []
     if parts.username is not None:
         # urllib не использует учётные данные из URL сам — переносим в заголовок;
         # percent-encoding раскрываем: пароль с @/: задаётся в конфиге закодированным
@@ -104,9 +112,13 @@ def _http_snapshot(url: str, timeout_s: float) -> bytes:
         if parts.port is not None:
             host = f"{host}:{parts.port}"
         url = urllib.parse.urlunsplit(parts._replace(netloc=host))
+        manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        manager.add_password(None, url, username, password)
+        handlers.append(urllib.request.HTTPDigestAuthHandler(manager))
 
+    opener = urllib.request.build_opener(*handlers)
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=timeout_s) as response:
+    with opener.open(request, timeout=timeout_s) as response:
         data: bytes = response.read()
     if not data.startswith(JPEG_MAGIC):
         raise ValueError(f"ответ не является JPEG ({len(data)} байт)")
