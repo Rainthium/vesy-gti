@@ -128,6 +128,16 @@ class OfflineSync(BaseModel):
     records: list[WeighingRecord]
 
 
+class UpdateStatus(BaseModel):
+    """Отчёт агента о ходе автообновления (для логов и панели центра)."""
+
+    type: Literal["update_status"] = "update_status"
+    agent_id: str
+    version: str  # целевая версия из команды
+    ok: bool  # True — обновление запущено (перезапуск службы пошёл)
+    error: str | None = None
+
+
 # --- центр → агент ---
 
 
@@ -140,6 +150,20 @@ class WeighRequest(BaseModel):
     vehicle_number: str | None = None  # номер ТС, если известен инициатору
     trailer_number: str | None = None
     timeout_s: float | None = None  # тайм-аут всей операции; None — из конфига агента
+
+
+class UpdateCommand(BaseModel):
+    """Команда автообновления: скачать сборку с центра и перезапуститься.
+
+    Агент проверяет sha256 и размер скачанного архива; несовпадение —
+    отказ от обновления (архив повреждён или подменён).
+    """
+
+    type: Literal["update_command"] = "update_command"
+    version: str  # версия сборки (сравнивается с agent.__version__)
+    url_path: str  # путь скачивания на центре, например /agents/releases/<файл>
+    sha256: str
+    size_bytes: int
 
 
 class OfflineSyncAck(BaseModel):
@@ -159,11 +183,11 @@ class TareRegistryUpdate(BaseModel):
 # --- дискриминированные объединения и разбор ---
 
 AgentMessage = Annotated[
-    Hello | Heartbeat | WeighResult | OfflineSync,
+    Hello | Heartbeat | WeighResult | OfflineSync | UpdateStatus,
     Field(discriminator="type"),
 ]
 CenterMessage = Annotated[
-    WeighRequest | OfflineSyncAck | TareRegistryUpdate,
+    WeighRequest | OfflineSyncAck | TareRegistryUpdate | UpdateCommand,
     Field(discriminator="type"),
 ]
 

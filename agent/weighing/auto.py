@@ -90,6 +90,10 @@ class AutoOperationRunner:
         self._clock = clock
         self._lock = asyncio.Lock()
 
+    def busy(self) -> bool:
+        """Идёт ли операция прямо сейчас (автообновление ждёт её конца)."""
+        return self._lock.locked()
+
     async def handle(self, request: WeighRequest) -> WeighResult:
         """Обработчик для CenterClient: команда → результат операции."""
         if self._lock.locked():

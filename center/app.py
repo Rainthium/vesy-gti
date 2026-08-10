@@ -21,6 +21,7 @@ from center.agents_ws.router import create_agents_router
 from center.api_v1.router import ApiV1Config, create_api_v1_router
 from center.db.session import make_engine, make_session_factory
 from center.photos.router import PhotosConfig, create_photos_router
+from center.releases_router import create_releases_router
 from center.web.router import create_panel_router
 
 # dev-значения, с которыми боевой центр стартовать отказывается (правило №7)
@@ -98,11 +99,16 @@ def create_app() -> FastAPI:
     )
     static_dir = Path(__file__).parent / "web" / "static"
     app.mount("/panel/static", StaticFiles(directory=str(static_dir)), name="panel-static")
+    # каталог релизов агента (автообновление): архивы кладутся на ВМ
+    releases_dir = Path(os.environ.get("AGENT_RELEASES_DIR", "./releases_data"))
     app.include_router(create_agents_router(hub, session_factory))
     app.include_router(create_api_v1_router(hub, session_factory, api_v1_config))
     app.include_router(create_photos_router(session_factory, photos_config))
+    app.include_router(create_releases_router(session_factory, releases_dir))
     app.include_router(
-        create_panel_router(session_factory, hub, photos_dir=photos_config.photos_dir)
+        create_panel_router(
+            session_factory, hub, photos_dir=photos_config.photos_dir, releases_dir=releases_dir
+        )
     )
     # хаб доступен другим слоям (панель, сквозные тесты)
     app.state.hub = hub

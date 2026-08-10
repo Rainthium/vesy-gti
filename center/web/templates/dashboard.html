@@ -8,6 +8,9 @@
     <h1>Состояние объектов</h1>
     <span class="page-meta">обновляется автоматически каждые 10 секунд</span>
   </div>
+  {% if update_note %}
+  <div class="flash-note">{{ update_note }}</div>
+  {% endif %}
   {% include "fragments/dashboard_grid.html" %}
 </main>
 {% endblock %}

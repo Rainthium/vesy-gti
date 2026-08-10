@@ -497,6 +497,13 @@ def _weighing_by_uuid(session: Session, record_uuid: UUID) -> Weighing:
     return session.execute(select(Weighing).where(Weighing.uuid == record_uuid)).scalar_one()
 
 
+def _weighing_by_uuid_or_none(session: Session, record_uuid: UUID) -> Weighing | None:
+    session.expire_all()
+    return session.execute(
+        select(Weighing).where(Weighing.uuid == record_uuid)
+    ).scalar_one_or_none()
+
+
 def _weighing_count(session: Session, record_uuid: UUID) -> int:
     count = session.execute(
         select(func.count()).select_from(Weighing).where(Weighing.uuid == record_uuid)
@@ -620,22 +627,14 @@ class TestRepoTareRegistry:
         assert tare.tare_value == 7500.0
         assert tare.weighing_id == _weighing_by_uuid(session, taring.uuid).id
 
-    def test_taring_err_camera_updates_registry(self, repo_env: tuple[Session, int, int]) -> None:
-        """ERR_CAMERA: вес зафиксирован → тара тоже действительна (реестр обновлён)."""
+    def test_taring_refusal_not_saved_at_all(self, repo_env: tuple[Session, int, int]) -> None:
+        """Отказы (code != OK) в журнал не пишутся вовсе (решение 10.08.2026):
+        ни записи, ни тары — агент такие операции не выполняет."""
         session, scale_id, _ = repo_env
-        taring = _make_taring(code=ErrorCode.ERR_CAMERA, message="нет снимка")
-        repo.save_weighing_record(session, scale_id, taring)
-        tare = _tare_row(session, "01KG123ABC")
-        assert tare is not None
-        assert tare.tare_value == 7500.0
-
-    def test_taring_unstable_does_not_update_registry(
-        self, repo_env: tuple[Session, int, int]
-    ) -> None:
-        """ERR_UNSTABLE без массы: тара не зафиксирована → реестр не трогаем."""
-        session, scale_id, _ = repo_env
-        taring = _make_taring(code=ErrorCode.ERR_UNSTABLE, massa=None, stable=False)
-        assert repo.save_weighing_record(session, scale_id, taring) is True
+        for code in (ErrorCode.ERR_CAMERA, ErrorCode.ERR_UNSTABLE):
+            taring = _make_taring(code=code, massa=None, stable=False)
+            assert repo.save_weighing_record(session, scale_id, taring) is False
+            assert _weighing_by_uuid_or_none(session, taring.uuid) is None
         assert _tare_row(session, "01KG123ABC") is None
 
     def test_weighing_does_not_touch_registry(self, repo_env: tuple[Session, int, int]) -> None:

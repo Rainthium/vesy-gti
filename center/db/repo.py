@@ -79,7 +79,14 @@ def save_weighing_record(
 
     Идемпотентно по uuid: повтор досылки той же записи — не ошибка
     (False). Запись после вставки неизменяема (правило №2).
+
+    Отказы (code != OK) НЕ сохраняются (решение Игоря 10.08.2026):
+    с семантикой авторежима v0.2.0 неуспешная операция агентом просто
+    не выполняется — веса и фото у отказа нет, код доходит до АИС живым
+    ответом, а журнал состоит только из состоявшихся операций.
     """
+    if record.code is not ErrorCode.OK:
+        return False
     existing = session.execute(
         select(Weighing.id).where(Weighing.uuid == record.uuid)
     ).scalar_one_or_none()
@@ -138,12 +145,8 @@ def save_weighing_record(
             )
         )
     # успешное тарирование обновляет единый реестр активных тар
-    if (
-        record.operation is Operation.TARING
-        and record.code in (ErrorCode.OK, ErrorCode.ERR_CAMERA)
-        and record.vehicle_number
-        and record.massa is not None
-    ):
+    # (сюда доходят только code == OK — отказы отсеяны выше)
+    if record.operation is Operation.TARING and record.vehicle_number and record.massa is not None:
         _upsert_tare(session, row, record)
     session.commit()
     return True

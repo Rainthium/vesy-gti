@@ -37,6 +37,7 @@ from agent.drivers.cas22 import Cas22Driver
 from agent.sync.photo_uploader import PhotoUploader
 from agent.sync.storage import AgentStorage
 from agent.sync.ws_client import CenterClient, ClientConfig, run_forever
+from agent.updater import AgentUpdater
 from agent.web.app import create_app
 from agent.web.services import AgentInfo
 from agent.weighing.auto import AutoConfig, AutoOperationRunner
@@ -260,6 +261,12 @@ def build_runtime(
             pending_sync_count=storage.pending_count(),
         )
 
+    updater = AgentUpdater(
+        agent_id=config.agent_id,
+        base_url=http_base_url(config.center.url),
+        token=config.center.token,
+        busy=runner.busy,
+    )
     client = CenterClient(
         ClientConfig(
             url=config.center.url,
@@ -272,6 +279,7 @@ def build_runtime(
         storage,
         equipment_status=equipment_status,
         on_weigh_request=runner.handle,
+        on_update_command=updater.handle,
     )
     uploader = PhotoUploader(
         storage,

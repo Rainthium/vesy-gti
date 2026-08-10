@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_thumbs.html" import photo_thumbs %}
 {% block title %}Взвешивания — Весовая система{% endblock %}
 {% block body %}
 {% set active_tab = 'journal' %}
@@ -29,7 +30,7 @@
     <div class="journal-scroll">
       <table class="journal">
         <thead>
-          <tr><th>Дата / время</th><th>Объект</th><th>Номер ТС</th><th>Прицеп</th><th>Операция</th>
+          <tr><th>Дата / время</th><th>Объект</th><th>Номер ТС</th><th>Прицеп</th><th>Фото</th><th>Операция</th>
           <th class="num">Брутто, kg</th><th class="num">Тара, kg</th><th class="num">Нетто, kg</th>
           <th>Источник</th><th>Код</th></tr>
         </thead>
@@ -40,6 +41,7 @@
             <td>{{ site.name }}</td>
             <td class="cell-vehicle">{{ weighing.vehicle_number or '—' }}</td>
             <td>{{ weighing.trailer_number or '—' }}</td>
+            <td class="cell-photos">{{ photo_thumbs(photos.get(weighing.id), '%s · %s' | format(weighing.vehicle_number or 'без номера', weighing.weighed_at | fmt_dt)) }}</td>
             <td>{{ 'Взвешивание' if weighing.operation.value == 'weighing' else 'Тарирование' }}</td>
             <td class="num cell-gross">{{ weighing.massa | fmt_kg if weighing.operation.value == 'weighing' else '—' }}</td>
             <td class="num">{{ (weighing.tare_value if weighing.operation.value == 'weighing' else weighing.massa) | fmt_kg }}</td>
@@ -48,7 +50,7 @@
             <td class="cell-muted">{{ weighing.code.value }}</td>
           </tr>
           {% else %}
-          <tr><td colspan="10" class="empty">Записей нет</td></tr>
+          <tr><td colspan="11" class="empty">Записей нет</td></tr>
           {% endfor %}
         </tbody>
       </table>

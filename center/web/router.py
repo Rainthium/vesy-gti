@@ -17,6 +17,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
@@ -24,10 +25,11 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
-from center.agents_ws.hub import AgentHub
+from center.agents_ws.hub import AgentHub, AgentHubError
+from center.releases import AgentRelease, latest_release
 from center.web import queries
 from shared.enums import WeighingSource
-from shared.messages import EquipmentStatus
+from shared.messages import EquipmentStatus, UpdateCommand
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,7 @@ def create_panel_router(
     hub: AgentHub,
     *,
     photos_dir: Path,
+    releases_dir: Path | None = None,
 ) -> APIRouter:
     """Маршруты панели; сессии — общий SessionMiddleware приложения центра."""
     router = APIRouter(prefix="/panel")
@@ -131,6 +134,11 @@ def create_panel_router(
             if (equipment := hub.equipment(item.scale.id)) is not None
         }
 
+    async def _latest_release() -> AgentRelease | None:
+        if releases_dir is None:
+            return None
+        return await asyncio.to_thread(latest_release, releases_dir)
+
     @router.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request, user: PanelUser) -> HTMLResponse:
         scales = await asyncio.to_thread(_db, queries.dashboard_scales)
@@ -140,6 +148,8 @@ def create_panel_router(
             user=user,
             scales=scales,
             equipment=_equipment_map(scales),
+            release=await _latest_release(),
+            update_note=request.query_params.get("update_note"),
         )
 
     @router.get("/fragments/dashboard", response_class=HTMLResponse)
@@ -151,7 +161,31 @@ def create_panel_router(
             user=user,
             scales=scales,
             equipment=_equipment_map(scales),
+            release=await _latest_release(),
         )
+
+    @router.post("/scales/{scale_id}/update-agent")
+    async def update_agent(request: Request, user: PanelUser, scale_id: int) -> RedirectResponse:
+        """Разослать агенту команду автообновления до актуального релиза."""
+        release = await _latest_release()
+        if release is None:
+            note = "релизы агента на центр не выложены"
+        elif not hub.connected(scale_id):
+            note = "агент не в сети — обновление невозможно"
+        else:
+            command = UpdateCommand(
+                version=release.version,
+                url_path=f"/agents/releases/{release.filename}",
+                sha256=release.sha256,
+                size_bytes=release.size_bytes,
+            )
+            try:
+                await hub.send_update_command(scale_id, command)
+                note = f"команда обновления до v{release.version} отправлена агенту"
+                logger.info("панель (%s): весы %d — %s", user, scale_id, note)
+            except AgentHubError as exc:
+                note = str(exc)
+        return RedirectResponse(f"/panel/?update_note={quote(note)}", status_code=303)
 
     def _parse_filters(
         site_id: int | None,
@@ -201,12 +235,16 @@ def create_panel_router(
                 s, filters, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE
             ),
         )
+        photos = await asyncio.to_thread(
+            _db, lambda s: queries.photos_for_weighings(s, [w.id for w, _, _ in rows])
+        )
         refs = await asyncio.to_thread(_db, queries.refs_data)
         return render(
             "journal.html",
             request,
             user=user,
             rows=rows,
+            photos=photos,
             total=total,
             page=page,
             pages=max(1, -(-total // PAGE_SIZE)),
@@ -239,11 +277,15 @@ def create_panel_router(
                 s, search=search, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE
             ),
         )
+        photos = await asyncio.to_thread(
+            _db, lambda s: queries.photos_for_weighings(s, [w.id for _, w, _, _ in rows])
+        )
         return render(
             "tares.html",
             request,
             user=user,
             rows=rows,
+            photos=photos,
             total=total,
             page=page,
             pages=max(1, -(-total // PAGE_SIZE)),

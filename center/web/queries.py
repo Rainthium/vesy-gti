@@ -20,7 +20,7 @@ from center.db.models import (
     Weighing,
     WeighingPhoto,
 )
-from shared.enums import WeighingSource
+from shared.enums import ErrorCode, WeighingSource
 from shared.passwords import verify_password
 from shared.tare import three_months_before
 
@@ -82,6 +82,9 @@ def _journal_query(filters: JournalFilters) -> Select[tuple[Weighing, Scale, Sit
         select(Weighing, Scale, Site)
         .join(Scale, Scale.id == Weighing.scale_id)
         .join(Site, Site.id == Scale.site_id)
+        # только состоявшиеся операции (решение Игоря 10.08.2026): отказы
+        # больше не сохраняются, а исторические ERR-строки скрываем
+        .where(Weighing.code == ErrorCode.OK)
     )
     if filters.site_id is not None:
         query = query.where(Site.id == filters.site_id)
@@ -194,6 +197,23 @@ def tare_list(
         query.order_by(desc(TareRegistry.tared_at)).limit(limit).offset(offset)
     ).all()
     return [tuple(row) for row in rows], int(total)
+
+
+def photos_for_weighings(session: Session, weighing_ids: list[int]) -> dict[int, dict[str, str]]:
+    """Пути фото для строк списков: weighing_id → {'front': path, 'rear': path}.
+
+    Миниатюра выводится подстановкой суффикса _thumb в шаблоне
+    (center/photos: миниатюра строится один раз при приёме файла).
+    """
+    if not weighing_ids:
+        return {}
+    result: dict[int, dict[str, str]] = {}
+    rows = session.execute(
+        select(WeighingPhoto).where(WeighingPhoto.weighing_id.in_(weighing_ids))
+    ).scalars()
+    for photo in rows:
+        result.setdefault(photo.weighing_id, {})[photo.role.value] = photo.path
+    return result
 
 
 @dataclass(frozen=True)

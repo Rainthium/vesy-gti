@@ -291,6 +291,21 @@ tr.clickable:hover td { background: var(--surface); }
 td.empty { text-align: center; color: var(--muted); padding: 24px; }
 .table-hint { font-size: 12.5px; color: var(--muted); }
 
+/* Миниатюры фото в строках списков (нет в макетах: собраны из токенов ДС) */
+td.cell-photos { padding-top: 6px; padding-bottom: 6px; }
+.thumb-pair { display: inline-flex; gap: 6px; vertical-align: middle; }
+img.thumb {
+  display: block;
+  width: 58px;
+  height: 38px;
+  object-fit: cover;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: zoom-in;
+}
+img.thumb:hover { border-color: var(--green-border); box-shadow: var(--shadow-card); }
+
 /* ---------- Пагинация ---------- */
 
 .page-line { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
@@ -594,6 +609,59 @@ td.empty { text-align: center; color: var(--muted); padding: 24px; }
   margin: 0;
 }
 
+/* ---------- Лайтбокс просмотра фото (нет в макетах: собран из токенов ДС) ---------- */
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(16, 24, 40, .78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  cursor: zoom-out;
+}
+.lightbox[hidden] { display: none; }
+.lightbox-body {
+  margin: 0;
+  max-width: 92vw;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  cursor: default;
+}
+.lightbox-img {
+  max-width: 92vw;
+  max-height: calc(92vh - 40px);
+  object-fit: contain;
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-pop);
+  background: var(--surface-2);
+}
+.lightbox-caption { font-size: 13.5px; font-weight: 700; color: #fff; text-align: center; }
+.lightbox-close {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, .14);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.lightbox-close:hover { background: rgba(255, 255, 255, .28); }
+body.lightbox-open { overflow: hidden; }
+a.photo-frame.js-lightbox { cursor: zoom-in; }
+
 /* ---------- Узкие экраны (1366×768) ---------- */
 
 @media (max-width: 1440px) {
@@ -610,4 +678,27 @@ td.empty { text-align: center; color: var(--muted); padding: 24px; }
   .record-strip > div:nth-child(2n) { border-right: none; }
   .login { grid-template-columns: 1fr; }
   .login-brand { display: none; }
+}
+
+/* Автообновление агентов (кнопка на карточке весов; нет в макетах —
+   собрано из токенов ДС) */
+.update-form { display: inline; margin-left: 8px; }
+.btn-update {
+  border: 1px solid #0E8A5B;
+  background: #fff;
+  color: #0E8A5B;
+  border-radius: 8px;
+  padding: 2px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.btn-update:hover { background: #0E8A5B; color: #fff; }
+.flash-note {
+  background: #EEF7F2;
+  border: 1px solid #BFE3D2;
+  color: #0B6B47;
+  border-radius: 12px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  font-size: 14px;
 }

@@ -125,3 +125,23 @@ ssh vesy@192.168.140.70 'cd ~/vesy-gti/deploy && docker compose up -d --force-re
 
 Откат БД не предусмотрен (взвешивания неизменяемы) — откат версии
 приложения: `git checkout <коммит>` и тот же `up -d --build`.
+
+## 9. Автообновление агентов (без AnyDesk)
+
+Центр раздаёт релизы агента из `~/vesy-gti/deploy/releases` (том
+`/data/releases` контейнера, только чтение). Выкладка нового релиза
+с рабочей машины:
+
+```bash
+# скачать архив релиза из GitHub (тег agent-vX.Y.Z) и положить на ВМ
+curl -sL -o /tmp/ves-agent.zip https://github.com/Rainthium/vesy-gti/releases/download/agent-vX.Y.Z/ves-agent-X.Y.Z-win64.zip
+ssh vesy@192.168.140.70 'mkdir -p ~/vesy-gti/deploy/releases'
+scp /tmp/ves-agent.zip vesy@192.168.140.70:~/vesy-gti/deploy/releases/ves-agent-X.Y.Z-win64.zip
+```
+
+Дальше — в панели: «Объекты» → карточка весов → кнопка «Обновить до vX.Y.Z»
+(видна, когда версия агента отличается и агент в сети). Агент скачает
+архив, сверит sha256, разложит app_new и перезапустит службу сам
+(старая версия останется в app_old на весовом ПК для отката; лог —
+C:\vesy-agent\logs\update.log). Успех виден по смене версии на дашборде
+через ~минуту.

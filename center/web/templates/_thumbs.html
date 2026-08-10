@@ -1,0 +1,17 @@
+{# Пара миниатюр фото (камеры ПЕРЕД/ЗАД) для строк списков.
+   row_photos: {'front': path, 'rear': path} или None; caption_tail — хвост подписи лайтбокса. #}
+{% macro photo_thumbs(row_photos, caption_tail) -%}
+{% if row_photos %}
+<span class="thumb-pair">
+  {% for role, label in [('front', 'ПЕРЕД'), ('rear', 'ЗАД')] %}
+  {% if row_photos.get(role) %}
+  <img class="thumb js-lightbox" loading="lazy"
+       src="/panel/photos{{ row_photos[role] | replace('.jpeg', '_thumb.jpeg') }}"
+       data-full="/panel/photos{{ row_photos[role] }}"
+       data-caption="Камера {{ label }}{% if caption_tail %} · {{ caption_tail }}{% endif %}"
+       alt="Камера {{ label }}">
+  {% endif %}
+  {% endfor %}
+</span>
+{% else %}—{% endif %}
+{%- endmacro %}

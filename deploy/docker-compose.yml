@@ -50,8 +50,12 @@ services:
       V1_WEIGH_TIMEOUT_S: ${V1_WEIGH_TIMEOUT_S:-120}
       AIS_ALLOWED_IPS: ${AIS_ALLOWED_IPS:-}
       PHOTOS_DIR: /data/photos
+      AGENT_RELEASES_DIR: /data/releases
     volumes:
       - photos:/data/photos
+      # релизы агента для автообновления: кладутся с рабочей машины
+      # командой из deploy/README.md («Автообновление агентов»)
+      - ./releases:/data/releases:ro
     depends_on:
       postgres:
         condition: service_healthy

@@ -16,7 +16,7 @@ docker build --platform linux/amd64 -f deploy/Dockerfile -t "$IMAGE" .
 
 echo "==> Синхронизация кода (deploy/, миграции не нужны — они в образе)…"
 rsync -az --delete \
-    --exclude 'deploy/.env' --exclude 'deploy/certs' \
+    --exclude 'deploy/.env' --exclude 'deploy/certs' --exclude 'deploy/releases' \
     --exclude '.venv' --exclude '.git' --exclude '__pycache__' \
     --exclude '.pytest_cache' --exclude '.mypy_cache' --exclude '.ruff_cache' \
     --exclude 'photos_data' --exclude '.claude' \

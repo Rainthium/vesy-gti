@@ -23,7 +23,9 @@
       <div class="photos">
         {% for photo in card.photos %}
         <figure class="photo-card">
-          <a class="photo-frame" href="/panel/photos{{ photo.path }}" target="_blank">
+          <a class="photo-frame js-lightbox" href="/panel/photos{{ photo.path }}"
+             data-full="/panel/photos{{ photo.path }}"
+             data-caption="Камера {{ 'ПЕРЕД' if photo.role.value == 'front' else 'ЗАД' }} · запись №{{ w.id }} · {{ w.weighed_at | fmt_dt }}">
             <img src="/panel/photos{{ photo.path | replace('.jpeg', '_thumb.jpeg') }}"
                  alt="Снимок камеры {{ 'ПЕРЕД' if photo.role.value == 'front' else 'ЗАД' }}"
                  onerror="this.classList.add('failed')">

@@ -34,6 +34,7 @@ from shared.messages import (
     OfflineSync,
     OfflineSyncAck,
     TareRegistryUpdate,
+    UpdateStatus,
     WeighResult,
     parse_agent_message,
 )
@@ -128,6 +129,21 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                     hub.resolve_result(message, scale_id=scale_id)
                     if saved and _is_taring(message):
                         await broadcast_tare_registry()
+
+                elif isinstance(message, UpdateStatus):
+                    if message.ok:
+                        logger.info(
+                            "весы %d: автообновление до %s запущено агентом",
+                            scale_id,
+                            message.version,
+                        )
+                    else:
+                        logger.error(
+                            "весы %d: автообновление до %s НЕ выполнено: %s",
+                            scale_id,
+                            message.version,
+                            message.error,
+                        )
 
                 elif isinstance(message, OfflineSync):
                     accepted = []

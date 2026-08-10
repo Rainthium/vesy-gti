@@ -41,6 +41,8 @@ from shared.messages import (
     OfflineSync,
     OfflineSyncAck,
     TareRegistryUpdate,
+    UpdateCommand,
+    UpdateStatus,
     WeighingRecord,
     WeighRequest,
     WeighResult,
@@ -84,11 +86,13 @@ class CenterClient:
         *,
         equipment_status: Callable[[], EquipmentStatus],
         on_weigh_request: Callable[[WeighRequest], Awaitable[WeighResult]],
+        on_update_command: Callable[[UpdateCommand], Awaitable[UpdateStatus]] | None = None,
     ) -> None:
         self._config = config
         self._storage = storage
         self._equipment_status = equipment_status
         self._on_weigh_request = on_weigh_request
+        self._on_update_command = on_update_command
         self._connected = asyncio.Event()
         self._stopping = False
         self._request_tasks: set[asyncio.Task[None]] = set()
@@ -188,6 +192,27 @@ class CenterClient:
             elif isinstance(message, TareRegistryUpdate):
                 count = self._storage.replace_tare_registry(message.records)
                 logger.info("реплика реестра тарирований обновлена: %d записей", count)
+            elif isinstance(message, UpdateCommand):
+                self._spawn_update_handler(connection, message)
+
+    def _spawn_update_handler(
+        self, connection: websockets.ClientConnection, command: UpdateCommand
+    ) -> None:
+        """Автообновление — отдельной задачей: скачивание длится минуты,
+        heartbeat и операции не должны замирать."""
+        handler = self._on_update_command
+
+        async def handle() -> None:
+            if handler is None:
+                logger.warning("команда автообновления получена, но обработчик не настроен")
+                return
+            status = await handler(command)
+            with contextlib.suppress(Exception):
+                await connection.send(status.model_dump_json())
+
+        task = asyncio.create_task(handle(), name=f"update-{command.version}")
+        self._request_tasks.add(task)
+        task.add_done_callback(self._request_tasks.discard)
 
     def _spawn_request_handler(
         self, connection: websockets.ClientConnection, request: WeighRequest

@@ -14,7 +14,13 @@ from typing import Protocol
 from uuid import UUID
 
 from shared.enums import ErrorCode
-from shared.messages import EquipmentStatus, TareRegistryUpdate, WeighRequest, WeighResult
+from shared.messages import (
+    EquipmentStatus,
+    TareRegistryUpdate,
+    UpdateCommand,
+    WeighRequest,
+    WeighResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +129,19 @@ class AgentHub:
             ) from exc
         finally:
             self._pending.pop(request.request_id, None)
+
+    async def send_update_command(self, scale_id: int, command: UpdateCommand) -> None:
+        """Отправить агенту команду автообновления (без ожидания результата:
+        отчёт придёт сообщением update_status, финал виден по версии в hello)."""
+        link = self._links.get(scale_id)
+        if link is None:
+            raise AgentHubError(ErrorCode.ERR_AGENT_OFFLINE, "нет связи с агентом объекта")
+        try:
+            await link.send_text(command.model_dump_json())
+        except Exception as exc:
+            raise AgentHubError(
+                ErrorCode.ERR_AGENT_OFFLINE, "соединение с агентом оборвалось"
+            ) from exc
 
     def resolve_result(self, result: WeighResult, *, scale_id: int | None = None) -> bool:
         """Доставить weigh_result ожидающей команде; False — никто не ждал.

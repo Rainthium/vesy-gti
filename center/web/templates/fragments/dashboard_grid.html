@@ -16,7 +16,20 @@
     </div>
     <div class="obj-stats">
       {% if item.agent %}
-      <div class="stat"><span class="dot {{ 'ok' if item.agent.version else '' }}"></span><span>Агент v{{ item.agent.version or '—' }} · {{ item.agent.channel.value }}</span></div>
+      <div class="stat">
+        <span class="dot {{ 'ok' if item.agent.version else '' }}"></span>
+        <span>Агент v{{ item.agent.version or '—' }} · {{ item.agent.channel.value }}</span>
+        {# автообновление из центра (запрос Игоря 10.08.2026): кнопка видна,
+           когда выложен релиз новее версии агента и агент в сети #}
+        {% if release and online and item.agent.version and item.agent.version != release.version %}
+        <form method="post" action="/panel/scales/{{ item.scale.id }}/update-agent" class="update-form">
+          <button type="submit" class="btn-update"
+                  onclick="return confirm('Обновить агента до v{{ release.version }}? Служба будет перезапущена (несколько секунд простоя).')">
+            Обновить до v{{ release.version }}
+          </button>
+        </form>
+        {% endif %}
+      </div>
       <div class="stat"><span class="dot {{ 'ok' if online else 'warn' }}"></span><span>Связь: {{ item.agent.last_seen_at | fmt_dt }}</span></div>
       {# состояние оборудования из последнего heartbeat (запрос Игоря 09.08.2026:
          индикатор и все камеры видны на одном экране) #}
