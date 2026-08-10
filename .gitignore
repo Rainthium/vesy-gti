@@ -20,6 +20,8 @@ secrets/
 build/
 dist/
 *.spec
+# ...но spec сборки агента — часть репозитория
+!packaging/agent/ves-agent.spec
 
 # Данные
 *.sqlite3
