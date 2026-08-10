@@ -43,7 +43,8 @@ snapshot_url = "http://ЛОГИН:ПАРОЛЬ@192.168.158.121/ISAPI/Streaming/c
 rtsp_url = "rtsp://ЛОГИН:ПАРОЛЬ@192.168.158.121:554/Streaming/Channels/101"
 
 [center]
-# пилот: боевая ВМ центра по IP; после появления DNS/TLS — wss://vesy.gti.kg/agents/ws
+# агенты ходят на центр НАПРЯМУЮ по внутренней сети (итоговое решение
+# системщика 10.08.2026); домен vesy.gti.kg — только для панели (люди)
 url = "ws://192.168.140.70/agents/ws"
 # выпускает центр: docker compose exec app uv run python -m tools.center_admin create-agent --scale-id N
 token = "ВПИШИТЕ-ТОКЕН-АГЕНТА-ИЗ-CREATE-AGENT"

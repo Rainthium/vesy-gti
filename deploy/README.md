@@ -79,7 +79,7 @@ docker compose exec postgres psql -U ves -d ves -c 'REVOKE TRUNCATE ON TABLE wei
 ```bash
 docker compose exec app uv run python -m tools.center_admin create-user --login d.ivanov --full-name 'Иванов Д.' --role dispatcher
 docker compose exec app uv run python -m tools.center_admin create-site --code kyzyl-kyia --name 'СВХ «Кызыл-Кыя»'
-docker compose exec app uv run python -m tools.center_admin create-scale --site kyzyl-kyia --name 'Весы SCS-80' --driver cas22 --legacy-ip 192.168.150.185 --legacy-port 8087 --legacy-autoscale 2
+docker compose exec app uv run python -m tools.center_admin create-scale --site kyzyl-kyia --name 'Весы SCS-80' --driver cas22 --legacy-ip 192.168.158.20 --legacy-port 8087 --legacy-autoscale 2
 docker compose exec app uv run python -m tools.center_admin create-agent --scale-id 1
 docker compose exec app uv run python -m tools.center_admin list
 ```
@@ -114,6 +114,13 @@ rsync'ом туда же, куда и дампы. Хранение фото — 
 ```bash
 # с рабочей машины (сборка локально, доставка образа по SSH):
 git pull && ./deploy/ship.sh vesy@192.168.140.70   # migrate применит новые миграции сам
+```
+
+Если менялся `deploy/nginx.conf` — обязательно пересоздать nginx (rsync
+подменяет инод, `nginx -s reload` перечитал бы старый файл):
+
+```bash
+ssh vesy@192.168.140.70 'cd ~/vesy-gti/deploy && docker compose up -d --force-recreate nginx'
 ```
 
 Откат БД не предусмотрен (взвешивания неизменяемы) — откат версии
