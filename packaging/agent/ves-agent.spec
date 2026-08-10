@@ -42,7 +42,9 @@ a = Analysis(  # noqa: F821
         "uvicorn.lifespan.off",
     ],
     hookspath=[],
-    runtime_hooks=[],
+    # изолированный режим замороженного Python игнорирует PYTHONUTF8 —
+    # UTF-8 для stdout/stderr включает runtime-хук
+    runtime_hooks=[str(ROOT / "packaging" / "agent" / "rthook_utf8.py")],
     # центр и его зависимости в агенте не нужны (Analysis их и так не тянет,
     # excludes — страховка от случайного захвата через общие импорты)
     excludes=["center", "psycopg", "alembic"],
