@@ -39,6 +39,7 @@ from shared.messages import (
     ConfigStatus,
     EquipmentStatus,
     Heartbeat,
+    HeartbeatAck,
     Hello,
     OfflineSync,
     OfflineSyncAck,
@@ -92,6 +93,7 @@ class CenterClient:
         on_weigh_request: Callable[[WeighRequest], Awaitable[WeighResult]],
         on_update_command: Callable[[UpdateCommand], Awaitable[UpdateStatus]] | None = None,
         on_scale_config: Callable[[ScaleConfigUpdate], Awaitable[ConfigStatus]] | None = None,
+        on_server_time: Callable[[datetime], None] | None = None,
     ) -> None:
         self._config = config
         self._storage = storage
@@ -99,6 +101,7 @@ class CenterClient:
         self._on_weigh_request = on_weigh_request
         self._on_update_command = on_update_command
         self._on_scale_config = on_scale_config
+        self._on_server_time = on_server_time
         self._connected = asyncio.Event()
         self._stopping = False
         self._request_tasks: set[asyncio.Task[None]] = set()
@@ -201,6 +204,15 @@ class CenterClient:
             elif isinstance(message, OperatorsRegistryUpdate):
                 count = self._storage.replace_center_operators(message.records)
                 logger.info("реплика операторов обновлена: %d учёток", count)
+            elif isinstance(message, HeartbeatAck):
+                if self._on_server_time is not None:
+                    try:
+                        self._on_server_time(message.server_time)
+                    except Exception:
+                        # часы пишут смещение в SQLite: локальная ошибка БД
+                        # не должна стоить разрыва соединения (ack придёт
+                        # со следующим heartbeat)
+                        logger.exception("обновление смещения часов упало")
             elif isinstance(message, ScaleConfigUpdate):
                 self._spawn_config_handler(connection, message)
             elif isinstance(message, UpdateCommand):

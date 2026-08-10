@@ -81,6 +81,7 @@ class ManualOperationFlow:
         photos_dir: str | Path,
         vehicle_threshold_kg: float = DEFAULT_VEHICLE_THRESHOLD_KG,
         ffmpeg_path: str = "ffmpeg",
+        now_utc: Callable[[], datetime] | None = None,
     ) -> None:
         self._scale_state = scale_state
         self._manual_allowed = manual_allowed
@@ -89,6 +90,8 @@ class ManualOperationFlow:
         self._photos_dir = Path(photos_dir)
         self._vehicle_threshold_kg = vehicle_threshold_kg
         self._ffmpeg_path = ffmpeg_path
+        # время записи: часы центра (agent/clock.py), по умолчанию локальные
+        self._now_utc = now_utc or (lambda: datetime.now(UTC))
         self._lock = threading.Lock()
         self._pending: ManualPreview | None = None
 
@@ -144,7 +147,7 @@ class ManualOperationFlow:
             raise ManualFlowError("Масса нестабильна — дождитесь остановки АТС")
 
         weight = scale.weight_kg
-        weighed_at = datetime.now(UTC)
+        weighed_at = self._now_utc()
         record_uuid = uuid4()
 
         shots = capture_all(self._cameras, ffmpeg_path=self._ffmpeg_path)

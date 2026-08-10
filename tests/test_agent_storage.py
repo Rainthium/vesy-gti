@@ -12,7 +12,9 @@
   полный снимок replace_center_operators, сохранение локальных учёток,
   блокировка is_active=0, CLI upsert_operator поверх реплики;
 - снимок настроек центра (scale_config): save/load_center_settings —
-  нет снимка → None, перезапись последним, персистентность файла БД.
+  нет снимка → None, перезапись последним, персистентность файла БД;
+- смещение часов до центра (save/load_clock_offset_s): round-trip,
+  перезапись, отсутствие → None, мусор в БД → None, персистентность.
 """
 
 import sqlite3
@@ -875,5 +877,52 @@ class TestCenterSettingsStore:
         second = AgentStorage(db_path)
         try:
             assert second.load_center_settings() == '{"scale_port": "COM11"}'
+        finally:
+            second.close()
+
+
+class TestClockOffsetStore:
+    """Смещение часов до центра (agent/clock.py): save/load_clock_offset_s."""
+
+    def test_load_without_save_returns_none(self, storage: AgentStorage) -> None:
+        """Свежая БД: смещения нет — None, без исключений."""
+        assert storage.load_clock_offset_s() is None
+
+    @pytest.mark.parametrize("offset", [120.5, -87.25, 0.0], ids=["positive", "negative", "zero"])
+    def test_round_trip(self, storage: AgentStorage, offset: float) -> None:
+        """Сохранённое смещение возвращается тем же числом (включая знак и ноль)."""
+        storage.save_clock_offset_s(offset)
+        assert storage.load_clock_offset_s() == offset
+
+    def test_second_save_overwrites_first(self, storage: AgentStorage) -> None:
+        """Каждый heartbeat_ack перезаписывает смещение: хранится последнее."""
+        storage.save_clock_offset_s(10.0)
+        storage.save_clock_offset_s(-3.25)
+        assert storage.load_clock_offset_s() == -3.25
+
+    def test_corrupt_value_returns_none(self, storage: AgentStorage) -> None:
+        """Мусор в agent_settings (прямой SQL мимо API) → None, а не падение."""
+        with storage._conn:
+            storage._conn.execute(
+                "INSERT INTO agent_settings (key, value) VALUES ('clock_offset_s', 'abc')"
+            )
+        assert storage.load_clock_offset_s() is None
+
+    def test_offset_does_not_collide_with_settings(self, storage: AgentStorage) -> None:
+        """Смещение и снимок настроек живут под разными ключами таблицы."""
+        storage.save_center_settings('{"scale_port": "COM11"}')
+        storage.save_clock_offset_s(42.0)
+        assert storage.load_clock_offset_s() == 42.0
+        assert storage.load_center_settings() == '{"scale_port": "COM11"}'
+
+    def test_offset_survives_reopen(self, tmp_path: Path) -> None:
+        """Смещение переживает рестарт агента (офлайн-режим от последнего синка)."""
+        db_path = tmp_path / "agent.db"
+        first = AgentStorage(db_path)
+        first.save_clock_offset_s(120.5)
+        first.close()
+        second = AgentStorage(db_path)
+        try:
+            assert second.load_clock_offset_s() == 120.5
         finally:
             second.close()

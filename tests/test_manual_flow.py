@@ -20,7 +20,7 @@ import http.server
 import socket
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -67,6 +67,7 @@ class FlowEnv:
         self,
         cameras: list[CameraConfig] | None = None,
         threshold: float = 500.0,
+        now_utc: Callable[[], datetime] | None = None,
     ) -> ManualOperationFlow:
         return ManualOperationFlow(
             scale_state=lambda: self.scale,
@@ -75,6 +76,7 @@ class FlowEnv:
             cameras=list(cameras or []),
             photos_dir=self.photos_dir,
             vehicle_threshold_kg=threshold,
+            now_utc=now_utc,
         )
 
 
@@ -292,6 +294,19 @@ class TestPrepareSuccess:
         assert preview.no_valid_tare is False
         assert preview.photos == []  # камер нет — снимков нет, но это не ошибка
         assert flow.pending() is preview
+
+    def test_weighed_at_taken_from_injected_clock(self, env: FlowEnv) -> None:
+        """«Время от центра» (10.08.2026): weighed_at берётся из now_utc
+        (часы CenterClock), а не из локальных часов ПК — и в превью,
+        и в сохранённой записи журнала."""
+        fixed_now = datetime(2026, 8, 10, 6, 30, 15, 123456, tzinfo=UTC)
+        flow = env.make_flow(now_utc=lambda: fixed_now)
+        preview = prepare_weighing(flow)
+        assert preview.record.weighed_at == fixed_now
+        flow.commit(preview.preview_id)
+        saved = env.storage.get_weighing(preview.record.uuid)
+        assert saved is not None
+        assert saved.weighed_at == fixed_now
 
     def test_vehicle_and_trailer_normalized(self, env: FlowEnv) -> None:
         """Номера приводятся к верхнему регистру и обрезаются по краям;

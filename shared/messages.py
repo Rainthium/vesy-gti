@@ -271,6 +271,17 @@ class ConfigStatus(BaseModel):
     rolled_back: bool = False
 
 
+class HeartbeatAck(BaseModel):
+    """Центр → агент: ответ на hello/heartbeat с временем центра.
+
+    Агент считает смещение своих часов и ставит в записи время центра
+    (вопрос Игоря 10.08.2026: часы весовых ПК уходят, часы ВМ — NTP).
+    """
+
+    type: Literal["heartbeat_ack"] = "heartbeat_ack"
+    server_time: datetime
+
+
 class OperatorsRegistryUpdate(BaseModel):
     """Полный снимок операторов весов (решение Игоря 10.08.2026: учётки
     операторов заводятся и блокируются в центре, агент хранит реплику
@@ -292,6 +303,7 @@ CenterMessage = Annotated[
     | TareRegistryUpdate
     | OperatorsRegistryUpdate
     | ScaleConfigUpdate
+    | HeartbeatAck
     | UpdateCommand,
     Field(discriminator="type"),
 ]

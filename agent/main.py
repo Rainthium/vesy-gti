@@ -31,6 +31,7 @@ import uvicorn
 
 import agent
 from agent.cameras.capture import CameraConfig, CameraShot, capture
+from agent.clock import CenterClock
 from agent.config import AgentConfig, load_config
 from agent.drivers.base import ScaleState
 from agent.drivers.cas22 import Cas22Driver
@@ -244,6 +245,9 @@ def build_runtime(
     """Собрать все кирпичи агента (без запуска фоновых задач)."""
     driver = Cas22Driver(config.scale.port, baudrate=config.scale.baudrate)
     storage = AgentStorage(config.storage.db_path)
+    # время записей — по часам центра (heartbeat_ack), офлайн — по
+    # последнему известному смещению из SQLite (вопрос Игоря 10.08.2026)
+    center_clock = CenterClock(storage)
     config.storage.photos_dir.mkdir(parents=True, exist_ok=True)
     camera_health = CameraHealth(
         config.camera_configs(),
@@ -264,6 +268,7 @@ def build_runtime(
         photos_dir=config.storage.photos_dir,
         config=auto_config,
         ffmpeg_path=config.ffmpeg_path,
+        now_utc=center_clock.now,
     )
 
     def equipment_status() -> EquipmentStatus:
@@ -304,6 +309,7 @@ def build_runtime(
         on_weigh_request=runner.handle,
         on_update_command=updater.handle,
         on_scale_config=on_scale_config,
+        on_server_time=center_clock.set_server_time,
     )
     uploader = PhotoUploader(
         storage,
@@ -319,6 +325,7 @@ def build_runtime(
         photos_dir=config.storage.photos_dir,
         vehicle_threshold_kg=config.cycle.vehicle_threshold_kg,
         ffmpeg_path=config.ffmpeg_path,
+        now_utc=center_clock.now,
     )
     manager_ref.append(
         SettingsManager(

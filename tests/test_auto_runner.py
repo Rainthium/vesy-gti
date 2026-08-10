@@ -19,7 +19,8 @@
 - ERR_BUSY при параллельной команде, первая операция не прерывается,
   номера в ответе ERR_BUSY нормализованы;
 - тарирование не подставляет тару; просроченная тара игнорируется;
-- нормализация номеров (upper/strip, пустые → None) — и в отказах тоже.
+- нормализация номеров (upper/strip, пустые → None) — и в отказах тоже;
+- weighed_at из подменяемых часов now_utc («время от центра», 10.08.2026).
 
 Железо не используется: состояние индикатора — подменяемый держатель,
 watcher тикается вручную фейковыми часами, камеры — monkeypatch
@@ -126,6 +127,7 @@ class RunnerEnv:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         auto_config: AutoConfig | None = None,
+        now_utc: Callable[[], datetime] | None = None,
     ) -> None:
         config = auto_config or AutoConfig(cycle=CFG, tick_interval_s=0.005)
         self.watcher_clock = FakeClock()
@@ -145,6 +147,7 @@ class RunnerEnv:
             ],
             photos_dir=self.photos_dir,
             config=config,
+            now_utc=now_utc,
         )
 
     def drive_to_ready(self, weight: float = GROSS_KG) -> None:
@@ -171,8 +174,11 @@ def make_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callab
     """Фабрика окружений (для тестов с нестандартным AutoConfig)."""
     created: list[RunnerEnv] = []
 
-    def factory(auto_config: AutoConfig | None = None) -> RunnerEnv:
-        environment = RunnerEnv(tmp_path, monkeypatch, auto_config)
+    def factory(
+        auto_config: AutoConfig | None = None,
+        now_utc: Callable[[], datetime] | None = None,
+    ) -> RunnerEnv:
+        environment = RunnerEnv(tmp_path, monkeypatch, auto_config, now_utc)
         created.append(environment)
         return environment
 
@@ -281,6 +287,28 @@ def test_instant_operation_by_fixation(env: RunnerEnv) -> None:
     ]
     # камеры дёрнуты один раз, в порядке конфига — в момент команды
     assert env.capture.calls == [[CameraRole.FRONT, CameraRole.REAR]]
+
+
+def test_weighed_at_taken_from_injected_clock(make_env: Callable[..., RunnerEnv]) -> None:
+    """«Время от центра»: weighed_at берётся из now_utc (часы CenterClock),
+    а не из локальных часов ПК — и в результате, и в записи журнала."""
+    fixed_now = datetime(2026, 8, 10, 6, 30, 15, 123456, tzinfo=UTC)
+    env = make_env(now_utc=lambda: fixed_now)
+    env.drive_to_ready()
+
+    record = run_handle(env, make_request()).record
+    assert record.code is ErrorCode.OK
+    assert record.weighed_at == fixed_now
+
+    saved = stored_record(env, record)
+    assert saved is not None
+    assert saved.weighed_at == fixed_now
+    # снимки легли в каталог даты по времени центра, не локальному
+    day_dir = env.photos_dir / fixed_now.strftime("%Y/%m/%d")
+    assert sorted(p.name for p in day_dir.iterdir()) == [
+        f"{record.uuid.hex}_photo1.jpeg",
+        f"{record.uuid.hex}_photo2.jpeg",
+    ]
 
 
 def test_fixation_survives_multiple_commands(env: RunnerEnv) -> None:

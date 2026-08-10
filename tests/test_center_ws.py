@@ -23,7 +23,12 @@
   (полный/частичный снимок, кривые thresholds, камеры только с URL,
   пусто → None), после hello — scale_config ТРЕТЬИМ и только при заданных
   настройках, hub.send_scale_config (адресность, best-effort), config_status
-  от агента не рвёт соединение.
+  от агента не рвёт соединение;
+- время от центра (вопрос Игоря 10.08.2026): heartbeat_ack с server_time
+  первым после hello и в ответ на каждый heartbeat агентам ≥0.4.0
+  (граница включительно); старым агентам — только tare_registry и ничего
+  больше; версия — из последнего hello ЭТОГО соединения (heartbeat до
+  hello без ack, даунгрейд версии отключает ack).
 
 Инфраструктура БД повторяет tests/test_center_db.py (временная БД + миграции
 alembic + TRUNCATE между тестами), но с собственным именем БД, чтобы не
@@ -74,6 +79,7 @@ from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, Weighing
 from shared.messages import (
     ConfigStatus,
     EquipmentStatus,
+    Heartbeat,
     Hello,
     OfflineSync,
     OperatorRecord,
@@ -139,6 +145,12 @@ def _hello_json(version: str = AGENT_VERSION) -> str:
     equipment = EquipmentStatus(scale_status=ScaleStatus.OK)
     hello = Hello(agent_id="agent-1", version=version, driver="cas22", equipment=equipment)
     return hello.model_dump_json()
+
+
+def _heartbeat_json() -> str:
+    equipment = EquipmentStatus(scale_status=ScaleStatus.OK)
+    heartbeat = Heartbeat(agent_id="agent-1", sent_at=datetime.now(UTC), equipment=equipment)
+    return heartbeat.model_dump_json()
 
 
 # ---------------------------------------------------------------------------
@@ -852,10 +864,12 @@ def _wait_until(predicate: Callable[[], bool], timeout: float = 10.0) -> bool:
 
 
 def _hello_and_registry(ws: WebSocketTestSession) -> dict[str, Any]:
-    """hello → ответные tare_registry + operators_registry (порядок фиксирован
-    циклом приёма); также барьер: предыдущие сообщения обработаны. Возвращает
-    снимок реестра тарирований."""
+    """hello → ответные heartbeat_ack (время центра) + tare_registry +
+    operators_registry (порядок фиксирован циклом приёма); также барьер:
+    предыдущие сообщения обработаны. Возвращает снимок реестра тарирований."""
     ws.send_text(_hello_json())
+    ack: dict[str, Any] = json.loads(ws.receive_text())
+    assert ack["type"] == "heartbeat_ack"
     tares: dict[str, Any] = json.loads(ws.receive_text())
     assert tares["type"] == "tare_registry"
     operators: dict[str, Any] = json.loads(ws.receive_text())
@@ -1288,8 +1302,10 @@ class TestAgentsWsOperatorsRegistry:
 
         with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
             ws.send_text(_hello_json())
+            ack = json.loads(ws.receive_text())
+            assert ack["type"] == "heartbeat_ack", "первым должно идти время центра"
             first = json.loads(ws.receive_text())
-            assert first["type"] == "tare_registry", "первым должен идти реестр тар"
+            assert first["type"] == "tare_registry", "затем реестр тар"
             second = json.loads(ws.receive_text())
             assert second["type"] == "operators_registry", "вторым должен идти снимок операторов"
             by_login = {r["login"]: r for r in second["records"]}
@@ -1305,6 +1321,7 @@ class TestAgentsWsOperatorsRegistry:
         (агент очистит устаревшую реплику)."""
         with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
             ws.send_text(_hello_json())
+            assert json.loads(ws.receive_text())["type"] == "heartbeat_ack"
             assert json.loads(ws.receive_text())["type"] == "tare_registry"
             operators = json.loads(ws.receive_text())
             assert operators["type"] == "operators_registry"
@@ -1314,8 +1331,9 @@ class TestAgentsWsOperatorsRegistry:
         """Каждый hello (переподключение агента) заново раздаёт оба снимка."""
         with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
             _hello_and_registry(ws)
-            # второй hello в том же соединении — снова пара снимков по порядку
+            # второй hello в том же соединении — снова снимки по порядку
             ws.send_text(_hello_json())
+            assert json.loads(ws.receive_text())["type"] == "heartbeat_ack"
             assert json.loads(ws.receive_text())["type"] == "tare_registry"
             assert json.loads(ws.receive_text())["type"] == "operators_registry"
 
@@ -1515,9 +1533,10 @@ class TestAgentsWsScaleConfig:
             # если бы scale_config был отправлен, он лежал бы в буфере первым
             ws.send_text(_hello_json())
             after = json.loads(ws.receive_text())
-            assert after["type"] == "tare_registry", (
+            assert after["type"] == "heartbeat_ack", (
                 f"после hello без настроек пришло лишнее сообщение: {after['type']}"
             )
+            assert json.loads(ws.receive_text())["type"] == "tare_registry"
             assert json.loads(ws.receive_text())["type"] == "operators_registry"
 
     def test_repeated_hello_resends_scale_config(self, ws_env: WsEnv) -> None:
@@ -1590,3 +1609,127 @@ class TestAgentHubSendScaleConfig:
             assert await hub.send_scale_config(1, _make_scale_config_update()) is False
 
         asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# WS-эндпоинт: время от центра (heartbeat_ack, вопрос Игоря 10.08.2026)
+# ---------------------------------------------------------------------------
+
+# версия агента ДО появления heartbeat_ack/секретных снимков (< 0.4.0):
+# старый ws_client логирует незнакомые сообщения — центр их не шлёт
+OLD_AGENT_VERSION = "0.3.0"
+
+
+def _hello_old_and_registry(ws: WebSocketTestSession) -> None:
+    """hello старой версии → в ответ ТОЛЬКО tare_registry (ни ack, ни
+    операторов, ни настроек); также барьер: предыдущие сообщения обработаны.
+
+    Если бы после предыдущего сообщения центр отправил что-то ещё, оно
+    лежало бы в буфере и пришло бы здесь ПЕРЕД tare_registry."""
+    ws.send_text(_hello_json(version=OLD_AGENT_VERSION))
+    message = json.loads(ws.receive_text())
+    assert message["type"] == "tare_registry", (
+        f"старому агенту ушло лишнее сообщение: {message['type']}"
+    )
+
+
+def _parse_server_time(ack: dict[str, Any]) -> datetime:
+    server_time = datetime.fromisoformat(ack["server_time"])
+    assert server_time.tzinfo is not None, "server_time обязан быть aware (UTC)"
+    return server_time
+
+
+class TestAgentsWsHeartbeatAck:
+    def test_hello_ack_carries_current_server_time(self, ws_env: WsEnv) -> None:
+        """Первый ответ на hello нового агента — heartbeat_ack с текущим
+        временем центра (по нему агент считает смещение своих часов)."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            before = datetime.now(UTC)
+            ws.send_text(_hello_json())
+            ack = json.loads(ws.receive_text())
+            after = datetime.now(UTC)
+            assert ack["type"] == "heartbeat_ack"
+            server_time = _parse_server_time(ack)
+            grace = timedelta(seconds=1)
+            assert before - grace <= server_time <= after + grace
+
+    def test_heartbeat_gets_ack_with_server_time(self, ws_env: WsEnv) -> None:
+        """heartbeat агента 1.2.3 (версия из hello соединения) → в ответ
+        приходит heartbeat_ack с временем центра."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            _hello_and_registry(ws)  # барьер: ack за сам hello уже вычитан
+            before = datetime.now(UTC)
+            ws.send_text(_heartbeat_json())
+            ack = json.loads(ws.receive_text())
+            after = datetime.now(UTC)
+            assert ack["type"] == "heartbeat_ack"
+            grace = timedelta(seconds=1)
+            assert before - grace <= _parse_server_time(ack) <= after + grace
+
+    def test_each_heartbeat_gets_own_ack(self, ws_env: WsEnv) -> None:
+        """Каждый heartbeat (раз в 5 с) получает свой ack — смещение часов
+        обновляется постоянно, server_time не убывает."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            _hello_and_registry(ws)
+            times = []
+            for _ in range(2):
+                ws.send_text(_heartbeat_json())
+                ack = json.loads(ws.receive_text())
+                assert ack["type"] == "heartbeat_ack"
+                times.append(_parse_server_time(ack))
+            assert times[0] <= times[1]
+
+    def test_min_supported_version_gets_ack(self, ws_env: WsEnv) -> None:
+        """Граница гейта: агент ровно 0.4.0 уже получает heartbeat_ack."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            ws.send_text(_hello_json(version="0.4.0"))
+            assert json.loads(ws.receive_text())["type"] == "heartbeat_ack"
+            assert json.loads(ws.receive_text())["type"] == "tare_registry"
+
+    def test_old_agent_hello_gets_only_tare_registry(self, ws_env: WsEnv) -> None:
+        """Старый агент (0.3.0): после hello приходит ТОЛЬКО tare_registry —
+        без ack, операторов и настроек (проверяется вторым hello-барьером)."""
+        with ws_env.factory() as session:
+            # настройки и операторы в центре ЗАДАНЫ — но старому агенту не уходят
+            site_id = _site_of_scale(session, ws_env.scale_id)
+            _seed_user(session, "op.own", site_id=site_id)
+            _set_scale_settings(session, ws_env.scale_id, thresholds=dict(CYCLE_THRESHOLDS))
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            _hello_old_and_registry(ws)
+            # барьер: если бы за первым tare_registry ушло что-то ещё,
+            # оно пришло бы до этого tare_registry
+            _hello_old_and_registry(ws)
+
+    def test_old_agent_heartbeat_gets_no_reply(self, ws_env: WsEnv) -> None:
+        """heartbeat старого агента остаётся без ответа: следующее сообщение
+        после hello-барьера — снова tare_registry, а не ack."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            _hello_old_and_registry(ws)
+            ws.send_text(_heartbeat_json())
+            # если бы heartbeat породил ack, он пришёл бы раньше tare_registry
+            _hello_old_and_registry(ws)
+
+    def test_heartbeat_before_hello_gets_no_ack(self, ws_env: WsEnv) -> None:
+        """Версия берётся из hello ЭТОГО соединения: heartbeat до hello
+        (версия неизвестна) остаётся без ack — иначе перед ack за hello
+        в буфере лежал бы второй ack."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            ws.send_text(_heartbeat_json())  # версия соединения ещё не известна
+            ws.send_text(_hello_json())  # 1.2.3 → свой ack первым
+            assert json.loads(ws.receive_text())["type"] == "heartbeat_ack"
+            # сразу tare_registry: ack ровно один (за hello, не за heartbeat)
+            assert json.loads(ws.receive_text())["type"] == "tare_registry"
+            assert json.loads(ws.receive_text())["type"] == "operators_registry"
+
+    def test_version_downgrade_stops_acks(self, ws_env: WsEnv) -> None:
+        """Даунгрейд в том же соединении (hello 1.2.3 → hello 0.3.0):
+        центр перестаёт слать ack на heartbeat — версия из ПОСЛЕДНЕГО hello."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            _hello_and_registry(ws)  # версия 1.2.3
+            ws.send_text(_heartbeat_json())
+            assert json.loads(ws.receive_text())["type"] == "heartbeat_ack"
+            # агент «откатился» на 0.3.0 (переустановка со старым exe)
+            _hello_old_and_registry(ws)
+            ws.send_text(_heartbeat_json())
+            # ответа нет: после барьера первым идёт tare_registry, не ack
+            _hello_old_and_registry(ws)

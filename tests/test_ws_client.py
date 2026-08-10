@@ -16,6 +16,10 @@
 - tare_registry: полная замена реплики реестра тарирований;
 - operators_registry: обновление реплики операторов (вход по новой учётке,
   снятый оператор исчезает, заблокированный не входит офлайн);
+- heartbeat_ack (время от центра): server_time доходит до колбэка
+  on_server_time на каждый ack; без колбэка клиент жив; исключение
+  колбэка гасится на месте — сессия НЕ рвётся (локальная ошибка БД
+  смещения не должна стоить соединения);
 - scale_config: снимок настроек → обработчик → config_status центру (включая
   отчёт об откате порта); долгий обработчик не блокирует heartbeat; без
   обработчика клиент жив и отчёт не шлётся;
@@ -48,6 +52,7 @@ from shared.messages import (
     CycleSettings,
     EquipmentStatus,
     Heartbeat,
+    HeartbeatAck,
     Hello,
     OfflineSync,
     OfflineSyncAck,
@@ -918,5 +923,101 @@ def test_scale_config_without_handler_does_not_kill_client() -> None:
             await scene.center.expect(Heartbeat)
             assert scene.client.connected is True
             assert len(scene.center.connections) == 1
+
+    run_scenario(scenario())
+
+
+# --- время от центра (heartbeat_ack → on_server_time) ---
+
+
+class ClockScene(Scene):
+    """Сцена с колбэком времени центра (Scene его не пробрасывает)."""
+
+    def __init__(self, on_server_time: Any, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._on_server_time = on_server_time
+
+    async def __aenter__(self) -> "ClockScene":
+        await super().__aenter__()
+        # клиент пересобирается с колбэком времени (сигнатура CenterClient)
+        if self.run_task is not None and not self.run_task.done():
+            self.run_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.run_task
+        self.client = CenterClient(
+            make_config(self.center.url),
+            self.storage,
+            equipment_status=make_equipment,
+            on_weigh_request=echo_weigh_handler,
+            on_server_time=self._on_server_time,
+        )
+        self.start_client()
+        return self
+
+
+def test_heartbeat_ack_delivers_server_time_to_callback() -> None:
+    """heartbeat_ack от центра: колбэк on_server_time получает тот самый
+    server_time (aware datetime); каждый ack вызывает колбэк заново."""
+    received: list[datetime] = []
+
+    async def scenario() -> None:
+        async with ClockScene(received.append) as scene:
+            await scene.center.expect(Hello)
+            server_time = datetime(2026, 8, 10, 6, 0, 0, tzinfo=UTC)
+            ack = HeartbeatAck(server_time=server_time)
+            await scene.center.connection.send(ack.model_dump_json())
+            await wait_until(lambda: len(received) == 1)
+            # дата дошла без искажений и осталась aware (для вычитания с now(UTC))
+            assert received[0] == server_time
+            assert received[0].tzinfo is not None
+            # второй ack (следующий heartbeat) → колбэк вызван снова
+            later = HeartbeatAck(server_time=server_time + timedelta(seconds=30))
+            await scene.center.connection.send(later.model_dump_json())
+            await wait_until(lambda: len(received) == 2)
+            assert received[1] == server_time + timedelta(seconds=30)
+            # приём ack не рвёт соединение
+            assert scene.client.connected is True
+            assert len(scene.center.connections) == 1
+
+    run_scenario(scenario())
+
+
+def test_heartbeat_ack_without_callback_keeps_client_alive() -> None:
+    """Колбэк не настроен (on_server_time=None): ack молча пропускается,
+    клиент жив, heartbeat продолжаются на том же соединении."""
+
+    async def scenario() -> None:
+        async with Scene() as scene:  # обычная сцена — без on_server_time
+            await scene.center.expect(Hello)
+            ack = HeartbeatAck(server_time=datetime.now(UTC))
+            await scene.center.connection.send(ack.model_dump_json())
+            await scene.center.expect(Heartbeat)
+            assert scene.client.connected is True
+            assert len(scene.center.connections) == 1
+
+    run_scenario(scenario())
+
+
+def test_server_time_callback_exception_keeps_session_alive() -> None:
+    """Исключение в on_server_time (например, sqlite3.Error при записи
+    смещения в БД) гасится на месте: сессия НЕ рвётся — как локальные
+    ошибки БД в _send_pending. Следующий ack снова зовёт колбэк."""
+    calls = {"n": 0}
+
+    def broken_callback(server_time: datetime) -> None:
+        calls["n"] += 1
+        raise RuntimeError("БД смещения недоступна")
+
+    async def scenario() -> None:
+        async with ClockScene(broken_callback) as scene:
+            await scene.center.expect(Hello)
+            for expected in (1, 2):
+                ack = HeartbeatAck(server_time=datetime.now(UTC))
+                await scene.center.connection.send(ack.model_dump_json())
+                await wait_until(lambda n=expected: calls["n"] == n)
+            # соединение то же самое, heartbeat продолжают идти
+            await scene.center.expect(Heartbeat)
+            assert len(scene.center.connections) == 1
+            assert scene.client.connected
 
     run_scenario(scenario())

@@ -498,6 +498,27 @@ class AgentStorage:
             ).fetchone()
         return str(row["value"]) if row is not None else None
 
+    def save_clock_offset_s(self, offset_s: float) -> None:
+        """Смещение часов до центра (переживает рестарт, см. agent/clock.py)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO agent_settings (key, value) VALUES ('clock_offset_s', ?)"
+                " ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (str(offset_s),),
+            )
+
+    def load_clock_offset_s(self) -> float | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM agent_settings WHERE key = 'clock_offset_s'"
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return float(row["value"])
+        except ValueError:
+            return None
+
     def operators_size(self) -> int:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) AS n FROM local_users").fetchone()

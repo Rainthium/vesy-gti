@@ -79,6 +79,7 @@ class AutoOperationRunner:
         config: AutoConfig | None = None,
         ffmpeg_path: str = "ffmpeg",
         clock: Callable[[], float] = time.monotonic,
+        now_utc: Callable[[], datetime] | None = None,
     ) -> None:
         self._scale_state = scale_state
         self._watcher = watcher
@@ -88,6 +89,8 @@ class AutoOperationRunner:
         self._config = config or AutoConfig()
         self._ffmpeg_path = ffmpeg_path
         self._clock = clock
+        # время записи: часы центра (agent/clock.py), по умолчанию локальные
+        self._now_utc = now_utc or (lambda: datetime.now(UTC))
         self._lock = asyncio.Lock()
 
     def busy(self) -> bool:
@@ -189,7 +192,7 @@ class AutoOperationRunner:
         weight_kg: float,
     ) -> WeighingRecord:
         """Финал операции: снимки обеих камер → запись журнала."""
-        weighed_at = datetime.now(UTC)
+        weighed_at = self._now_utc()
         # блокирующий HTTP/ffmpeg — в поток, чтобы heartbeat не замирал
         shots = await asyncio.to_thread(capture_all, self._cameras, ffmpeg_path=self._ffmpeg_path)
         camera_errors = [shot.error or "камера недоступна" for shot in shots if not shot.ok]

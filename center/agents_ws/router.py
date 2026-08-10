@@ -19,6 +19,7 @@
 import asyncio
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, WebSocket
 from pydantic import ValidationError
@@ -31,6 +32,7 @@ from center.db.models import AgentStatus
 from shared.messages import (
     ConfigStatus,
     Heartbeat,
+    HeartbeatAck,
     Hello,
     OfflineSync,
     OfflineSyncAck,
@@ -97,6 +99,8 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
             logger.warning("агент отклонён: неизвестный токен")
             return
         agent_id, scale_id = agent.id, agent.scale_id
+        # версия из последнего hello: гейт снимков с секретами и heartbeat_ack
+        agent_version: str | None = None
 
         await websocket.accept()
         link = _WebSocketLink(websocket)
@@ -117,6 +121,7 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                     continue
 
                 if isinstance(message, Hello):
+                    agent_version = message.version
                     hub.update_equipment(scale_id, message.equipment)
                     await asyncio.to_thread(
                         _db,
@@ -128,6 +133,12 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                     # операторы и настройки весов (если заданы в центре).
                     # Снимки с секретами — только агентам, понимающим их:
                     # старый ws_client логирует незнакомые сообщения (№7)
+                    if supports_secure_sync(message.version):
+                        # время центра — первым (фиксированная позиция),
+                        # затем реестры и настройки
+                        await link.send_text(
+                            HeartbeatAck(server_time=datetime.now(UTC)).model_dump_json()
+                        )
                     await send_tare_registry(link)
                     if supports_secure_sync(message.version):
                         await send_operators(link, scale_id)
@@ -145,6 +156,11 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                     await asyncio.to_thread(
                         _db, lambda s: repo.set_agent_status(s, agent_id, AgentStatus.ONLINE)
                     )
+                    if supports_secure_sync(agent_version):
+                        # старый агент логировал бы незнакомый ack каждые 5 с
+                        await link.send_text(
+                            HeartbeatAck(server_time=datetime.now(UTC)).model_dump_json()
+                        )
 
                 elif isinstance(message, WeighResult):
                     saved = await asyncio.to_thread(
