@@ -1,0 +1,75 @@
+# Сборка ves-agent.exe (Windows) на GitHub-раннере.
+# Запуск: тег agent-v* (архив прикрепляется к релизу) или вручную (workflow_dispatch —
+# архив забирается из артефактов запуска).
+name: Сборка агента
+
+on:
+  push:
+    tags: ["agent-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # создание релиза по тегу
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установка uv и Python 3.12
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Зависимости
+        run: uv sync
+
+      - name: Сборка PyInstaller (onedir)
+        run: uv run --with pyinstaller pyinstaller packaging/agent/ves-agent.spec --noconfirm
+
+      - name: Дымовая проверка exe
+        run: |
+          # --help импортирует весь агент (uvicorn, драйверы, веб) — ловит
+          # недостающие hiddenimports ещё на сборке
+          & dist\ves-agent\ves-agent.exe --help
+          if ($LASTEXITCODE -ne 0) { throw "exe не запустился" }
+          # ресурсы, которые модули ищут через Path(__file__).parent
+          foreach ($p in @(
+            "dist\ves-agent\_internal\agent\web\templates\base.html",
+            "dist\ves-agent\_internal\agent\web\static\htmx.min.js",
+            "dist\ves-agent\_internal\agent\cameras\fonts\DejaVuSans-Bold-subset.ttf"
+          )) {
+            if (-not (Test-Path $p)) { throw "в сборке нет ресурса: $p" }
+          }
+
+      - name: Комплект установки (zip)
+        run: |
+          $version = uv run python -c "import agent; print(agent.__version__)"
+          New-Item -ItemType Directory dist\bundle | Out-Null
+          Copy-Item -Recurse dist\ves-agent dist\bundle\app
+          Copy-Item agent\config.example.toml dist\bundle\
+          Copy-Item packaging\agent\install-service.bat dist\bundle\
+          Copy-Item packaging\agent\update.bat dist\bundle\
+          Copy-Item docs\install-agent-windows.md "dist\bundle\УСТАНОВКА.md"
+          Compress-Archive -Path dist\bundle\* -DestinationPath "dist\ves-agent-$version-win64.zip"
+          echo "Собран ves-agent-$version-win64.zip"
+
+      - name: Артефакт запуска
+        uses: actions/upload-artifact@v4
+        with:
+          name: ves-agent-win64
+          path: dist/*.zip
+          if-no-files-found: error
+
+      - name: Релиз (по тегу agent-v*)
+        if: startsWith(github.ref, 'refs/tags/agent-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          body: |
+            Сборка агента весового ПК (Windows x64).
+            Установка: распаковать архив, следовать УСТАНОВКА.md внутри.
