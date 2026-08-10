@@ -22,6 +22,7 @@ services:
 
   # применяет миграции и завершается; app стартует только после успеха
   migrate:
+    image: ves-center:latest
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -34,6 +35,7 @@ services:
     restart: "no"
 
   app:
+    image: ves-center:latest
     build:
       context: ..
       dockerfile: deploy/Dockerfile
