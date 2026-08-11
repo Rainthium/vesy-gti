@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import http.server
 import io
+import subprocess
 import threading
 import zipfile
 from collections.abc import Callable, Iterator
@@ -231,6 +232,8 @@ class TestUpdaterSuccess:
         assert 'nssm.exe" stop ves-agent' in text
         assert 'nssm.exe" start ves-agent' in text
         assert "app_new" in text
+        # bat запускается задачей планировщика и сам её удаляет в конце
+        assert "schtasks /Delete /TN ves-agent-update /F" in text
 
         # временный архив удалён
         assert not (install_dir / "update-download.zip").exists()
@@ -380,3 +383,64 @@ class TestUpdaterBusy:
         assert not (install_dir / "update-download.zip").exists()
         assert not (install_dir / "self-update.bat").exists()
         assert spawn_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Запуск скрипта задачей планировщика (боевой урок 11.08.2026: nssm при
+# остановке службы убивает дерево её процессов — дочерний bat умирал
+# после nssm stop, не дойдя до подмены папки)
+# ---------------------------------------------------------------------------
+
+
+class TestSchedulerSpawn:
+    def test_scheduler_commands_shape(self, tmp_path: Path) -> None:
+        """Одноразовая задача: создание с /F (перезапись хвоста прежнего
+        обновления), запуск /Run; имя совпадает с удалением в bat."""
+        bat = tmp_path / "self-update.bat"
+        create, run = AgentUpdater.scheduler_commands(bat)
+        assert create[0] == "schtasks" and "/Create" in create
+        assert "/RU" in create and create[create.index("/RU") + 1] == "SYSTEM"
+        assert "/F" in create
+        assert str(bat) in create[create.index("/TR") + 1]
+        assert run == ["schtasks", "/Run", "/TN", updater_module.TASK_NAME]
+        assert f"/TN {updater_module.TASK_NAME} /F" in updater_module.UPDATE_BAT
+
+    def test_spawn_via_scheduler_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Оба вызова schtasks успешны → True, команды в правильном порядке."""
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert AgentUpdater._spawn_via_scheduler(tmp_path / "u.bat", tmp_path) is True
+        assert [c[1] for c in calls] == ["/Create", "/Run"]
+
+    def test_spawn_via_scheduler_create_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Провал /Create → False и /Run не вызывается (для запасного пути)."""
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 1, b"", "нет прав".encode())
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert AgentUpdater._spawn_via_scheduler(tmp_path / "u.bat", tmp_path) is False
+        assert [c[1] for c in calls] == ["/Create"]
+
+    def test_spawn_via_scheduler_missing_schtasks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """schtasks отсутствует/завис (OSError/TimeoutExpired) → False,
+        а не исключение: fallback-запуск должен получить шанс сработать."""
+
+        def raising_run(command: list[str], **kwargs: object) -> None:
+            raise FileNotFoundError("schtasks не найден")
+
+        monkeypatch.setattr(subprocess, "run", raising_run)
+        assert AgentUpdater._spawn_via_scheduler(tmp_path / "u.bat", tmp_path) is False

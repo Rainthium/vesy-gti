@@ -8,11 +8,17 @@
 - содержимое ``app/`` из архива раскладывается в ``app_new`` рядом
   с текущей ``app`` (стандартная раскладка C:/vesy-agent, см.
   docs/install-agent-windows.md);
-- пишется и запускается отдельным процессом скрипт ``self-update.bat``:
-  он останавливает службу ves-agent (этим корректно завершая агент),
-  подменяет папку (старая остаётся в ``app_old`` для отката) и запускает
-  службу заново. Логика повторяет комплектный update.bat, но скрипт
-  всегда пишется заново — не зависим от того, что лежит на весовом ПК.
+- пишется скрипт ``self-update.bat``: он останавливает службу ves-agent
+  (этим корректно завершая агент), подменяет папку (старая остаётся
+  в ``app_old`` для отката) и запускает службу заново. Логика повторяет
+  комплектный update.bat, но скрипт всегда пишется заново — не зависим
+  от того, что лежит на весовом ПК;
+- скрипт запускается ОДНОРАЗОВОЙ ЗАДАЧЕЙ ПЛАНИРОВЩИКА Windows
+  (schtasks), а не дочерним процессом агента: боевой урок 11.08.2026 —
+  nssm при остановке службы убивает всё дерево её процессов, и запущенный
+  агентом bat умирал сразу после ``nssm stop``, не дойдя до подмены
+  папки. Задача планировщика живёт в дереве самого планировщика и
+  остановку службы переживает; в конце bat сам удаляет задачу.
 
 Обновляется только замороженная сборка (PyInstaller): в dev-запуске
 ``python -m agent.main`` команда логируется и отклоняется.
@@ -43,6 +49,8 @@ DOWNLOAD_TIMEOUT_S = 300.0
 BUSY_WAIT_S = 600.0  # ждём окончания операции не дольше 10 минут
 BUSY_POLL_S = 2.0
 SPAWN_DELAY_S = 2.0  # пауза перед запуском self-update.bat: успеть отправить статус
+SCHTASKS_TIMEOUT_S = 30.0
+TASK_NAME = "ves-agent-update"  # одноразовая задача планировщика Windows
 
 UPDATE_BAT = r"""@echo off
 chcp 65001 >nul
@@ -58,6 +66,7 @@ move "%BASE%\app" "%BASE%\app_old" >> "%BASE%\logs\update.log" 2>&1
 if errorlevel 1 (
     echo [%date% %time%] ОШИБКА: app занята, обновление прервано >> "%BASE%\logs\update.log"
     "%BASE%\nssm.exe" start ves-agent >> "%BASE%\logs\update.log" 2>&1
+    schtasks /Delete /TN ves-agent-update /F >nul 2>&1
     exit /b 1
 )
 move "%BASE%\app_new" "%BASE%\app" >> "%BASE%\logs\update.log" 2>&1
@@ -67,6 +76,8 @@ if not exist "%BASE%\app\ves-agent.exe" (
 )
 "%BASE%\nssm.exe" start ves-agent >> "%BASE%\logs\update.log" 2>&1
 echo [%date% %time%] служба запущена >> "%BASE%\logs\update.log"
+rem уборка одноразовой задачи планировщика, которой запущен этот скрипт
+schtasks /Delete /TN ves-agent-update /F >nul 2>&1
 """
 
 
@@ -204,17 +215,88 @@ class AgentUpdater:
                     dst.write(src.read())
 
     @staticmethod
+    def scheduler_commands(bat: Path) -> list[list[str]]:
+        """Команды одноразовой задачи планировщика (вынесено для тестов).
+
+        /RU SYSTEM — служба ves-agent работает от LocalSystem, права есть;
+        /ST обязателен для /SC ONCE, но реальный запуск делает /Run —
+        задачу в конце удаляет сам bat (плюс /F перезаписывает хвост
+        от прежнего неудачного обновления, если он остался).
+        """
+        return [
+            [
+                "schtasks",
+                "/Create",
+                "/TN",
+                TASK_NAME,
+                "/TR",
+                f'cmd /c ""{bat}""',
+                "/SC",
+                "ONCE",
+                "/ST",
+                "00:00",
+                "/RU",
+                "SYSTEM",
+                "/F",
+            ],
+            ["schtasks", "/Run", "/TN", TASK_NAME],
+        ]
+
+    @staticmethod
+    def _spawn_via_scheduler(bat: Path, base: Path) -> bool:
+        """Запуск bat задачей планировщика — ВНЕ дерева процессов службы.
+
+        Дочерний процесс агента nssm убивает вместе со службой при stop
+        (боевой урок 11.08.2026) — задачу планировщика он не достаёт.
+        """
+        for command in AgentUpdater.scheduler_commands(bat):
+            try:
+                result = subprocess.run(
+                    command, cwd=base, capture_output=True, timeout=SCHTASKS_TIMEOUT_S
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                # schtasks отсутствует/завис — честный провал вместо
+                # исключения в callback цикла (fallback должен сработать)
+                logger.error("schtasks %s недоступен: %s", command[1], exc)
+                return False
+            if result.returncode != 0:
+                # schtasks на русской Windows пишет в OEM-кодировке cp866
+                logger.error(
+                    "schtasks %s не сработал: %s",
+                    command[1],
+                    result.stderr.decode("cp866", errors="replace").strip()
+                    or result.stdout.decode("cp866", errors="replace").strip(),
+                )
+                return False
+        return True
+
+    @staticmethod
     def _spawn_updater(bat: Path, base: Path) -> None:
-        creationflags = 0
         if sys.platform == "win32":
+            if AgentUpdater._spawn_via_scheduler(bat, base):
+                logger.info("скрипт обновления запущен задачей планировщика")
+                return
+            # запасной путь: отдельным процессом. nssm stop убьёт его вместе
+            # с деревом службы — обновление, скорее всего, замрёт после
+            # остановки, но лог всё объяснит; лучше попытка, чем ничего
+            logger.warning("планировщик недоступен — запасной запуск отдельным процессом")
             creationflags = (
                 subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
                 | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
             )
+            subprocess.Popen(
+                ["cmd", "/c", str(bat)],
+                cwd=base,
+                creationflags=creationflags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
+            return
+        # не-Windows: dev/тесты — обычный отдельный процесс
         subprocess.Popen(
-            ["cmd", "/c", str(bat)] if sys.platform == "win32" else ["sh", str(bat)],
+            ["sh", str(bat)],
             cwd=base,
-            creationflags=creationflags,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
