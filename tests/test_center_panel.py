@@ -636,6 +636,23 @@ class TestRefsData:
         ]
         assert [scale.id for _agent, scale in refs.agents] == [scale_a.id]
 
+    def test_site_filter_narrows_everything_but_sites(self, db_session: Session) -> None:
+        """site_id сужает весы/камеры/агентов до объекта; sites — полный
+        (нужен селекторам фильтра и форм)."""
+        site_a, scale_a = _add_site_scale(
+            db_session, "a-site", "СВХ «А»", "Весы 1", with_agent=True
+        )
+        _, scale_b = _add_site_scale(db_session, "b-site", "СВХ «Б»", "Весы 2", with_agent=True)
+        db_session.add(Camera(scale_id=scale_a.id, role=CameraRole.FRONT, rtsp_url="rtsp://a/1"))
+        db_session.add(Camera(scale_id=scale_b.id, role=CameraRole.FRONT, rtsp_url="rtsp://b/1"))
+        db_session.commit()
+
+        refs = queries.refs_data(db_session, site_a.id)
+        assert [site.code for site in refs.sites] == ["a-site", "b-site"]
+        assert [scale.id for scale, _ in refs.scales] == [scale_a.id]
+        assert [scale.id for _, scale in refs.cameras] == [scale_a.id]
+        assert [scale.id for _, scale in refs.agents] == [scale_a.id]
+
     def test_empty_db_gives_empty_lists(self, db_session: Session) -> None:
         """Пустая БД → пустые справочники, без ошибок."""
         refs = queries.refs_data(db_session)

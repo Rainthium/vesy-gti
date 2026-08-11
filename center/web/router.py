@@ -321,8 +321,13 @@ def create_panel_router(
         )
 
     @router.get("/refs", response_class=HTMLResponse)
-    async def refs(request: Request, user: PanelUser) -> HTMLResponse:
-        data = await asyncio.to_thread(_db, queries.refs_data)
+    async def refs(request: Request, user: PanelUser, site: str = "") -> HTMLResponse:
+        # общий фильтр по объекту: сужает весы/агентов/камеры разом
+        # (запрос Игоря 11.08.2026); мусорное значение = «все объекты»
+        site_filter, site_ok = _parse_site_id(site)
+        if not site_ok:
+            site_filter = None
+        data = await asyncio.to_thread(_db, lambda s: queries.refs_data(s, site_filter))
         # токен агента из flash-сессии: показывается ОДИН раз после выпуска
         # (в URL секретам не место, поэтому не query-параметром)
         agent_token = request.session.pop("refs_agent_token", None)
@@ -331,6 +336,7 @@ def create_panel_router(
             request,
             user=user,
             refs=data,
+            site_filter=site_filter,
             can_edit=request.session.get("panel_role") == "admin",
             agent_token=agent_token,
             scale_kinds=list(ScaleKind),

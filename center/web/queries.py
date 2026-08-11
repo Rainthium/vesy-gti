@@ -226,24 +226,20 @@ class RefsData:
     agents: list[tuple[Agent, Scale]]
 
 
-def refs_data(session: Session) -> RefsData:
+def refs_data(session: Session, site_id: int | None = None) -> RefsData:
+    """Справочники; ``site_id`` сужает весы/камеры/агентов до одного объекта
+    (фильтр экрана, запрос Игоря 11.08.2026 — на 13 объектах без него
+    страница нечитаема). Список sites всегда полный: он нужен селекторам.
+    """
     sites = list(session.execute(select(Site).order_by(Site.name)).scalars())
-    scales = [
-        tuple(r)
-        for r in session.execute(
-            select(Scale, Site).join(Site, Site.id == Scale.site_id).order_by(Site.name)
-        ).all()
-    ]
-    cameras = [
-        tuple(r)
-        for r in session.execute(
-            select(Camera, Scale).join(Scale, Scale.id == Camera.scale_id).order_by(Scale.id)
-        ).all()
-    ]
-    agents = [
-        tuple(r)
-        for r in session.execute(
-            select(Agent, Scale).join(Scale, Scale.id == Agent.scale_id).order_by(Scale.id)
-        ).all()
-    ]
+    scales_query = select(Scale, Site).join(Site, Site.id == Scale.site_id).order_by(Site.name)
+    cameras_query = select(Camera, Scale).join(Scale, Scale.id == Camera.scale_id)
+    agents_query = select(Agent, Scale).join(Scale, Scale.id == Agent.scale_id)
+    if site_id is not None:
+        scales_query = scales_query.where(Scale.site_id == site_id)
+        cameras_query = cameras_query.where(Scale.site_id == site_id)
+        agents_query = agents_query.where(Scale.site_id == site_id)
+    scales = [tuple(r) for r in session.execute(scales_query).all()]
+    cameras = [tuple(r) for r in session.execute(cameras_query.order_by(Scale.id)).all()]
+    agents = [tuple(r) for r in session.execute(agents_query.order_by(Scale.id)).all()]
     return RefsData(sites=sites, scales=scales, cameras=cameras, agents=agents)

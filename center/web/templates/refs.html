@@ -15,6 +15,16 @@
     <span class="page-meta">{% if can_edit %}редактирование доступно администратору{% else %}только чтение · изменения вносит администратор{% endif %}</span>
   </div>
   {% if note %}<div class="flash-note">{{ note }}</div>{% endif %}
+  <form method="get" action="/panel/refs" class="filters">
+    <select name="site">
+      <option value="">Все объекты</option>
+      {% for site in refs.sites %}
+      <option value="{{ site.id }}" {{ 'selected' if site_filter == site.id else '' }}>{{ site.name }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="btn-primary">Показать</button>
+    {% if site_filter %}<span class="page-meta">показан один объект — весы, агенты и камеры отфильтрованы</span>{% endif %}
+  </form>
   {% if agent_token %}
   <div class="token-note">
     <b>Токен агента (показывается один раз, в БД хранится только хеш):</b>
@@ -74,7 +84,7 @@
         <form class="user-create" method="post" action="/panel/refs/scales/create">
           <label>Объект
             <select name="site_id" required>
-              {% for site in refs.sites %}<option value="{{ site.id }}">{{ site.name }}</option>{% endfor %}
+              {% for site in refs.sites %}<option value="{{ site.id }}" {{ 'selected' if site_filter == site.id else '' }}>{{ site.name }}</option>{% endfor %}
             </select>
           </label>
           <label>Название <input name="name" required maxlength="200" placeholder="Весы SCS-80"></label>
