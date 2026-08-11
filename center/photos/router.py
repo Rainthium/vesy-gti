@@ -77,6 +77,18 @@ def create_photos_router(session_factory: SessionFactory, config: PhotosConfig) 
             .where(WeighingPhoto.role == role)
         ).scalar_one_or_none()
 
+    def _find_photo_of_scale(
+        session: Session, weighing_uuid: UUID, role: CameraRole, scale_id: int
+    ) -> str | None:
+        """Путь снимка, если запись принадлежит этим весам (иначе None)."""
+        return session.execute(
+            select(WeighingPhoto.path)
+            .join(Weighing, Weighing.id == WeighingPhoto.weighing_id)
+            .where(Weighing.uuid == weighing_uuid)
+            .where(WeighingPhoto.role == role)
+            .where(Weighing.scale_id == scale_id)
+        ).scalar_one_or_none()
+
     def _write_thumbnail(original: bytes, target: Path) -> None:
         """Миниатюра генерируется один раз при приёме (пересжатий оригинала нет)."""
         image: Image.Image = Image.open(io.BytesIO(original))
@@ -140,6 +152,48 @@ def create_photos_router(session_factory: SessionFactory, config: PhotosConfig) 
             logger.exception("не удалось построить миниатюру для %s", photo.path)
         logger.info("фото принято: %s (%d байт)", photo.path, len(body))
         return Response(status_code=204)
+
+    # --- возврат снимка агенту (фолбэк журнала оператора) ---
+
+    @router.get("/agents/photos/{weighing_uuid}/{role}")
+    async def download_photo(
+        weighing_uuid: UUID, role: str, request: Request, thumb: bool = False
+    ) -> Response:
+        """Отдать агенту снимок ЕГО весов (11.08.2026).
+
+        Локальные файлы агента убираются ретеншном через 30 дней, а журнал
+        оператора должен показывать фото и после этого — недостающее он
+        берёт отсюда. Агент видит только снимки своих весов: токен привязан
+        к ним, чужие записи для него не существуют.
+        """
+        token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        agent = None
+        if token:
+            agent = await asyncio.to_thread(_db, lambda s: repo.authenticate_agent(s, token))
+        if agent is None:
+            return Response(status_code=401)
+        try:
+            camera_role = CameraRole(role)
+        except ValueError:
+            return Response(status_code=404)
+
+        found = await asyncio.to_thread(
+            _db, lambda s: _find_photo_of_scale(s, weighing_uuid, camera_role, agent.scale_id)
+        )
+        if found is None:
+            return Response(status_code=404)
+        try:
+            full = _file_path(found)
+        except ValueError:
+            logger.error("недопустимый путь фото в БД: %s", found)
+            return Response(status_code=500)
+        if thumb:
+            thumb_path = full.with_name(full.stem + THUMB_SUFFIX + full.suffix)
+            if thumb_path.is_file():
+                return FileResponse(thumb_path, media_type="image/jpeg")
+        if not full.is_file():
+            return Response(status_code=404)
+        return FileResponse(full, media_type="image/jpeg")
 
     # --- раздача интеграторам ---
 

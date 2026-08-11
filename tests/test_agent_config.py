@@ -203,6 +203,36 @@ class TestCleanupOrphanPhotos:
         assert cleanup_orphan_photos(storage, tmp_path / "нет-такого") == 0
         storage.close()
 
+    def test_thumbnail_of_known_photo_survives(self, tmp_path: Path) -> None:
+        """Миниатюра журнала живёт, пока жив её кадр.
+
+        Она не числится в журнале, и без учёта родства уборка стирала бы
+        кэш при каждом старте агента (находка ревью 11.08.2026).
+        """
+        storage = AgentStorage(tmp_path / "agent.sqlite3")
+        photos_dir = tmp_path / "photos"
+        known = _saved_record_with_photo(storage, photos_dir)
+        thumb = known.with_name(known.stem + "_thumb" + known.suffix)
+        thumb.write_bytes(b"\xff\xd8thumb\xff\xd9")
+
+        assert cleanup_orphan_photos(storage, photos_dir) == 0
+        assert known.exists() and thumb.exists()
+        storage.close()
+
+    def test_thumbnail_of_orphan_removed(self, tmp_path: Path) -> None:
+        """Миниатюра снимка-сироты уходит вместе с ним — мусор не копится."""
+        storage = AgentStorage(tmp_path / "agent.sqlite3")
+        photos_dir = tmp_path / "photos"
+        photos_dir.mkdir(parents=True, exist_ok=True)
+        orphan = photos_dir / f"{uuid4().hex}_photo1.jpeg"
+        orphan.write_bytes(b"\xff\xd8orphan\xff\xd9")
+        orphan_thumb = orphan.with_name(orphan.stem + "_thumb" + orphan.suffix)
+        orphan_thumb.write_bytes(b"\xff\xd8thumb\xff\xd9")
+
+        assert cleanup_orphan_photos(storage, photos_dir) == 2
+        assert not orphan.exists() and not orphan_thumb.exists()
+        storage.close()
+
 
 class TestBuildRuntime:
     def test_services_glued(self, tmp_path: Path) -> None:

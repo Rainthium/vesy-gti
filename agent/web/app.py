@@ -17,6 +17,7 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, WebSocket
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -113,6 +114,9 @@ def create_app(
                     "tare": record.tare_value if is_weighing else record.massa,
                     "netto": record.netto if is_weighing else None,
                     "synced": synced,
+                    # роли берём из журнала: файл мог уже уехать под ретеншн,
+                    # но снимок всё равно покажем — подтянем из центра
+                    "photo_roles": [role.value for role in services.photo_roles(record.uuid)],
                 }
             )
         return {"journal_rows": rows}
@@ -172,6 +176,33 @@ def create_app(
     def fragment_journal(request: Request, operator: Operator) -> HTMLResponse:
         return render("fragments/journal.html", request, operator=operator, **journal_context())
 
+    # --- диагностика ---
+
+    def diagnostics_context() -> dict[str, Any]:
+        """Состояние агента и хвост журнала службы (без обращений к центру)."""
+        total, stuck = services.photo_queue()
+        return {
+            "photo_queue_total": total,
+            "photo_queue_stuck": stuck,
+            "clock_offset_s": services.clock_offset_s(),
+            "tare_registry_size": services.tare_registry_size(),
+            **log_context(),
+        }
+
+    def log_context() -> dict[str, Any]:
+        return {
+            "log_lines": services.log_tail(),
+            "log_location": services.log_location(),
+        }
+
+    @app.get("/diagnostics", response_class=HTMLResponse)
+    def diagnostics_page(request: Request, operator: Operator) -> HTMLResponse:
+        return render("diagnostics.html", request, operator=operator, **diagnostics_context())
+
+    @app.get("/fragments/log", response_class=HTMLResponse)
+    def fragment_log(request: Request, operator: Operator) -> HTMLResponse:
+        return render("fragments/log.html", request, operator=operator, **log_context())
+
     # --- камеры ---
 
     @app.get("/cameras/{role}.jpg")
@@ -189,6 +220,27 @@ def create_app(
             content=shot.jpeg,
             media_type="image/jpeg",
             headers={"Cache-Control": "no-store"},
+        )
+
+    # --- снимки записей журнала ---
+
+    @app.get("/photos/{weighing_uuid}/{role}.jpg")
+    def journal_photo(
+        weighing_uuid: UUID, role: str, operator: Operator, thumb: bool = False
+    ) -> Response:
+        """Кадр операции: локальный файл, а после ретеншна — из центра."""
+        try:
+            camera_role = CameraRole(role)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="нет такой камеры") from exc
+        data = services.photo_bytes(weighing_uuid, camera_role, thumb=thumb)
+        if data is None:
+            raise HTTPException(status_code=404, detail="снимок недоступен")
+        # снимок неизменяем: можно смело держать в кэше браузера
+        return Response(
+            content=data,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "private, max-age=86400"},
         )
 
     # --- оборудование: действия ---

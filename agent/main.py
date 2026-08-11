@@ -26,6 +26,7 @@ import sys
 import urllib.parse
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID
 
 import uvicorn
 
@@ -33,8 +34,10 @@ import agent
 from agent.cameras.capture import CameraConfig, CameraShot, capture
 from agent.clock import CenterClock
 from agent.config import AgentConfig, load_config
+from agent.diagnostics import default_log_path, read_log_tail
 from agent.drivers.base import ScaleState
 from agent.drivers.cas22 import Cas22Driver
+from agent.photos import THUMB_SUFFIX, PhotoLibrary
 from agent.settings import SettingsManager, merge_center_settings
 from agent.sync.photo_uploader import PhotoUploader
 from agent.sync.retention import PhotoRetention
@@ -73,13 +76,20 @@ def cleanup_orphan_photos(storage: AgentStorage, photos_dir: Path) -> int:
     Вызывается при старте, ДО запуска веб-интерфейса и клиента центра:
     в этот момент незавершённых превью быть не может, значит любой
     неизвестный журналу файл — мусор от краха.
+
+    Миниатюры журнала (``..._thumb.jpeg``, agent/photos.py) в журнале не
+    числятся, но принадлежат своим кадрам: их судьба — судьба оригинала,
+    иначе кэш стирался бы при каждом старте (находка ревью 11.08.2026).
     """
     if not photos_dir.is_dir():
         return 0
     known = {str(Path(path)) for path in storage.photo_paths()}
     removed = 0
     for file in photos_dir.rglob("*.jpeg"):
-        if str(file) not in known:
+        owner = file
+        if file.stem.endswith(THUMB_SUFFIX):
+            owner = file.with_name(file.stem[: -len(THUMB_SUFFIX)] + file.suffix)
+        if str(owner) not in known:
             with contextlib.suppress(OSError):
                 file.unlink()
                 removed += 1
@@ -151,12 +161,18 @@ class AgentRuntime:
         storage: AgentStorage,
         client: CenterClient,
         manual: ManualOperationFlow,
+        photos: PhotoLibrary,
+        clock: CenterClock,
+        log_path: Path | None,
     ) -> None:
         self._config = config
         self._driver = driver
         self._storage = storage
         self._client = client
         self._manual = manual
+        self._photos = photos
+        self._clock = clock
+        self._log_path = log_path
         self._info = AgentInfo(
             site_name=config.site_name,
             scale_name=config.scale_name,
@@ -194,6 +210,26 @@ class AgentRuntime:
             if camera.role is role:
                 return capture(camera.to_camera_config(), ffmpeg_path=self._config.ffmpeg_path)
         raise ValueError(f"камера {role} не настроена")
+
+    def photo_roles(self, weighing_uuid: UUID) -> list[CameraRole]:
+        return self._photos.roles_of(weighing_uuid)
+
+    def photo_bytes(
+        self, weighing_uuid: UUID, role: CameraRole, *, thumb: bool = False
+    ) -> bytes | None:
+        return self._photos.photo_bytes(weighing_uuid, role, thumb=thumb)
+
+    def photo_queue(self) -> tuple[int, int]:
+        return self._storage.photo_queue_stats()
+
+    def clock_offset_s(self) -> float | None:
+        return self._clock.offset_s if self._clock.synced else None
+
+    def log_tail(self, lines: int = 300) -> list[str]:
+        return read_log_tail(self._log_path, lines=lines)
+
+    def log_location(self) -> str:
+        return str(self._log_path) if self._log_path else "вывод в консоль (dev-запуск)"
 
     def verify_operator(self, login: str, password: str) -> str | None:
         return self._storage.verify_operator(login, password)
@@ -338,7 +374,21 @@ def build_runtime(
             storage=storage,
         )
     )
-    runtime = AgentRuntime(config, driver=driver, storage=storage, client=client, manual=manual)
+    runtime = AgentRuntime(
+        config,
+        driver=driver,
+        storage=storage,
+        client=client,
+        manual=manual,
+        photos=PhotoLibrary(
+            storage,
+            base_url=http_base_url(config.center.url),
+            token=config.center.token,
+            online=lambda: client.connected,
+        ),
+        clock=center_clock,
+        log_path=default_log_path(),
+    )
     return runtime, driver, storage, client, uploader, camera_health, watcher, auto_config
 
 

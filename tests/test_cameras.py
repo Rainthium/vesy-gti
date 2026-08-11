@@ -357,6 +357,20 @@ class TestRtspFrame:
         assert shot.error is not None
         assert "connection refused" in shot.error
 
+    def test_password_from_ffmpeg_stderr_is_masked(self, fake_ffmpeg: Callable[[str], str]) -> None:
+        """ffmpeg печатает URL целиком — пароль камеры не должен утечь.
+
+        Текст ошибки идёт в лог агента, а он теперь виден оператору на
+        экране «Диагностика» (замечание ревью 11.08.2026).
+        """
+        url = "rtsp://operator:s3cret@10.0.0.5:554/stream1"
+        ffmpeg = fake_ffmpeg(f"echo '{url}: connection refused' >&2\nexit 1")
+        shot = capture(CameraConfig(role=CameraRole.FRONT, rtsp_url=url), ffmpeg_path=ffmpeg)
+        assert not shot.ok
+        assert shot.error is not None
+        assert "s3cret" not in shot.error
+        assert "connection refused" in shot.error
+
     def test_empty_stdout_is_error(self, fake_ffmpeg: Callable[[str], str]) -> None:
         """Код 0, но кадра нет (пустой stdout) — это ошибка, а не пустое фото."""
         ffmpeg = fake_ffmpeg("exit 0")

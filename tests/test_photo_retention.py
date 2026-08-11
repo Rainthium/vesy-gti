@@ -245,6 +245,24 @@ class TestPurgeOnce:
 
         assert retention.purge_once(now=NOW) == 4
 
+    def test_thumbnail_removed_with_original(self, env: RetentionEnv) -> None:
+        """Миниатюра журнала уходит вместе со своим кадром: иначе кэш рос бы
+        вечно там, где уборка как раз освобождает диск (замечание ревью)."""
+        _, old = env.add_photo("old.jpeg", uploaded_at=NOW - timedelta(days=40))
+        thumb = old.with_name(old.stem + "_thumb" + old.suffix)
+        thumb.write_bytes(b"\xff\xd8thumb\xff\xd9")
+        retention = PhotoRetention(env.storage, retention_days=30)
+
+        assert retention.purge_once(now=NOW) == 1
+        assert not old.exists() and not thumb.exists()
+
+    def test_missing_thumbnail_is_fine(self, env: RetentionEnv) -> None:
+        """Миниатюры может не быть (запись не открывали) — не падаем."""
+        _, old = env.add_photo("old.jpeg", uploaded_at=NOW - timedelta(days=40))
+        retention = PhotoRetention(env.storage, retention_days=30)
+        assert retention.purge_once(now=NOW) == 1
+        assert not old.exists()
+
     def test_missing_file_marked_without_error(self, env: RetentionEnv) -> None:
         """Файл уже исчез (уборка сирот, ручное удаление) — не падаем и
         отмечаем строку, чтобы не возвращаться к ней каждые 6 часов."""

@@ -16,7 +16,7 @@ import tempfile
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import uvicorn
 
@@ -211,6 +211,17 @@ class DemoServices:
     def camera_roles(self) -> list[CameraRole]:
         return [CameraRole.FRONT, CameraRole.REAR]
 
+    def photo_roles(self, weighing_uuid: UUID) -> list[CameraRole]:
+        # в демо снимки есть у всех операций, кроме самой старой
+        return (
+            [] if weighing_uuid == self._journal[-1].uuid else [CameraRole.FRONT, CameraRole.REAR]
+        )
+
+    def photo_bytes(
+        self, weighing_uuid: UUID, role: CameraRole, *, thumb: bool = False
+    ) -> bytes | None:
+        return _GRAY_JPEG if self.photo_roles(weighing_uuid) else None
+
     def camera_snapshot(self, role: CameraRole) -> CameraShot:
         return CameraShot(role=role, jpeg=_GRAY_JPEG, captured_at=datetime.now(UTC))
 
@@ -219,6 +230,23 @@ class DemoServices:
 
     def reopen_port(self) -> None:
         print("демо: переоткрытие порта")
+
+    def photo_queue(self) -> tuple[int, int]:
+        return (2, 1)
+
+    def clock_offset_s(self) -> float | None:
+        return -1.3
+
+    def log_tail(self, lines: int = 300) -> list[str]:
+        return [
+            "2026-08-11 19:02:11 INFO agent.main агент запущен: индикатор COM3",
+            "2026-08-11 19:02:12 INFO agent.sync.ws_client связь с центром установлена",
+            "2026-08-11 19:07:45 WARNING agent.cameras.capture проверка камеры: таймаут",
+            "2026-08-11 19:08:02 INFO agent.weighing.auto операция завершена: 43 310 kg",
+        ][-lines:]
+
+    def log_location(self) -> str:
+        return "демо: строки журнала выдуманы"
 
 
 def main() -> None:

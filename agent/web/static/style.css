@@ -793,3 +793,102 @@ table.journal .cell-sync { text-align: center; font-size: 16px; }
   .login-brand { padding: 36px 40px; }
   .login-hero h1 { font-size: 36px; }
 }
+
+/* ---------- Снимки операций в журнале (перенос из панели центра) ---------- */
+
+td.cell-photos { padding-top: 6px; padding-bottom: 6px; white-space: nowrap; }
+td.cell-photos img.thumb + img.thumb { margin-left: 6px; }
+td.photos-missing::after { content: "—"; color: var(--muted); }
+img.thumb {
+  display: inline-block;
+  width: 58px;
+  height: 38px;
+  object-fit: cover;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: zoom-in;
+  vertical-align: middle;
+}
+img.thumb:hover { border-color: var(--green-border); box-shadow: var(--shadow-card); }
+
+/* ---------- Лайтбокс просмотра снимка ---------- */
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(16, 24, 40, .78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  cursor: zoom-out;
+}
+.lightbox[hidden] { display: none; }
+.lightbox-body {
+  margin: 0;
+  max-width: 92vw;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  cursor: default;
+}
+.lightbox-img {
+  max-width: 92vw;
+  max-height: calc(92vh - 40px);
+  object-fit: contain;
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-pop);
+  background: var(--surface-2);
+}
+.lightbox-caption { font-size: 13.5px; font-weight: 700; color: #fff; text-align: center; }
+.lightbox-close {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, .14);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.lightbox-close:hover { background: rgba(255, 255, 255, .28); }
+body.lightbox-open { overflow: hidden; }
+
+/* ---------- Диагностика ---------- */
+
+.diagnostics {
+  padding: 20px 24px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.diag-grid { display: grid; grid-template-columns: max-content 1fr; gap: 8px 20px; margin: 0; }
+.diag-grid dt { color: var(--muted); font-size: 13.5px; }
+.diag-grid dd { margin: 0; font-weight: 600; }
+.log-tail {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  max-height: 46vh;
+  overflow: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.log-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.diagnostics .hint { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
+.diagnostics .journal-meta { color: var(--muted); font-size: 12.5px; font-weight: 500; }

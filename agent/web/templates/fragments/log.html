@@ -1,0 +1,22 @@
+{# Хвост журнала службы. Обновляется кнопкой (не опросом: файл читается
+   с диска, дёргать его каждые 5 секунд незачем). #}
+<section class="card" id="log-card">
+  <h2>
+    <span>Журнал службы</span>
+    <span class="journal-meta">{{ log_location }}</span>
+  </h2>
+  {% if log_lines %}
+  <pre class="log-tail">{% for line in log_lines %}{{ line }}
+{% endfor %}</pre>
+  <div class="log-actions">
+    <button class="btn-outline" hx-get="/fragments/log" hx-target="#log-card" hx-swap="outerHTML">Обновить</button>
+    {% set n = log_lines | length %}
+    <span class="hint">показаны последние {{ n }}
+      {{ 'строка' if n % 10 == 1 and n % 100 != 11
+         else 'строки' if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14)
+         else 'строк' }}</span>
+  </div>
+  {% else %}
+  <p class="hint">Журнал недоступен: агент запущен не службой (вывод идёт в консоль) либо файл ещё не создан.</p>
+  {% endif %}
+</section>

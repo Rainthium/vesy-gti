@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
+from agent.photos import thumb_path
 from agent.sync.storage import AgentStorage
 from shared.enums import CameraRole
 
@@ -114,6 +115,9 @@ class PhotoRetention:
         for weighing_uuid, role, path in portion:
             try:
                 Path(path).unlink(missing_ok=True)
+                # миниатюра журнала живёт при своём кадре — уходит вместе с
+                # ним, иначе кэш рос бы вечно ровно там, где чистим диск
+                thumb_path(Path(path)).unlink(missing_ok=True)
             except OSError as exc:
                 # файл занят или нет прав — метку не ставим, попробуем в
                 # следующий раз (иначе потеряли бы след файла на диске)

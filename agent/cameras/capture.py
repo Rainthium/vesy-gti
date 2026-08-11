@@ -158,7 +158,11 @@ def _rtsp_frame(url: str, timeout_s: float, ffmpeg_path: str) -> bytes:
 
     if completed.returncode != 0 or not completed.stdout:
         stderr = completed.stderr.decode("utf-8", "replace").strip()
-        raise RuntimeError(f"ffmpeg завершился с кодом {completed.returncode}: {stderr[-300:]}")
+        # ffmpeg печатает входной URL целиком, вместе с логином и паролем
+        # камеры; текст ошибки уходит в лог, а лог теперь виден оператору
+        # на экране «Диагностика» (замечание ревью 11.08.2026)
+        safe = stderr.replace(url, sanitize_url(url))
+        raise RuntimeError(f"ffmpeg завершился с кодом {completed.returncode}: {safe[-300:]}")
     if not completed.stdout.startswith(JPEG_MAGIC):
         raise ValueError("вывод ffmpeg не является JPEG")
     return completed.stdout

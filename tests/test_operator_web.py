@@ -28,7 +28,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -49,6 +49,7 @@ NNBSP = " "
 
 # минимальный валидный заголовок JPEG — достаточно для проверки отдачи байтов
 FAKE_JPEG = b"\xff\xd8\xff\xe0" + b"fake-camera-frame" + b"\xff\xd9"
+THUMB_JPEG = b"\xff\xd8\xff\xe0" + b"fake-thumbnail" + b"\xff\xd9"
 
 OPERATOR_LOGIN = "osmonov"
 OPERATOR_PASSWORD = "secret"
@@ -102,12 +103,19 @@ class FakeServices:
         self.roles = [CameraRole.FRONT, CameraRole.REAR]
         self.journal: list[WeighingRecord] = []
         self.journal_synced = True  # флаг «дослано» для всех записей фейка
+        # снимки записей журнала: uuid → роли (пусто = снимков нет)
+        self.photo_roles_by_uuid: dict[UUID, list[CameraRole]] = {}
+        self.photo_requests: list[tuple[UUID, CameraRole, bool]] = []
         self.manual_ready_flag = False
         self.manual_error: str | None = None
         self.manual_preview: ManualPreview | None = None
         self.manual_capture_args: tuple[Operation, str, str | None, str] | None = None
         self.tare_hint: TareRecord | None = None
         self.reopen_called = False
+        self.photo_queue_stats = (0, 0)
+        self.clock_offset: float | None = 0.4
+        self.log_lines: list[str] = []
+        self.log_location_text = "C:/vesy-agent/logs/agent.log"
         self.info = AgentInfo(
             site_name="СВХ «Тест-Терминал»",
             scale_name="Весы SCS-80",
@@ -137,6 +145,17 @@ class FakeServices:
     def camera_roles(self) -> list[CameraRole]:
         return self.roles
 
+    def photo_roles(self, weighing_uuid: UUID) -> list[CameraRole]:
+        return self.photo_roles_by_uuid.get(weighing_uuid, [])
+
+    def photo_bytes(
+        self, weighing_uuid: UUID, role: CameraRole, *, thumb: bool = False
+    ) -> bytes | None:
+        if role not in self.photo_roles_by_uuid.get(weighing_uuid, []):
+            return None
+        self.photo_requests.append((weighing_uuid, role, thumb))
+        return THUMB_JPEG if thumb else FAKE_JPEG
+
     def camera_snapshot(self, role: CameraRole) -> CameraShot:
         if not self.snapshot_ok:
             return CameraShot(
@@ -151,6 +170,20 @@ class FakeServices:
 
     def reopen_port(self) -> None:
         self.reopen_called = True
+
+    # --- диагностика ---
+
+    def photo_queue(self) -> tuple[int, int]:
+        return self.photo_queue_stats
+
+    def clock_offset_s(self) -> float | None:
+        return self.clock_offset
+
+    def log_tail(self, lines: int = 300) -> list[str]:
+        return self.log_lines[-lines:]
+
+    def log_location(self) -> str:
+        return self.log_location_text
 
     # --- ручной режим: управляемые заглушки ---
 
@@ -428,6 +461,143 @@ class TestCameras:
         """Валидная роль, не настроенная на объекте, — тоже 404."""
         services.roles = [CameraRole.FRONT]
         assert operator_client.get("/cameras/rear.jpg").status_code == 404
+
+
+class TestJournalPhotos:
+    """Снимки операций в журнале оператора (11.08.2026): миниатюра в строке,
+    оригинал по клику, а когда локальный файл убран ретеншном — из центра."""
+
+    def test_thumbnails_rendered_for_record_with_photos(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """У записи со снимками в строке две миниатюры и ссылки на оригиналы."""
+        record = make_record()
+        services.journal = [record]
+        services.photo_roles_by_uuid = {record.uuid: [CameraRole.FRONT, CameraRole.REAR]}
+        page = operator_client.get("/").text
+        assert f'src="/photos/{record.uuid}/front.jpg?thumb=1"' in page
+        assert f'src="/photos/{record.uuid}/rear.jpg?thumb=1"' in page
+        assert f'data-full="/photos/{record.uuid}/front.jpg"' in page
+        assert "js-lightbox" in page
+
+    def test_record_without_photos_has_no_images(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Без снимков (запись старая или фото не сохранились) — прочерк."""
+        record = make_record()
+        services.journal = [record]
+        services.photo_roles_by_uuid = {}
+        page = operator_client.get("/").text
+        assert f"/photos/{record.uuid}/" not in page
+
+    def test_photo_served_with_cache_headers(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Снимок неизменяем — отдаётся с приватным кэшем, не no-store."""
+        record = make_record()
+        services.photo_roles_by_uuid = {record.uuid: [CameraRole.FRONT]}
+        response = operator_client.get(f"/photos/{record.uuid}/front.jpg")
+        assert response.status_code == 200
+        assert response.content == FAKE_JPEG
+        assert response.headers["Content-Type"] == "image/jpeg"
+        assert "max-age" in response.headers["Cache-Control"]
+
+    def test_thumb_flag_reaches_service(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """?thumb=1 доходит до сервиса — строка журнала грузит миниатюру."""
+        record = make_record()
+        services.photo_roles_by_uuid = {record.uuid: [CameraRole.FRONT]}
+        response = operator_client.get(f"/photos/{record.uuid}/front.jpg?thumb=1")
+        assert response.content == THUMB_JPEG
+        assert services.photo_requests[-1] == (record.uuid, CameraRole.FRONT, True)
+
+    def test_missing_photo_404(self, services: FakeServices, operator_client: TestClient) -> None:
+        """Снимка нет ни локально, ни в центре — 404, страница не падает."""
+        record = make_record()
+        services.photo_roles_by_uuid = {}
+        assert operator_client.get(f"/photos/{record.uuid}/front.jpg").status_code == 404
+
+    def test_unknown_role_404(self, operator_client: TestClient) -> None:
+        """Роль вне перечисления — 404."""
+        assert operator_client.get(f"/photos/{uuid4()}/side.jpg").status_code == 404
+
+    def test_requires_login(self, client: TestClient) -> None:
+        """Без входа снимки недоступны (редирект на форму входа)."""
+        response = client.get(f"/photos/{uuid4()}/front.jpg", follow_redirects=False)
+        assert response.status_code == 303
+
+
+class TestDiagnostics:
+    """Экран «Диагностика» (11.08.2026): состояние агента и хвост журнала
+    службы — чтобы разбирать сбой, не подключаясь к весовому ПК."""
+
+    def test_page_shows_agent_state(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """На странице очередь снимков, расхождение часов и версия агента."""
+        services.photo_queue_stats = (7, 2)
+        services.clock_offset = None
+        services.pending = 3
+        page = operator_client.get("/diagnostics").text
+        assert "7 ждут загрузки" in page
+        assert "застряло 2" in page
+        assert "3 ждут отправки" in page
+        assert services.info.agent_version in page
+
+    def test_clock_offset_shown_when_synced(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Время от центра получено — показываем расхождение со знаком."""
+        services.clock_offset = -1.25
+        page = operator_client.get("/diagnostics").text
+        assert "-1.2 с" in page or "-1.3 с" in page
+
+    def test_clock_offset_absent_is_explained(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Времени от центра не было — так и пишем, а не показываем ноль."""
+        services.clock_offset = None
+        assert "не получено" in operator_client.get("/diagnostics").text
+
+    def test_log_lines_rendered(self, services: FakeServices, operator_client: TestClient) -> None:
+        """Строки лога попадают на страницу вместе с путём к файлу."""
+        services.log_lines = ["первая строка лога", "вторая строка лога"]
+        page = operator_client.get("/diagnostics").text
+        assert "первая строка лога" in page
+        assert "вторая строка лога" in page
+        assert services.log_location_text in page
+
+    def test_log_content_is_escaped(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Лог — данные, а не разметка: тег из строки не исполняется."""
+        services.log_lines = ["<script>alert(1)</script> ошибка"]
+        page = operator_client.get("/diagnostics").text
+        assert "<script>alert(1)</script>" not in page
+        assert "&lt;script&gt;" in page
+
+    def test_missing_log_explained(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Лога нет (dev-запуск) — подсказка вместо пустого места."""
+        services.log_lines = []
+        assert "Журнал недоступен" in operator_client.get("/diagnostics").text
+
+    def test_log_fragment_is_partial(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Кнопка «Обновить» тянет только карточку, не всю страницу."""
+        services.log_lines = ["строка"]
+        response = operator_client.get("/fragments/log")
+        assert response.status_code == 200
+        assert 'id="log-card"' in response.text
+        assert "<html" not in response.text
+
+    def test_requires_login(self, client: TestClient) -> None:
+        """Без входа диагностика недоступна."""
+        assert client.get("/diagnostics", follow_redirects=False).status_code == 303
+        assert client.get("/fragments/log", follow_redirects=False).status_code == 303
 
 
 # --- действия на «Оборудовании» ---

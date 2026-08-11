@@ -189,7 +189,9 @@ class CenterClient:
             try:
                 message = parse_center_message(raw)
             except ValueError:
-                logger.warning("непонятное сообщение от центра: %.200s", raw)
+                # тело не печатаем: в снимках настроек едут URL камер с
+                # паролями, а лог теперь виден оператору на «Диагностике»
+                logger.warning("непонятное сообщение от центра (%d символов)", len(raw))
                 continue
             if isinstance(message, WeighRequest):
                 self._spawn_request_handler(connection, message)

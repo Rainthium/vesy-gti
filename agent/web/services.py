@@ -7,6 +7,7 @@
 
 from dataclasses import dataclass
 from typing import Protocol
+from uuid import UUID
 
 from agent.cameras.capture import CameraShot
 from agent.drivers.base import ScaleState
@@ -58,6 +59,16 @@ class AgentServices(Protocol):
         """Настроенные камеры (обычно front и rear)."""
         ...
 
+    def photo_roles(self, weighing_uuid: UUID) -> list[CameraRole]:
+        """Роли снимков записи журнала (по журналу, не по наличию файлов)."""
+        ...
+
+    def photo_bytes(
+        self, weighing_uuid: UUID, role: CameraRole, *, thumb: bool = False
+    ) -> bytes | None:
+        """Снимок записи: локальный файл, а после ретеншна — из центра."""
+        ...
+
     def camera_snapshot(self, role: CameraRole) -> CameraShot:
         """Свежий кадр камеры (может занимать до пары секунд)."""
         ...
@@ -68,6 +79,24 @@ class AgentServices(Protocol):
 
     def reopen_port(self) -> None:
         """Принудительно переоткрыть порт индикатора (кнопка на «Оборудовании»)."""
+        ...
+
+    # --- диагностика (экран «Диагностика», работает и без связи с центром) ---
+
+    def photo_queue(self) -> tuple[int, int]:
+        """Очередь загрузки снимков: (всего ждёт, из них застряло)."""
+        ...
+
+    def clock_offset_s(self) -> float | None:
+        """Смещение часов ПК относительно центра; None — время не получено."""
+        ...
+
+    def log_tail(self, lines: int = 300) -> list[str]:
+        """Последние строки журнала службы (пусто — файл недоступен)."""
+        ...
+
+    def log_location(self) -> str:
+        """Где лежит журнал службы — подсказка оператору."""
         ...
 
     # --- ручной режим (автономный, правило №3; поток agent/weighing/manual.py) ---

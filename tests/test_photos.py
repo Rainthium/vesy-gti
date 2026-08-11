@@ -431,6 +431,84 @@ class TestUploadPhoto:
 
 
 # ---------------------------------------------------------------------------
+# GET /agents/photos/... — возврат снимка агенту (фолбэк журнала оператора)
+# ---------------------------------------------------------------------------
+
+
+class TestDownloadPhotoByAgent:
+    """Локальные файлы агента убирает ретеншн, и журнал оператора берёт
+    недостающие снимки отсюда (11.08.2026). Чужие записи агенту не видны."""
+
+    def test_agent_gets_own_photo(self, photo_env: PhotoEnv) -> None:
+        """Свой снимок отдаётся байт-в-байт по токену агента."""
+        client, record, _ = _uploaded_env(photo_env)
+        response = client.get(f"/agents/photos/{record.uuid}/front", headers=AGENT_AUTH)
+        assert response.status_code == 200
+        assert response.content == _GRAY_JPEG
+        assert response.headers["content-type"] == "image/jpeg"
+
+    def test_thumb_served_when_asked(self, photo_env: PhotoEnv) -> None:
+        """?thumb=1 отдаёт миниатюру, построенную при приёме (она меньше)."""
+        client, record, stored = _uploaded_env(photo_env)
+        thumb = stored.with_name(stored.stem + "_thumb" + stored.suffix)
+        assert thumb.is_file(), "миниатюра не построена при приёме"
+        response = client.get(f"/agents/photos/{record.uuid}/front?thumb=1", headers=AGENT_AUTH)
+        assert response.status_code == 200
+        assert response.content == thumb.read_bytes()
+
+    def test_thumb_falls_back_to_original(self, photo_env: PhotoEnv) -> None:
+        """Миниатюры на диске нет (старый снимок) → отдаём оригинал."""
+        client, record, stored = _uploaded_env(photo_env)
+        stored.with_name(stored.stem + "_thumb" + stored.suffix).unlink()
+        response = client.get(f"/agents/photos/{record.uuid}/front?thumb=1", headers=AGENT_AUTH)
+        assert response.status_code == 200
+        assert response.content == _GRAY_JPEG
+
+    def test_without_token_401(self, photo_env: PhotoEnv) -> None:
+        """Без токена агента — 401 (снимки не публичны)."""
+        client, record, _ = _uploaded_env(photo_env)
+        assert client.get(f"/agents/photos/{record.uuid}/front").status_code == 401
+
+    def test_foreign_scale_photo_not_found(self, photo_env: PhotoEnv) -> None:
+        """Запись ЧУЖИХ весов для агента не существует — 404, а не файл."""
+        client, _, _ = _uploaded_env(photo_env)
+        with photo_env.factory() as session:
+            other_site = Site(code="other-site", name="Другой объект")
+            session.add(other_site)
+            session.flush()
+            other_scale = Scale(
+                site_id=other_site.id, name="Весы 2", kind=ScaleKind.STATIC, driver="cas22"
+            )
+            session.add(other_scale)
+            session.flush()
+            other_scale_id = other_scale.id
+            session.commit()
+        foreign = make_record(vehicle_number="09KG000ZZZ")
+        with photo_env.factory() as session:
+            assert repo.save_weighing_record(session, other_scale_id, foreign, [gray_meta()])
+
+        response = client.get(f"/agents/photos/{foreign.uuid}/front", headers=AGENT_AUTH)
+        assert response.status_code == 404
+
+    def test_unknown_record_and_role(self, photo_env: PhotoEnv) -> None:
+        """Неизвестные запись и роль — 404."""
+        client, record, _ = _uploaded_env(photo_env)
+        assert client.get(f"/agents/photos/{uuid4()}/front", headers=AGENT_AUTH).status_code == 404
+        assert (
+            client.get(f"/agents/photos/{record.uuid}/side", headers=AGENT_AUTH).status_code == 404
+        )
+
+    def test_missing_file_404(self, photo_env: PhotoEnv) -> None:
+        """Метаданные есть, файла в хранилище нет — 404 без исключения."""
+        client, record, stored = _uploaded_env(photo_env)
+        stored.unlink()
+        stored.with_name(stored.stem + "_thumb" + stored.suffix).unlink()
+        assert (
+            client.get(f"/agents/photos/{record.uuid}/front", headers=AGENT_AUTH).status_code == 404
+        )
+
+
+# ---------------------------------------------------------------------------
 # GET /vesy/...
 # ---------------------------------------------------------------------------
 

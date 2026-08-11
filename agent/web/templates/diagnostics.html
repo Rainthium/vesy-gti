@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Диагностика — Весовая система{% endblock %}
+{% block body_class %}app{% endblock %}
+{% block body %}
+{% set active_tab = 'diagnostics' %}
+{% include "_header.html" %}
+<main class="diagnostics">
+  <section class="card">
+    <h2><span>Состояние агента</span></h2>
+    <dl class="diag-grid">
+      <dt>Индикатор</dt>
+      <dd>{{ 'поток данных' if scale_ok else 'нет данных' }}{% if scale.error %} · {{ scale.error }}{% endif %}</dd>
+      <dt>Порт</dt><dd>{{ info.port_label }}</dd>
+      <dt>Связь с центром</dt><dd>{{ 'онлайн' if center_online else 'офлайн' }} · {{ info.center_url }}</dd>
+      <dt>Часы</dt>
+      <dd>{% if clock_offset_s is none %}время от центра не получено (идут локальные часы){% else %}расхождение с центром {{ '%+.1f' | format(clock_offset_s) }} с{% endif %}</dd>
+      <dt>Очередь записей</dt><dd>{{ pending_count }} ждут отправки в центр</dd>
+      <dt>Очередь снимков</dt>
+      <dd>{{ photo_queue_total }} ждут загрузки{% if photo_queue_stuck %} · застряло {{ photo_queue_stuck }}{% endif %}</dd>
+      <dt>Реестр тарирований</dt><dd>{{ tare_registry_size }} ТС</dd>
+      <dt>Версия агента</dt><dd>{{ info.agent_version }}</dd>
+    </dl>
+    <p class="hint">Экран работает и без связи с центром — данные берутся с этого компьютера.</p>
+  </section>
+
+  {% include "fragments/log.html" %}
+</main>
+{% endblock %}
