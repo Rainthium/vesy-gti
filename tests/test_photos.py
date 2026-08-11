@@ -12,8 +12,12 @@
   миниатюра, 404, traversal, запись в audit_log;
 - сторона агента (SQLite): photos_to_upload / mark_photo_uploaded /
   pending_records с фото / photo_meta, охрана переходов uploaded;
+- очередь загрузки с повторами (11.08.2026): пауза после неудачи растёт
+  вдвое до потолка, застрявший снимок уступает голову очереди свежему,
+  но НИКОГДА не выбрасывается; статистика очереди photo_queue_stats;
 - PhotoUploader против HTTP-стаба: 204/404/409, пропавший файл,
-  недоступный сервер.
+  недоступный сервер, учёт попыток, единственное предупреждение о
+  застрявшем снимке и периодическая сводка по очереди.
 
 Инфраструктура БД центра — как в tests/test_center_ws.py (временная БД
 ves_test_photos_<pid> + миграции alembic + TRUNCATE между тестами).
@@ -22,19 +26,21 @@ PhotoUploader тестируется против маленького http.serv
 """
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import os
 import socket
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -45,7 +51,11 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
-from agent.sync.photo_uploader import PhotoUploader
+import agent.sync.photo_uploader as photo_uploader_module
+from agent.sync.photo_uploader import (
+    STUCK_AFTER_ATTEMPTS,
+    PhotoUploader,
+)
 from agent.sync.storage import AgentStorage, StoredPhoto, photo_meta
 from center.db import repo
 from center.db.models import Agent, AuditLog, Scale, ScaleKind, Site, Weighing, WeighingPhoto
@@ -651,6 +661,317 @@ class TestAgentPhotoQueue:
 
 
 # ---------------------------------------------------------------------------
+# Очередь загрузки с повторами: паузы, ротация, «не сдаёмся» (11.08.2026)
+# ---------------------------------------------------------------------------
+
+QUEUE_NOW = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)  # опорный момент тестов очереди
+RETRY_BASE_S = 15.0
+RETRY_MAX_S = 1800.0
+
+
+def _photo_row(
+    storage: AgentStorage, weighing_uuid: UUID, role: CameraRole = CameraRole.FRONT
+) -> sqlite3.Row:
+    """Служебные поля снимка напрямую из БД (attempts, паузы, отметки)."""
+    row: sqlite3.Row | None = storage._conn.execute(
+        "SELECT * FROM weighing_photos_local WHERE weighing_uuid = ? AND role = ?",
+        (str(weighing_uuid), role.value),
+    ).fetchone()
+    assert row is not None, "строка снимка исчезла из журнала"
+    return row
+
+
+def _pause_seconds(storage: AgentStorage, weighing_uuid: UUID, since: datetime) -> float:
+    """Назначенная пауза до следующей попытки, в секундах от ``since``."""
+    next_attempt_at = str(_photo_row(storage, weighing_uuid)["next_attempt_at"])
+    return (datetime.fromisoformat(next_attempt_at) - since).total_seconds()
+
+
+def _queued_photo(storage: AgentStorage, path: str, role: CameraRole = CameraRole.FRONT) -> UUID:
+    """Досланная запись с одним снимком в очереди загрузки."""
+    record = make_record()
+    storage.save_weighing(record, [_photo_for(path, role)])
+    storage.mark_synced([record.uuid])
+    time.sleep(0.002)  # created_at записей должен различаться (порядок очереди)
+    return record.uuid
+
+
+def _fail(storage: AgentStorage, weighing_uuid: UUID, *, now: datetime, times: int = 1) -> int:
+    attempts = 0
+    for _ in range(times):
+        attempts = storage.mark_photo_failed(
+            weighing_uuid,
+            CameraRole.FRONT,
+            base_delay_s=RETRY_BASE_S,
+            max_delay_s=RETRY_MAX_S,
+            now=now,
+        )
+    return attempts
+
+
+class TestPhotoRetryQueue:
+    """mark_photo_failed / photos_to_upload: паузы и порядок выборки."""
+
+    def test_absurd_pause_from_clock_jump_is_retried(self) -> None:
+        """Часы ПК ушли вперёд → пауза оказалась в далёком будущем.
+
+        Часы весовых ПК никто не обслуживает (agent/clock.py), и снимок с
+        такой отметкой не уехал бы никогда. Отметку дальше предельной
+        паузы считаем следом скачка и берём снимок в работу снова
+        (замечание ревью 11.08.2026).
+        """
+        storage = AgentStorage(":memory:")
+        uuid = _queued_photo(storage, "f.jpeg")
+        # неудача при часах, убежавших на десять лет вперёд
+        _fail(storage, uuid, now=QUEUE_NOW + timedelta(days=3650))
+
+        assert storage.photos_to_upload(now=QUEUE_NOW) == [], "без потолка пауза считается честной"
+        assert len(storage.photos_to_upload(now=QUEUE_NOW, max_pause_s=RETRY_MAX_S * 2)) == 1
+        storage.close()
+
+    def test_normal_pause_respected_with_max_pause(self) -> None:
+        """Обычная пауза при заданном потолке по-прежнему соблюдается."""
+        storage = AgentStorage(":memory:")
+        uuid = _queued_photo(storage, "f.jpeg")
+        _fail(storage, uuid, now=QUEUE_NOW)
+
+        assert storage.photos_to_upload(now=QUEUE_NOW, max_pause_s=RETRY_MAX_S * 2) == []
+        assert (
+            len(
+                storage.photos_to_upload(
+                    now=QUEUE_NOW + timedelta(seconds=15), max_pause_s=RETRY_MAX_S * 2
+                )
+            )
+            == 1
+        )
+        storage.close()
+
+    def test_failed_photo_hidden_until_pause_ends(self) -> None:
+        """После неудачи снимок пропадает из порции до конца паузы; момент
+        назначенной попытки включительно — снова в очереди."""
+        storage = AgentStorage(":memory:")
+        uuid = _queued_photo(storage, "f.jpeg")
+        assert _fail(storage, uuid, now=QUEUE_NOW) == 1
+
+        assert storage.photos_to_upload(now=QUEUE_NOW) == []
+        assert storage.photos_to_upload(now=QUEUE_NOW + timedelta(seconds=14)) == []
+        assert len(storage.photos_to_upload(now=QUEUE_NOW + timedelta(seconds=15))) == 1
+        storage.close()
+
+    def test_pause_doubles_up_to_ceiling(self) -> None:
+        """Пауза удваивается с каждой неудачей и упирается в max_delay_s."""
+        storage = AgentStorage(":memory:")
+        uuid = _queued_photo(storage, "f.jpeg")
+        delays = []
+        for expected_attempts in range(1, 10):
+            assert _fail(storage, uuid, now=QUEUE_NOW) == expected_attempts
+            delays.append(_pause_seconds(storage, uuid, QUEUE_NOW))
+        # 15 с, 30 с, 1 мин … 30 мин и дальше ровно потолок
+        assert delays == [15, 30, 60, 120, 240, 480, 960, 1800, 1800]
+        storage.close()
+
+    def test_stuck_photo_yields_head_of_queue_to_fresh_one(self) -> None:
+        """Главное свойство ротации: вечно падающий снимок не держит голову
+        очереди — свежий уезжает первым, даже когда пауза битого истекла."""
+        storage = AgentStorage(":memory:")
+        stuck = _queued_photo(storage, "stuck.jpeg")
+        _fail(storage, stuck, now=QUEUE_NOW, times=3)
+        fresh = _queued_photo(storage, "fresh.jpeg")  # запись СВЕЖЕЕ битой
+
+        later = QUEUE_NOW + timedelta(hours=1)  # пауза битого давно прошла
+        batch = storage.photos_to_upload(now=later)
+        assert [p.path for _, p in batch] == ["fresh.jpeg", "stuck.jpeg"]
+        # порция на одно фото достаётся свежему снимку, а не битому
+        assert [u for u, _ in storage.photos_to_upload(limit=1, now=later)] == [fresh]
+        storage.close()
+
+    def test_photo_is_never_dropped_from_queue(self) -> None:
+        """Сколько бы попыток ни было, снимок остаётся в очереди: это
+        доказательство операции, терять его нельзя."""
+        storage = AgentStorage(":memory:")
+        uuid = _queued_photo(storage, "f.jpeg")
+        assert _fail(storage, uuid, now=QUEUE_NOW, times=50) == 50
+
+        after_pause = QUEUE_NOW + timedelta(seconds=RETRY_MAX_S)
+        assert [u for u, _ in storage.photos_to_upload(now=after_pause)] == [uuid]
+        storage.close()
+
+    def test_parallel_failures_lose_no_attempts(self) -> None:
+        """Попытки считаются под локом: загрузчик работает в отдельном потоке
+        рядом с потоком цикла взвешивания, потерянных обновлений быть не должно."""
+        storage = AgentStorage(":memory:")
+        uuid = _queued_photo(storage, "f.jpeg")
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            try:
+                for _ in range(10):
+                    _fail(storage, uuid, now=QUEUE_NOW)
+            except Exception as exc:  # ошибку потока показываем в отчёте теста
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        assert _photo_row(storage, uuid)["attempts"] == 80
+        storage.close()
+
+    def test_unknown_photo_returns_zero_attempts(self) -> None:
+        """Неудача по исчезнувшей строке не падает и не считается попыткой."""
+        storage = AgentStorage(":memory:")
+        assert (
+            storage.mark_photo_failed(
+                uuid4(), CameraRole.FRONT, base_delay_s=RETRY_BASE_S, max_delay_s=RETRY_MAX_S
+            )
+            == 0
+        )
+        storage.close()
+
+    def test_upload_clears_pause_and_stamps_time(self) -> None:
+        """Успех после неудач: снимок уходит из очереди, пауза снята,
+        проставлено время подтверждения (по нему считает ретеншн)."""
+        storage = AgentStorage(":memory:")
+        uuid = _queued_photo(storage, "f.jpeg")
+        _fail(storage, uuid, now=QUEUE_NOW, times=2)
+        storage.mark_photo_uploaded(uuid, CameraRole.FRONT, now=QUEUE_NOW)
+
+        row = _photo_row(storage, uuid)
+        assert row["uploaded"] == 1
+        assert row["next_attempt_at"] is None
+        assert row["uploaded_at"] == QUEUE_NOW.isoformat()
+        assert storage.photos_to_upload(now=QUEUE_NOW + timedelta(days=1)) == []
+        storage.close()
+
+    def test_repeat_upload_keeps_first_confirmation_time(self) -> None:
+        """Повторная пометка не сдвигает uploaded_at: срок ретеншна считается
+        от первого подтверждения, а не от последнего вызова."""
+        storage = AgentStorage(":memory:")
+        uuid = _queued_photo(storage, "f.jpeg")
+        storage.mark_photo_uploaded(uuid, CameraRole.FRONT, now=QUEUE_NOW)
+        storage.mark_photo_uploaded(uuid, CameraRole.FRONT, now=QUEUE_NOW + timedelta(days=30))
+        assert _photo_row(storage, uuid)["uploaded_at"] == QUEUE_NOW.isoformat()
+        storage.close()
+
+    def test_pause_survives_thousands_of_attempts(self) -> None:
+        """Снимок, падающий месяцами, не роняет учёт попыток.
+
+        При потолке 30 минут 1025 неудач набегают примерно за три недели
+        офлайна или битого файла — на объекте это реально. Показатель
+        двойки ограничен, иначе множитель переставал помещаться во float
+        и mark_photo_failed бросал OverflowError (баг найден qa-tester
+        11.08.2026): пауза не продлевалась, и снимок снова опрашивался
+        каждые 5 секунд.
+        """
+        storage = AgentStorage(":memory:")
+        uuid = _queued_photo(storage, "f.jpeg")
+        with storage._conn:  # быстрая перемотка: 1024 неудачи уже позади
+            storage._conn.execute(
+                "UPDATE weighing_photos_local SET attempts = 1024 WHERE weighing_uuid = ?",
+                (str(uuid),),
+            )
+        try:
+            assert _fail(storage, uuid, now=QUEUE_NOW) == 1025
+            assert _pause_seconds(storage, uuid, QUEUE_NOW) == RETRY_MAX_S
+        finally:
+            storage.close()
+
+    def test_pause_compares_moments_not_strings(self) -> None:
+        """Тот же момент в бишкекском поясе — пауза ещё идёт.
+
+        next_attempt_at сравнивается в SQL как текст, поэтому все служебные
+        времена приводятся к UTC: иначе «12:00+00:00» и равный ему
+        «18:00+06:00» давали бы разный результат и снимок с паузой
+        выдавался бы к загрузке раньше срока (баг найден qa-tester).
+        """
+        storage = AgentStorage(":memory:")
+        uuid = _queued_photo(storage, "f.jpeg")
+        _fail(storage, uuid, now=QUEUE_NOW)
+        try:
+            assert storage.photos_to_upload(now=QUEUE_NOW.astimezone(BISHKEK)) == []
+        finally:
+            storage.close()
+
+    @pytest.mark.parametrize(
+        "moment",
+        [
+            QUEUE_NOW,
+            QUEUE_NOW.astimezone(BISHKEK),  # тот же момент в бишкекском поясе
+            QUEUE_NOW.replace(tzinfo=None),  # наивное время — тоже UTC
+        ],
+        ids=["utc", "bishkek", "naive"],
+    )
+    def test_pause_written_in_utc(self, moment: datetime) -> None:
+        """Пауза всегда пишется в UTC, каким бы поясом ни пришёл момент:
+        строки в БД сравниваются посимвольно, разнобой ломал бы очередь."""
+        storage = AgentStorage(":memory:")
+        uuid = _queued_photo(storage, "f.jpeg")
+        _fail(storage, uuid, now=moment)
+
+        next_attempt_at = str(_photo_row(storage, uuid)["next_attempt_at"])
+        assert next_attempt_at == (QUEUE_NOW + timedelta(seconds=RETRY_BASE_S)).isoformat()
+        assert storage.photos_to_upload(now=QUEUE_NOW + timedelta(seconds=14)) == []
+        assert len(storage.photos_to_upload(now=QUEUE_NOW + timedelta(seconds=15))) == 1
+        storage.close()
+
+
+class TestPhotoQueueStats:
+    """photo_queue_stats: сводка «сколько ждёт и сколько застряло»."""
+
+    def test_counts_pending_and_stuck(self) -> None:
+        """Застрявшим считается снимок с attempts >= порога; остальные —
+        просто в ожидании."""
+        storage = AgentStorage(":memory:")
+        stuck = _queued_photo(storage, "stuck.jpeg")
+        _fail(storage, stuck, now=QUEUE_NOW, times=5)
+        _queued_photo(storage, "fresh.jpeg")
+
+        assert storage.photo_queue_stats(stuck_after=5) == (2, 1)
+        assert storage.photo_queue_stats(stuck_after=6) == (2, 0)
+        storage.close()
+
+    def test_paused_photo_still_counted(self) -> None:
+        """Снимок в паузе не виден очереди, но в сводке остаётся — иначе
+        диспетчер решил бы, что всё уехало."""
+        storage = AgentStorage(":memory:")
+        uuid = _queued_photo(storage, "f.jpeg")
+        _fail(storage, uuid, now=datetime.now(UTC))
+        assert storage.photos_to_upload() == []
+        assert storage.photo_queue_stats() == (1, 0)
+        storage.close()
+
+    def test_uploaded_and_unsynced_are_not_counted(self) -> None:
+        """Сводка про очередь загрузки: принятые центром и ещё не досланные
+        записи в неё не входят."""
+        storage = AgentStorage(":memory:")
+        uploaded = _queued_photo(storage, "done.jpeg")
+        storage.mark_photo_uploaded(uploaded, CameraRole.FRONT, now=QUEUE_NOW)
+        unsynced = make_record()
+        storage.save_weighing(unsynced, [_photo_for("pending.jpeg")])
+
+        assert storage.photo_queue_stats() == (0, 0)
+        storage.close()
+
+    def test_empty_queue_gives_zeros(self) -> None:
+        """Пустая очередь — (0, 0), а не падение на SUM(NULL)."""
+        storage = AgentStorage(":memory:")
+        assert storage.photo_queue_stats() == (0, 0)
+        storage.close()
+
+    def test_default_threshold_matches_uploader_constant(self) -> None:
+        """Порог «застрял» в хранилище и в загрузчике — одно и то же число:
+        снимок, о котором предупредил загрузчик, виден и в сводке."""
+        storage = AgentStorage(":memory:")
+        uuid = _queued_photo(storage, "f.jpeg")
+        _fail(storage, uuid, now=QUEUE_NOW, times=STUCK_AFTER_ATTEMPTS)
+        assert storage.photo_queue_stats() == (1, 1)
+        storage.close()
+
+
+# ---------------------------------------------------------------------------
 # PhotoUploader против HTTP-стаба
 # ---------------------------------------------------------------------------
 
@@ -703,6 +1024,11 @@ def _storage_with_photo(
     return storage, record
 
 
+def _later(seconds: float = 60.0) -> datetime:
+    """Момент после паузы повтора: неудачное фото снова видно очереди."""
+    return datetime.now(UTC) + timedelta(seconds=seconds)
+
+
 def _make_uploader(storage: AgentStorage, base_url: str) -> PhotoUploader:
     return PhotoUploader(storage, base_url=base_url, token=AGENT_TOKEN, timeout_s=3.0)
 
@@ -725,14 +1051,15 @@ class TestPhotoUploader:
         assert sent["body"] == _GRAY_JPEG  # файл байт-в-байт
 
     def test_404_keeps_photo_in_queue(self, tmp_path: Path, stub_server: _StubServer) -> None:
-        """404 (центр ещё не знает запись) → фото остаётся, повтор позже."""
+        """404 (центр ещё не знает запись) → фото остаётся, повтор после паузы."""
         storage, _ = _storage_with_photo(tmp_path)
         stub_server.response_status = 404
         port = stub_server.server_address[1]
         uploader = _make_uploader(storage, f"http://127.0.0.1:{port}")
 
         assert asyncio.run(uploader.upload_once()) == 0
-        assert len(storage.photos_to_upload()) == 1
+        assert storage.photos_to_upload() == [], "неудачное фото не ушло в паузу"
+        assert len(storage.photos_to_upload(now=_later())) == 1
 
     def test_409_keeps_photo_and_logs_error(
         self, tmp_path: Path, stub_server: _StubServer, caplog: pytest.LogCaptureFixture
@@ -749,7 +1076,7 @@ class TestPhotoUploader:
         logging.getLogger("agent.sync.photo_uploader").disabled = False
         with caplog.at_level(logging.ERROR, logger="agent.sync.photo_uploader"):
             assert asyncio.run(uploader.upload_once()) == 0
-        assert len(storage.photos_to_upload()) == 1
+        assert len(storage.photos_to_upload(now=_later())) == 1
         assert any(
             r.levelno == logging.ERROR and "отверг" in r.getMessage() for r in caplog.records
         )
@@ -762,7 +1089,7 @@ class TestPhotoUploader:
 
         assert asyncio.run(uploader.upload_once()) == 0
         assert stub_server.requests == []  # к центру даже не ходили
-        assert len(storage.photos_to_upload()) == 1
+        assert len(storage.photos_to_upload(now=_later())) == 1
 
     def test_unreachable_server_returns_zero(self, tmp_path: Path) -> None:
         """Закрытый порт → upload_once возвращает 0 без исключений."""
@@ -773,4 +1100,218 @@ class TestPhotoUploader:
         uploader = _make_uploader(storage, f"http://127.0.0.1:{port}")
 
         assert asyncio.run(uploader.upload_once()) == 0
-        assert len(storage.photos_to_upload()) == 1
+        assert len(storage.photos_to_upload(now=_later())) == 1
+
+
+# ---------------------------------------------------------------------------
+# PhotoUploader: повторы, ротация очереди и сводки в лог
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def uploader_logger() -> logging.Logger:
+    """Логгер загрузчика с принудительно снятым disabled.
+
+    Обход бага миграций alembic (fileConfig в env.py глушит уже созданные
+    логгеры) — см. TestAlembicLoggingSideEffect.
+    """
+    logger = logging.getLogger("agent.sync.photo_uploader")
+    logger.disabled = False
+    return logger
+
+
+def _instant_uploader(storage: AgentStorage, base_url: str, *, batch: int = 4) -> PhotoUploader:
+    """Загрузчик без пауз между попытками: в тестах важен порядок, не время."""
+    return PhotoUploader(
+        storage,
+        base_url=base_url,
+        token=AGENT_TOKEN,
+        timeout_s=3.0,
+        batch=batch,
+        retry_base_s=0.0,
+        retry_max_s=0.0,
+    )
+
+
+def _dead_port() -> int:
+    """Порт, на котором заведомо никто не слушает (центр недоступен)."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+class TestPhotoUploaderRetries:
+    """Учёт попыток, ротация очереди и предупреждение о застрявшем снимке."""
+
+    def test_failure_counts_attempt(self, tmp_path: Path, stub_server: _StubServer) -> None:
+        """Каждая неудача — попытка в БД (по ней растёт пауза и порядок)."""
+        storage, record = _storage_with_photo(tmp_path)
+        stub_server.response_status = 500
+        uploader = _instant_uploader(storage, f"http://127.0.0.1:{stub_server.server_address[1]}")
+
+        assert asyncio.run(uploader.upload_once()) == 0
+        assert _photo_row(storage, record.uuid)["attempts"] == 1
+        assert asyncio.run(uploader.upload_once()) == 0
+        assert _photo_row(storage, record.uuid)["attempts"] == 2
+
+    def test_stuck_photo_warned_exactly_once(
+        self,
+        tmp_path: Path,
+        stub_server: _StubServer,
+        uploader_logger: logging.Logger,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Про застрявший снимок предупреждаем ровно один раз (на пятой
+        попытке), дальше он молча ждёт длинных пауз."""
+        storage, record = _storage_with_photo(tmp_path)
+        stub_server.response_status = 409  # битый файл: так будет всегда
+        uploader = _instant_uploader(storage, f"http://127.0.0.1:{stub_server.server_address[1]}")
+
+        with caplog.at_level(logging.WARNING, logger="agent.sync.photo_uploader"):
+            for _ in range(8):
+                assert asyncio.run(uploader.upload_once()) == 0
+
+        stuck_warnings = [r for r in caplog.records if "не уходит в центр" in r.getMessage()]
+        assert len(stuck_warnings) == 1, "предупреждение о застрявшем фото дублируется"
+        assert stuck_warnings[0].levelno == logging.WARNING
+        assert f"({STUCK_AFTER_ATTEMPTS} попыток)" in stuck_warnings[0].getMessage()
+        assert str(record.uuid) in stuck_warnings[0].getMessage()
+        # и снимок по-прежнему в очереди: сдаваться нельзя
+        assert _photo_row(storage, record.uuid)["attempts"] == 8
+        assert len(storage.photos_to_upload(now=_later())) == 1
+
+    def test_fresh_photo_overtakes_broken_one(
+        self, tmp_path: Path, stub_server: _StubServer
+    ) -> None:
+        """Битый снимок (файл пропал) не занимает порцию каждые 5 секунд:
+        следующая порция достаётся свежему снимку, и тот уезжает в центр."""
+        storage = AgentStorage(":memory:")
+        broken_path = str(tmp_path / "потерян.jpeg")  # файла на диске нет
+        broken = _queued_photo(storage, broken_path)
+        fresh_file = tmp_path / "fresh.jpeg"
+        fresh_file.write_bytes(_GRAY_JPEG)
+        fresh = _queued_photo(storage, str(fresh_file))
+        uploader = _instant_uploader(
+            storage, f"http://127.0.0.1:{stub_server.server_address[1]}", batch=1
+        )
+
+        assert asyncio.run(uploader.upload_once()) == 0  # порция ушла на битый снимок
+        assert asyncio.run(uploader.upload_once()) == 1  # свежий обогнал битый
+
+        assert [r["path"] for r in stub_server.requests] == [f"/agents/photos/{fresh}/front"]
+        assert [p.path for _, p in storage.photos_to_upload(now=_later())] == [broken_path]
+        assert _photo_row(storage, broken)["uploaded"] == 0
+        storage.close()
+
+    def test_never_gives_up_and_uploads_after_recovery(
+        self, tmp_path: Path, stub_server: _StubServer
+    ) -> None:
+        """Двадцать неудач подряд не выбрасывают снимок: как только центр
+        ожил, доказательство операции уезжает."""
+        storage, record = _storage_with_photo(tmp_path)
+        stub_server.response_status = 500
+        uploader = _instant_uploader(storage, f"http://127.0.0.1:{stub_server.server_address[1]}")
+
+        for _ in range(20):
+            assert asyncio.run(uploader.upload_once()) == 0
+        assert _photo_row(storage, record.uuid)["attempts"] == 20
+
+        stub_server.response_status = 204
+        assert asyncio.run(uploader.upload_once()) == 1
+        assert storage.photos_to_upload(now=_later()) == []
+        assert _photo_row(storage, record.uuid)["uploaded_at"] is not None
+
+    def test_failure_does_not_abort_rest_of_batch(
+        self, tmp_path: Path, stub_server: _StubServer
+    ) -> None:
+        """Битый снимок в голове порции не отменяет загрузку остальных:
+        неудача одного файла не задерживает уже готовые."""
+        storage = AgentStorage(":memory:")
+        broken_path = str(tmp_path / "потерян.jpeg")  # файла на диске нет
+        _queued_photo(storage, broken_path)
+        for name in ("a.jpeg", "b.jpeg"):
+            good = tmp_path / name
+            good.write_bytes(_GRAY_JPEG)
+            _queued_photo(storage, str(good))
+        uploader = _instant_uploader(
+            storage, f"http://127.0.0.1:{stub_server.server_address[1]}", batch=3
+        )
+
+        assert asyncio.run(uploader.upload_once()) == 2
+        assert [p.path for _, p in storage.photos_to_upload(now=_later())] == [broken_path]
+        storage.close()
+
+
+class TestPhotoUploaderQueueStats:
+    """Периодическая сводка по очереди (STATS_EVERY_CYCLES)."""
+
+    def test_stats_warn_about_stuck_photos_in_loop(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        uploader_logger: logging.Logger,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Цикл run() периодически напоминает о застрявших снимках."""
+        storage, record = _storage_with_photo(tmp_path)
+        with storage._conn:  # снимок уже застрял к моменту запуска
+            storage._conn.execute(
+                "UPDATE weighing_photos_local SET attempts = ? WHERE weighing_uuid = ?",
+                (STUCK_AFTER_ATTEMPTS, str(record.uuid)),
+            )
+        monkeypatch.setattr(photo_uploader_module, "STATS_EVERY_CYCLES", 1)
+        uploader = PhotoUploader(
+            storage,
+            base_url=f"http://127.0.0.1:{_dead_port()}",
+            token=AGENT_TOKEN,
+            timeout_s=1.0,
+            interval_s=0.01,
+            retry_base_s=0.0,
+            retry_max_s=0.0,
+        )
+
+        async def scenario() -> None:
+            task = asyncio.create_task(uploader.run())
+            deadline = time.monotonic() + 5
+            while not any("застряло" in r.getMessage() for r in caplog.records):
+                assert time.monotonic() < deadline, "сводка по очереди не появилась"
+                await asyncio.sleep(0.01)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        with caplog.at_level(logging.INFO, logger="agent.sync.photo_uploader"):
+            asyncio.run(asyncio.wait_for(scenario(), timeout=10))
+
+        summary = next(r for r in caplog.records if "застряло" in r.getMessage())
+        assert summary.levelno == logging.WARNING
+        assert "1 в ожидании, из них застряло 1" in summary.getMessage()
+
+    def test_stats_info_when_nothing_stuck(
+        self,
+        tmp_path: Path,
+        uploader_logger: logging.Logger,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Пока попыток мало — спокойное INFO без слова «застряло»."""
+        storage, _ = _storage_with_photo(tmp_path)
+        uploader = _instant_uploader(storage, f"http://127.0.0.1:{_dead_port()}")
+
+        with caplog.at_level(logging.INFO, logger="agent.sync.photo_uploader"):
+            asyncio.run(uploader._log_queue_stats())
+
+        messages = [r.getMessage() for r in caplog.records if "очередь фото" in r.getMessage()]
+        assert messages == ["очередь фото: 1 в ожидании"]
+
+    def test_no_stats_for_empty_queue(
+        self, uploader_logger: logging.Logger, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Пустая очередь — тишина в логе (не засоряем журнал службы)."""
+        storage = AgentStorage(":memory:")
+        uploader = _instant_uploader(storage, f"http://127.0.0.1:{_dead_port()}")
+
+        with caplog.at_level(logging.INFO, logger="agent.sync.photo_uploader"):
+            asyncio.run(uploader._log_queue_stats())
+
+        assert not [r for r in caplog.records if "очередь фото" in r.getMessage()]
+        storage.close()

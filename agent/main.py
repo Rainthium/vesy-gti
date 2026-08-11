@@ -37,6 +37,7 @@ from agent.drivers.base import ScaleState
 from agent.drivers.cas22 import Cas22Driver
 from agent.settings import SettingsManager, merge_center_settings
 from agent.sync.photo_uploader import PhotoUploader
+from agent.sync.retention import PhotoRetention
 from agent.sync.storage import AgentStorage
 from agent.sync.ws_client import CenterClient, ClientConfig, run_forever
 from agent.updater import AgentUpdater
@@ -400,6 +401,7 @@ async def run_agent(config: AgentConfig) -> None:
         config.web.host,
         config.web.port,
     )
+    retention = PhotoRetention(storage, retention_days=config.storage.photo_retention_days)
     tasks = [
         asyncio.create_task(run_forever(client), name="center-client"),
         asyncio.create_task(uploader.run(), name="photo-uploader"),
@@ -409,6 +411,12 @@ async def run_agent(config: AgentConfig) -> None:
         ),
         asyncio.create_task(server.serve(), name="operator-web"),
     ]
+    # выключенный ретеншн задачи не получает: она завершилась бы сразу, а
+    # выход ЛЮБОЙ задачи останавливает агента (находка qa-tester 11.08.2026)
+    if retention.enabled:
+        tasks.append(asyncio.create_task(retention.run(), name="photo-retention"))
+    else:
+        logger.info("ретеншн локальных фото выключен (photo_retention_days = 0)")
     try:
         # веб-сервер завершается только по сигналу — ждём любую из задач
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

@@ -90,6 +90,9 @@ class StorageSection(_Section):
 
     db_path: Path
     photos_dir: Path
+    # через сколько дней после подтверждённой загрузки в центр убирать
+    # локальный файл снимка; 0 — не убирать никогда (см. agent/sync/retention.py)
+    photo_retention_days: int = Field(default=30, ge=0)
 
 
 class WebSection(_Section):

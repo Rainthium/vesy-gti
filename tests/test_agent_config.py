@@ -116,6 +116,39 @@ class TestConfigModel:
         assert cycle.vehicle_timeout_s == 90.0
 
 
+class TestPhotoRetentionOption:
+    """storage.photo_retention_days: срок жизни локальных копий снимков."""
+
+    def _storage(self, **extra: object) -> dict[str, object]:
+        return {"db_path": "agent.sqlite3", "photos_dir": "photos", **extra}
+
+    def test_default_is_thirty_days(self) -> None:
+        """Конфиг объекта, поставленного раньше, ключа не знает — берётся 30."""
+        config = AgentConfig.model_validate(config_data())
+        assert config.storage.photo_retention_days == 30
+
+    def test_example_config_keeps_thirty(self) -> None:
+        """Образец Кызыл-Кыи не расходится с моделью."""
+        assert load_config(EXAMPLE).storage.photo_retention_days == 30
+
+    def test_zero_allowed_as_switch_off(self) -> None:
+        """0 — уборка выключена совсем (снимки лежат на ПК бессрочно)."""
+        config = AgentConfig.model_validate(
+            config_data(storage=self._storage(photo_retention_days=0))
+        )
+        assert config.storage.photo_retention_days == 0
+
+    def test_negative_rejected(self) -> None:
+        """Отрицательный срок — опечатка, видна при старте службы."""
+        with pytest.raises(ValidationError):
+            AgentConfig.model_validate(config_data(storage=self._storage(photo_retention_days=-1)))
+
+    def test_unknown_storage_key_rejected(self) -> None:
+        """Опечатка в имени ключа не проходит молча (уборка не «выключится»)."""
+        with pytest.raises(ValidationError, match="photo_retention_day"):
+            AgentConfig.model_validate(config_data(storage=self._storage(photo_retention_day=30)))
+
+
 class TestHttpBaseUrl:
     def test_ws_to_http(self) -> None:
         assert http_base_url("ws://127.0.0.1:8080/agents/ws") == "http://127.0.0.1:8080"
@@ -252,6 +285,39 @@ class TestBuildRuntime:
                 task.cancel()
                 with contextlib.suppress(BaseException):
                     await task
+
+        asyncio.run(asyncio.wait_for(scenario(), timeout=30))
+
+    def test_disabled_retention_does_not_stop_agent(self, tmp_path: Path) -> None:
+        """photo_retention_days = 0 не должен останавливать службу.
+
+        run_agent ждёт задачи через FIRST_COMPLETED, а выключенный ретеншн
+        завершает run() сразу — агент снимает все остальные задачи и
+        выходит через доли секунды после старта (на Windows служба уходит
+        в цикл перезапусков).
+        """
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            web_port = int(sock.getsockname()[1])
+        config = AgentConfig.model_validate(
+            config_data(
+                storage={
+                    "db_path": str(tmp_path / "agent.sqlite3"),
+                    "photos_dir": str(tmp_path / "photos"),
+                    "photo_retention_days": 0,  # уборка выключена на объекте
+                },
+                web={"port": web_port, "session_secret": "s" * 32},
+            )
+        )
+
+        async def scenario() -> None:
+            task = asyncio.create_task(run_agent(config))
+            await asyncio.sleep(1.0)
+            alive = not task.done()
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+            assert alive, "агент остановился сам: выключенный ретеншн снял остальные задачи"
 
         asyncio.run(asyncio.wait_for(scenario(), timeout=30))
 

@@ -11,6 +11,12 @@
 - реплика операторов центра (operators_registry): миграция схемы local_users,
   полный снимок replace_center_operators, сохранение локальных учёток,
   блокировка is_active=0, CLI upsert_operator поверх реплики;
+- служебные поля снимков (attempts/next_attempt_at/uploaded_at/file_removed):
+  триггер пропускает их изменение, но по-прежнему держит доказательные поля,
+  а метки uploaded и file_removed не откатываются;
+- миграция БД агента, поставленного до 11.08.2026 (боевой Кызыл-Кыя):
+  таблица фото без новых колонок и со СТАРЫМ триггером дополняется, очередь
+  с повторами и ретеншн работают, доказательства не теряются;
 - снимок настроек центра (scale_config): save/load_center_settings —
   нет снимка → None, перезапись последним, персистентность файла БД;
 - смещение часов до центра (save/load_clock_offset_s): round-trip,
@@ -362,6 +368,108 @@ class TestImmutability:
         assert len(storage.photos_for(saved.uuid)) == 1
 
 
+class TestPhotoServiceFields:
+    """Служебные поля очереди и ретеншна (11.08.2026): двигаться можно, но
+    только «вперёд», а доказательные поля остаются неприкосновенными."""
+
+    @pytest.fixture
+    def photo_key(self, storage: AgentStorage) -> tuple[str, str]:
+        record = make_record()
+        storage.save_weighing(
+            record,
+            photos=[
+                StoredPhoto(
+                    role=CameraRole.FRONT, path="photos/f.jpg", sha256="0" * 64, size_bytes=10
+                )
+            ],
+        )
+        storage.mark_synced([record.uuid])
+        return str(record.uuid), CameraRole.FRONT.value
+
+    def test_queue_fields_are_updatable(
+        self, storage: AgentStorage, photo_key: tuple[str, str]
+    ) -> None:
+        # На этом держится очередь с повторами: attempts и пауза меняются
+        with storage._conn:
+            storage._conn.execute(
+                "UPDATE weighing_photos_local SET attempts = 3, next_attempt_at = ?"
+                " WHERE weighing_uuid = ? AND role = ?",
+                ("2026-08-11T12:00:00+00:00", *photo_key),
+            )
+        row = storage._conn.execute(
+            "SELECT attempts, next_attempt_at FROM weighing_photos_local"
+            " WHERE weighing_uuid = ? AND role = ?",
+            photo_key,
+        ).fetchone()
+        assert (row["attempts"], row["next_attempt_at"]) == (3, "2026-08-11T12:00:00+00:00")
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "UPDATE weighing_photos_local SET path = 'other.jpg'"
+            " WHERE weighing_uuid = ? AND role = ?",
+            "UPDATE weighing_photos_local SET sha256 = 'x' WHERE weighing_uuid = ? AND role = ?",
+            "UPDATE weighing_photos_local SET size_bytes = 1 WHERE weighing_uuid = ? AND role = ?",
+        ],
+        ids=["path", "sha256", "size_bytes"],
+    )
+    def test_evidence_fields_still_locked(
+        self, storage: AgentStorage, photo_key: tuple[str, str], statement: str
+    ) -> None:
+        # Правило №2: путь, хеш и размер снимка неизменны и после 11.08.2026
+        with pytest.raises(sqlite3.IntegrityError), storage._conn:
+            storage._conn.execute(statement, photo_key)
+
+    def test_file_removed_requires_uploaded(
+        self, storage: AgentStorage, photo_key: tuple[str, str]
+    ) -> None:
+        # Незагруженный снимок нельзя объявить убранным: он единственный
+        with pytest.raises(sqlite3.IntegrityError), storage._conn:
+            storage._conn.execute(
+                "UPDATE weighing_photos_local SET file_removed = 1"
+                " WHERE weighing_uuid = ? AND role = ?",
+                photo_key,
+            )
+
+    def test_file_removed_forward_only(
+        self, storage: AgentStorage, photo_key: tuple[str, str]
+    ) -> None:
+        uuid, role = photo_key
+        storage.mark_photo_uploaded(UUID(uuid), CameraRole(role))
+        storage.mark_photo_file_removed(UUID(uuid), CameraRole(role))
+        # откат 1 → 0 запрещён: удалённый файл не воскресает
+        with pytest.raises(sqlite3.IntegrityError), storage._conn:
+            storage._conn.execute(
+                "UPDATE weighing_photos_local SET file_removed = 0"
+                " WHERE weighing_uuid = ? AND role = ?",
+                photo_key,
+            )
+        # и значение вне {0, 1} отбивает CHECK
+        with pytest.raises(sqlite3.IntegrityError), storage._conn:
+            storage._conn.execute(
+                "UPDATE weighing_photos_local SET file_removed = 2"
+                " WHERE weighing_uuid = ? AND role = ?",
+                photo_key,
+            )
+
+    def test_row_survives_file_removal(
+        self, storage: AgentStorage, photo_key: tuple[str, str]
+    ) -> None:
+        """Ретеншн убирает файл, но не строку: метаданные — часть записи."""
+        uuid, role = photo_key
+        storage.mark_photo_uploaded(UUID(uuid), CameraRole(role))
+        storage.mark_photo_file_removed(UUID(uuid), CameraRole(role))
+        with pytest.raises(sqlite3.IntegrityError), storage._conn:
+            storage._conn.execute(
+                "DELETE FROM weighing_photos_local WHERE weighing_uuid = ? AND role = ?",
+                photo_key,
+            )
+        photos = storage.photos_for(UUID(uuid))
+        assert [(p.path, p.sha256, p.size_bytes) for p in photos] == [
+            ("photos/f.jpg", "0" * 64, 10)
+        ]
+
+
 class TestTareRegistry:
     """Реплика реестра тарирований и правило «не старше 3 месяцев» (№4)."""
 
@@ -569,6 +677,230 @@ def test_old_replica_schema_recreated_with_trailer_column(tmp_path: Path) -> Non
         assert found == tare
     finally:
         storage.close()
+
+
+# Схема фото ДО 11.08.2026 — дословно из git show HEAD:agent/sync/storage.py.
+# Именно такая база стоит на боевом весовом ПК Кызыл-Кыи: колонок очереди
+# и ретеншна нет, а триггер запрещает ЛЮБОЕ изменение строки снимка, кроме
+# uploaded 0 → 1. Если миграция не обновит и колонки, и текст триггера,
+# mark_photo_failed/mark_photo_uploaded упрутся в «фото не редактируются».
+_OLD_PHOTO_SCHEMA = """
+CREATE TABLE weighings_local (
+    uuid TEXT PRIMARY KEY,
+    operation TEXT NOT NULL,
+    code TEXT NOT NULL,
+    massa REAL,
+    unit TEXT NOT NULL,
+    stable INTEGER NOT NULL,
+    weighed_at TEXT,
+    vehicle_number TEXT,
+    trailer_number TEXT,
+    tare_value REAL,
+    tare_weighing_uuid TEXT,
+    netto REAL,
+    source TEXT NOT NULL,
+    operator TEXT,
+    message TEXT,
+    synced INTEGER NOT NULL DEFAULT 0 CHECK (synced IN (0, 1)),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE weighing_photos_local (
+    weighing_uuid TEXT NOT NULL REFERENCES weighings_local (uuid),
+    role TEXT NOT NULL,
+    path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    uploaded INTEGER NOT NULL DEFAULT 0 CHECK (uploaded IN (0, 1)),
+    PRIMARY KEY (weighing_uuid, role)
+);
+
+CREATE INDEX idx_photos_local_upload ON weighing_photos_local (uploaded);
+
+CREATE TRIGGER weighing_photos_local_no_delete
+    BEFORE DELETE ON weighing_photos_local
+BEGIN
+    SELECT RAISE(ABORT, 'фото не удаляются (правило неизменяемости)');
+END;
+
+CREATE TRIGGER weighing_photos_local_no_update
+    BEFORE UPDATE ON weighing_photos_local
+    WHEN NOT (
+        NEW.weighing_uuid = OLD.weighing_uuid AND NEW.role = OLD.role
+        AND NEW.path = OLD.path AND NEW.sha256 = OLD.sha256
+        AND NEW.size_bytes = OLD.size_bytes
+        AND (NEW.uploaded = OLD.uploaded OR (OLD.uploaded = 0 AND NEW.uploaded = 1))
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'фото не редактируются (правило неизменяемости)');
+END;
+"""
+
+
+class TestPhotoSchemaMigration:
+    """БД агента, поставленного до 11.08.2026: очередь с повторами и ретеншн
+    должны заработать после первого же запуска новой версии."""
+
+    OLD_CREATED_AT = datetime(2026, 6, 1, 10, 0, tzinfo=UTC)  # запись 60+ дней назад
+    PENDING_PATH = "C:/vesy-agent/photos/2026/06/01/pending_photo1.jpeg"
+    UPLOADED_PATH = "C:/vesy-agent/photos/2026/06/01/uploaded_photo2.jpeg"
+
+    def _create_old_db(self, db_path: Path) -> UUID:
+        """Файл БД старой схемы: досланная запись, снимок в очереди (front)
+        и снимок, уже принятый центром (rear, без времени подтверждения)."""
+        record_uuid = uuid4()
+        conn = sqlite3.connect(db_path)
+        with conn:
+            conn.executescript(_OLD_PHOTO_SCHEMA)
+            conn.execute(
+                "INSERT INTO weighings_local (uuid, operation, code, massa, unit, stable,"
+                " weighed_at, source, synced, created_at)"
+                " VALUES (?, 'weighing', 'OK', 15000.0, 'kg', 1, ?, 'ais', 1, ?)",
+                (
+                    str(record_uuid),
+                    self.OLD_CREATED_AT.isoformat(),
+                    self.OLD_CREATED_AT.isoformat(),
+                ),
+            )
+            conn.executemany(
+                "INSERT INTO weighing_photos_local"
+                " (weighing_uuid, role, path, sha256, size_bytes, uploaded)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (str(record_uuid), "front", self.PENDING_PATH, "a" * 64, 111, 0),
+                    (str(record_uuid), "rear", self.UPLOADED_PATH, "b" * 64, 222, 1),
+                ],
+            )
+        conn.close()
+        return record_uuid
+
+    def test_columns_added_without_touching_evidence(self, tmp_path: Path) -> None:
+        """Колонки очереди/ретеншна появляются с безопасными значениями,
+        а пути, хеши и размеры снимков остаются как были."""
+        db_path = tmp_path / "agent.sqlite3"
+        record_uuid = self._create_old_db(db_path)
+        storage = AgentStorage(db_path)
+        try:
+            columns = {
+                row["name"]
+                for row in storage._conn.execute("PRAGMA table_info(weighing_photos_local)")
+            }
+            assert {"attempts", "next_attempt_at", "uploaded_at", "file_removed"} <= columns
+            rows = storage._conn.execute(
+                "SELECT * FROM weighing_photos_local ORDER BY role"
+            ).fetchall()
+            assert [(r["attempts"], r["next_attempt_at"], r["file_removed"]) for r in rows] == [
+                (0, None, 0),
+                (0, None, 0),
+            ]
+            assert all(r["uploaded_at"] is None for r in rows)
+            assert [(r["path"], r["sha256"], r["size_bytes"]) for r in rows] == [
+                (self.PENDING_PATH, "a" * 64, 111),
+                (self.UPLOADED_PATH, "b" * 64, 222),
+            ]
+            assert len(storage.photos_for(record_uuid)) == 2
+        finally:
+            storage.close()
+
+    def test_retry_queue_works_on_migrated_db(self, tmp_path: Path) -> None:
+        """Главное: mark_photo_failed/mark_photo_uploaded не упираются в
+        старый триггер «фото не редактируются» — иначе на боевом объекте
+        загрузка фото легла бы с ошибкой при первой же неудаче."""
+        db_path = tmp_path / "agent.sqlite3"
+        record_uuid = self._create_old_db(db_path)
+        storage = AgentStorage(db_path)
+        try:
+            queued = storage.photos_to_upload()
+            assert [(u, p.path) for u, p in queued] == [(record_uuid, self.PENDING_PATH)]
+
+            now = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
+            attempts = storage.mark_photo_failed(
+                record_uuid, CameraRole.FRONT, base_delay_s=15.0, max_delay_s=1800.0, now=now
+            )
+            assert attempts == 1
+            assert storage.photos_to_upload(now=now) == []
+            assert len(storage.photos_to_upload(now=now + timedelta(seconds=15))) == 1
+            assert storage.photo_queue_stats() == (1, 0)
+
+            storage.mark_photo_uploaded(record_uuid, CameraRole.FRONT, now=now)
+            row = storage._conn.execute(
+                "SELECT * FROM weighing_photos_local WHERE role = 'front'"
+            ).fetchone()
+            assert (row["uploaded"], row["uploaded_at"], row["next_attempt_at"]) == (
+                1,
+                now.isoformat(),
+                None,
+            )
+        finally:
+            storage.close()
+
+    def test_migrated_trigger_still_guards_evidence(self, tmp_path: Path) -> None:
+        """Триггер пересоздан, но правило №2 в силе: доказательные поля
+        неизменны, строка не удаляется, uploaded не откатывается."""
+        db_path = tmp_path / "agent.sqlite3"
+        self._create_old_db(db_path)
+        storage = AgentStorage(db_path)
+        try:
+            for statement in (
+                "UPDATE weighing_photos_local SET sha256 = 'x' WHERE role = 'front'",
+                "UPDATE weighing_photos_local SET path = 'D:/evil.jpeg' WHERE role = 'front'",
+                "UPDATE weighing_photos_local SET size_bytes = 0 WHERE role = 'front'",
+                "UPDATE weighing_photos_local SET uploaded = 0 WHERE role = 'rear'",
+                "UPDATE weighing_photos_local SET file_removed = 1 WHERE role = 'front'",
+                "DELETE FROM weighing_photos_local WHERE role = 'front'",
+            ):
+                with pytest.raises(sqlite3.IntegrityError), storage._conn:
+                    storage._conn.execute(statement)
+        finally:
+            storage.close()
+
+    def test_retention_uses_record_date_for_old_uploads(self, tmp_path: Path) -> None:
+        """У снимка, принятого центром до появления uploaded_at, срок
+        ретеншна считается от даты записи: старые файлы всё-таки убираются,
+        а неотправленный снимок не трогается никогда."""
+        db_path = tmp_path / "agent.sqlite3"
+        record_uuid = self._create_old_db(db_path)
+        storage = AgentStorage(db_path)
+        try:
+            threshold = self.OLD_CREATED_AT + timedelta(days=30)
+            assert storage.photos_to_purge(threshold) == [
+                (record_uuid, CameraRole.REAR, self.UPLOADED_PATH)
+            ]
+            # запись ещё не «состарилась» — уборки нет
+            assert storage.photos_to_purge(self.OLD_CREATED_AT - timedelta(days=1)) == []
+
+            storage.mark_photo_file_removed(record_uuid, CameraRole.REAR)
+            assert storage.photos_to_purge(threshold) == []
+            # строка со всеми доказательствами на месте
+            assert len(storage.photos_for(record_uuid)) == 2
+        finally:
+            storage.close()
+
+    def test_reopen_after_migration_is_noop(self, tmp_path: Path) -> None:
+        """Повторный старт службы не ломает мигрированную БД (нет duplicate
+        column) и не теряет накопленные попытки."""
+        db_path = tmp_path / "agent.sqlite3"
+        record_uuid = self._create_old_db(db_path)
+        first = AgentStorage(db_path)
+        first.mark_photo_failed(
+            record_uuid, CameraRole.FRONT, base_delay_s=15.0, max_delay_s=1800.0
+        )
+        first.close()
+
+        second = AgentStorage(db_path)
+        try:
+            row = second._conn.execute(
+                "SELECT attempts FROM weighing_photos_local WHERE role = 'front'"
+            ).fetchone()
+            assert row["attempts"] == 1
+            assert (
+                second.mark_photo_failed(
+                    record_uuid, CameraRole.FRONT, base_delay_s=15.0, max_delay_s=1800.0
+                )
+                == 2
+            )
+        finally:
+            second.close()
 
 
 class TestThreadSafety:
