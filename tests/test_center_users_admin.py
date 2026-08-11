@@ -174,6 +174,74 @@ class TestUsersList:
         assert rows["without.site"] is None
 
 
+class TestUsersListFilters:
+    """Фильтры списка учёток (запрос Игоря 11.08.2026)."""
+
+    def _seed(self, session: Session) -> Site:
+        site = _add_site(session)
+        _add_user(session, "igor", role=UserRole.ADMIN, full_name="Игорь Петрухин")
+        _add_user(
+            session,
+            "kyzylweight",
+            role=UserRole.OPERATOR,
+            site_id=site.id,
+            full_name="Оператор Кызыл-Кия",
+        )
+        _add_user(session, "d.ivanov", full_name="Иванов Д.", is_active=False)
+        return site
+
+    def _logins(self, rows: list[tuple[User, Site | None]]) -> list[str]:
+        return [user.login for user, _ in rows]
+
+    def test_search_matches_login_and_name_case_insensitive(self, db_session: Session) -> None:
+        """Подстрока без учёта регистра ищет и в логине, и в ФИО."""
+        self._seed(db_session)
+        assert self._logins(users_admin.users_list(db_session, search="KYZYL")) == ["kyzylweight"]
+        assert self._logins(users_admin.users_list(db_session, search="петрухин")) == ["igor"]
+        assert self._logins(users_admin.users_list(db_session, search="  weight ")) == [
+            "kyzylweight"
+        ]
+
+    def test_filter_by_role(self, db_session: Session) -> None:
+        self._seed(db_session)
+        assert self._logins(users_admin.users_list(db_session, role=UserRole.OPERATOR)) == [
+            "kyzylweight"
+        ]
+
+    def test_filter_by_site_and_without_site(self, db_session: Session) -> None:
+        """Конкретный объект и «без привязки» (все объекты) — разные фильтры."""
+        site = self._seed(db_session)
+        assert self._logins(users_admin.users_list(db_session, site_id=site.id)) == ["kyzylweight"]
+        assert self._logins(users_admin.users_list(db_session, without_site=True)) == [
+            "igor",
+            "d.ivanov",
+        ]
+
+    def test_filter_by_status(self, db_session: Session) -> None:
+        self._seed(db_session)
+        assert self._logins(users_admin.users_list(db_session, active=False)) == ["d.ivanov"]
+        assert "d.ivanov" not in self._logins(users_admin.users_list(db_session, active=True))
+
+    def test_search_escapes_like_wildcards(self, db_session: Session) -> None:
+        """'_' и '%' ищутся литерально: '_' — допустимый символ логина,
+        а '%' не должен возвращать всех."""
+        self._seed(db_session)
+        _add_user(db_session, "d_underscore", full_name="Подчёркнутый")
+        assert self._logins(users_admin.users_list(db_session, search="d_und")) == ["d_underscore"]
+        # 'd_' литерально не совпадает с 'd.' в d.ivanov
+        assert "d.ivanov" not in self._logins(users_admin.users_list(db_session, search="d_"))
+        assert users_admin.users_list(db_session, search="%") == []
+
+    def test_filters_combine(self, db_session: Session) -> None:
+        """Фильтры складываются: активный оператор объекта + поиск."""
+        site = self._seed(db_session)
+        rows = users_admin.users_list(
+            db_session, search="кызыл", role=UserRole.OPERATOR, site_id=site.id, active=True
+        )
+        assert self._logins(rows) == ["kyzylweight"]
+        assert users_admin.users_list(db_session, search="кызыл", role=UserRole.ADMIN) == []
+
+
 # ---------------------------------------------------------------------------
 # create_user
 # ---------------------------------------------------------------------------

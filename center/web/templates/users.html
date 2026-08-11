@@ -35,6 +35,29 @@
     <div class="card-hint">Пароль — не короче {{ min_password }} символов; логин (латиница, цифры, . _ -) после создания не меняется. Пользователи не удаляются — только отключаются. Учётки с ролью «оператор» реплицируются на весовые ПК выбранного объекта («— все —» = всех объектов): создание, блокировка и смена пароля доходят до агентов сразу, офлайн-вход работает по реплике.</div>
   </section>
 
+  <form method="get" action="/panel/users" class="filters users-filters">
+    <input name="search" placeholder="Логин или ФИО" value="{{ filters.search }}">
+    <select name="role">
+      <option value="">Любая роль</option>
+      {% for r in roles %}
+      <option value="{{ r.value }}" {{ 'selected' if filters.role == r.value else '' }}>{{ role_names.get(r.value, r.value) }}</option>
+      {% endfor %}
+    </select>
+    <select name="site">
+      <option value="">Любой объект</option>
+      <option value="none" {{ 'selected' if filters.site == 'none' else '' }}>— все — (без привязки)</option>
+      {% for site in sites %}
+      <option value="{{ site.id }}" {{ 'selected' if filters.site == site.id|string else '' }}>{{ site.name }}</option>
+      {% endfor %}
+    </select>
+    <select name="status">
+      <option value="">Любой статус</option>
+      <option value="active" {{ 'selected' if filters.status == 'active' else '' }}>активен</option>
+      <option value="disabled" {{ 'selected' if filters.status == 'disabled' else '' }}>отключён</option>
+    </select>
+    <button type="submit" class="btn-primary">Показать</button>
+  </form>
+
   <section class="table-card">
     <div class="card-title">Учётки ({{ rows | length }})</div>
     <div class="journal-scroll">

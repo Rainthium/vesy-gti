@@ -685,13 +685,36 @@ def create_panel_router(
         raw = raw.strip()
         if not raw:
             return None, True
-        if not raw.isdigit():
+        # isascii: юникодные «цифры» (³, ٢) проходят isdigit, но роняют int
+        if not (raw.isascii() and raw.isdigit()):
             return None, False
         return int(raw), True
 
     @router.get("/users", response_class=HTMLResponse)
-    async def users_page(request: Request, user: PanelUser, admin: PanelAdmin) -> HTMLResponse:
-        rows = await asyncio.to_thread(_db, users_admin.users_list)
+    async def users_page(
+        request: Request,
+        user: PanelUser,
+        admin: PanelAdmin,
+        search: str = "",
+        role: str = "",
+        site: str = "",
+        status: str = "",
+    ) -> HTMLResponse:
+        # фильтры списка (запрос Игоря 11.08.2026); кривые значения из URL
+        # молча трактуются как «без фильтра»
+        role_filter = _parse_role(role) if role else None
+        site_filter, site_ok = _parse_site_id(site) if site not in ("", "none") else (None, True)
+        rows = await asyncio.to_thread(
+            _db,
+            lambda s: users_admin.users_list(
+                s,
+                search=search,
+                role=role_filter,
+                site_id=site_filter if site_ok else None,
+                without_site=site == "none",
+                active={"active": True, "disabled": False}.get(status),
+            ),
+        )
         sites = await asyncio.to_thread(_db, lambda s: queries.refs_data(s).sites)
         return render(
             "users.html",
@@ -702,6 +725,7 @@ def create_panel_router(
             sites=sites,
             roles=list(UserRole),
             min_password=users_admin.MIN_PASSWORD_LEN,
+            filters={"search": search, "role": role, "site": site, "status": status},
             note=request.query_params.get("note"),
         )
 

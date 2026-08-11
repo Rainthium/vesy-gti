@@ -28,13 +28,39 @@ MIN_PASSWORD_LEN = 8
 LOGIN_RE = re.compile(r"[a-zA-Z0-9._-]{1,64}")
 
 
-def users_list(session: Session) -> list[tuple[User, Site | None]]:
-    """Все пользователи с их объектами (активные сверху, затем по логину)."""
-    rows = session.execute(
-        select(User, Site)
-        .outerjoin(Site, Site.id == User.site_id)
-        .order_by(User.is_active.desc(), User.login)
-    ).all()
+def users_list(
+    session: Session,
+    *,
+    search: str = "",
+    role: UserRole | None = None,
+    site_id: int | None = None,
+    without_site: bool = False,
+    active: bool | None = None,
+) -> list[tuple[User, Site | None]]:
+    """Пользователи с их объектами (активные сверху, затем по логину).
+
+    Фильтры (запрос Игоря 11.08.2026): подстрока логина/ФИО без учёта
+    регистра, роль, объект (``without_site`` — учётки без привязки,
+    т.е. «все объекты»), статус. None/пусто — фильтр не применяется.
+    """
+    query = select(User, Site).outerjoin(Site, Site.id == User.site_id)
+    if search.strip():
+        # LIKE-знаки экранируются: '_' — допустимый символ логина и должен
+        # искаться литерально, а '%' не должен возвращать всех
+        escaped = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        needle = f"%{escaped}%"
+        query = query.where(
+            User.login.ilike(needle, escape="\\") | User.full_name.ilike(needle, escape="\\")
+        )
+    if role is not None:
+        query = query.where(User.role == role)
+    if without_site:
+        query = query.where(User.site_id.is_(None))
+    elif site_id is not None:
+        query = query.where(User.site_id == site_id)
+    if active is not None:
+        query = query.where(User.is_active == active)
+    rows = session.execute(query.order_by(User.is_active.desc(), User.login)).all()
     return [(user, site) for user, site in rows]
 
 
