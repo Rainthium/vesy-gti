@@ -26,6 +26,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.websockets import WebSocketDisconnect
 
+import agent
 from agent.web.services import AgentServices
 from agent.weighing.manual import ManualFlowError
 from shared.enums import CameraRole, Operation, ScaleStatus
@@ -76,6 +77,10 @@ def create_app(
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.filters["fmt_time"] = _fmt_time
     templates.env.filters["fmt_kg"] = _fmt_kg
+    # версия в адресе статики: без неё браузер оператора продолжал бы
+    # показывать старые стили после обновления агента (так и вышло с
+    # миниатюрами журнала в 0.4.4) — как в панели центра
+    templates.env.globals["static_v"] = agent.__version__
 
     # --- общие помощники ---
 

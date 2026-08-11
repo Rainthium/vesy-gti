@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Весовая система{% endblock %}</title>
   <link rel="icon" type="image/png" href="/static/logo.png">
-  <link rel="stylesheet" href="/static/style.css">
-  <script src="/static/htmx.min.js"></script>
-  <script src="/static/lightbox.js" defer></script>
+  <link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
+  <script src="/static/htmx.min.js?v={{ static_v }}"></script>
+  <script src="/static/lightbox.js?v={{ static_v }}" defer></script>
   {% block head %}{% endblock %}
 </head>
 <body class="{% block body_class %}{% endblock %}">
