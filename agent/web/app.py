@@ -53,13 +53,20 @@ def _fmt_kg(value: float | None) -> str:
     return f"{value:,.0f}".replace(",", "\u202f")
 
 
-def create_app(services: AgentServices, *, session_secret: str) -> FastAPI:
-    """Собрать приложение локального интерфейса поверх слоя сервисов."""
+def create_app(
+    services: AgentServices, *, session_secret: str, cookie_name: str = "ves_session"
+) -> FastAPI:
+    """Собрать приложение локального интерфейса поверх слоя сервисов.
+
+    ``cookie_name`` разный у агентов одного ПК (объект с двумя весами,
+    решение 11.08.2026): cookie привязан к хосту, а не к порту, поэтому с
+    общим именем вход во вторую вкладку выбивал бы оператора из первой.
+    """
     app = FastAPI(title="Весовая система — интерфейс оператора", docs_url=None, redoc_url=None)
     app.add_middleware(
         SessionMiddleware,
         secret_key=session_secret,
-        session_cookie="ves_session",
+        session_cookie=cookie_name,
         same_site="strict",  # доступ только из сети объекта, межсайтовых переходов нет
     )
     # статика локальная (htmx, стили): весовой ПК может быть без интернета

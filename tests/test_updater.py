@@ -115,12 +115,12 @@ def install_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def spawn_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path, Path]]:
+def spawn_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path, Path, str]]:
     """Подменить запуск self-update.bat: Popen не вызывается, вызовы копятся."""
-    calls: list[tuple[Path, Path]] = []
+    calls: list[tuple[Path, Path, str]] = []
 
-    def fake_spawn(bat: Path, base: Path) -> None:
-        calls.append((bat, base))
+    def fake_spawn(bat: Path, base: Path, task: str) -> None:
+        calls.append((bat, base, task))
 
     monkeypatch.setattr(AgentUpdater, "_spawn_updater", staticmethod(fake_spawn))
     # отложенный spawn в тестах доигрывается быстро (см. _handle)
@@ -197,7 +197,7 @@ class TestUpdaterSuccess:
         self,
         install_dir: Path,
         release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
-        spawn_calls: list[tuple[Path, Path]],
+        spawn_calls: list[tuple[Path, Path, str]],
     ) -> None:
         """Скачивание с токеном → проверка → app_new → self-update.bat → запуск.
 
@@ -239,7 +239,7 @@ class TestUpdaterSuccess:
         assert not (install_dir / "update-download.zip").exists()
 
         # запуск скрипта: ровно один вызов с путями bat и базового каталога
-        assert spawn_calls == [(bat, install_dir)]
+        assert spawn_calls == [(bat, install_dir, "ves-agent-update")]
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +252,7 @@ class TestUpdaterVerification:
         self,
         install_dir: Path,
         release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
-        spawn_calls: list[tuple[Path, Path]],
+        spawn_calls: list[tuple[Path, Path, str]],
     ) -> None:
         """Неверный sha256 → отказ, app_new не создана, bat не записан."""
         payload = _make_release_zip()
@@ -272,7 +272,7 @@ class TestUpdaterVerification:
         self,
         install_dir: Path,
         release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
-        spawn_calls: list[tuple[Path, Path]],
+        spawn_calls: list[tuple[Path, Path, str]],
     ) -> None:
         """Неверный size_bytes → отказ без распаковки и без bat."""
         payload = _make_release_zip()
@@ -290,7 +290,7 @@ class TestUpdaterVerification:
         self,
         install_dir: Path,
         release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
-        spawn_calls: list[tuple[Path, Path]],
+        spawn_calls: list[tuple[Path, Path, str]],
     ) -> None:
         """Архив без app/ves-agent.exe → «не релиз агента», отказ."""
         payload = _make_release_zip(with_exe=False)
@@ -308,7 +308,7 @@ class TestUpdaterVerification:
         self,
         install_dir: Path,
         release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
-        spawn_calls: list[tuple[Path, Path]],
+        spawn_calls: list[tuple[Path, Path, str]],
     ) -> None:
         """Член архива с app/../ не должен вырваться из app_new."""
         buffer = io.BytesIO()
@@ -333,7 +333,7 @@ class TestUpdaterDownloadAuth:
         self,
         install_dir: Path,
         release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
-        spawn_calls: list[tuple[Path, Path]],
+        spawn_calls: list[tuple[Path, Path, str]],
     ) -> None:
         """Сервер отвечает 401 (токен не подошёл) → ok=False, ничего не создано."""
         payload = _make_release_zip()
@@ -353,7 +353,7 @@ class TestUpdaterBusy:
         self,
         install_dir: Path,
         release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
-        spawn_calls: list[tuple[Path, Path]],
+        spawn_calls: list[tuple[Path, Path, str]],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """busy=True всё окно ожидания → отказ «заняты», рестарт не запущен.
@@ -397,13 +397,14 @@ class TestSchedulerSpawn:
         """Одноразовая задача: создание с /F (перезапись хвоста прежнего
         обновления), запуск /Run; имя совпадает с удалением в bat."""
         bat = tmp_path / "self-update.bat"
-        create, run = AgentUpdater.scheduler_commands(bat)
+        task = updater_module.task_name(updater_module.DEFAULT_SERVICE_NAME)
+        create, run = AgentUpdater.scheduler_commands(bat, task)
         assert create[0] == "schtasks" and "/Create" in create
         assert "/RU" in create and create[create.index("/RU") + 1] == "SYSTEM"
         assert "/F" in create
         assert str(bat) in create[create.index("/TR") + 1]
-        assert run == ["schtasks", "/Run", "/TN", updater_module.TASK_NAME]
-        assert f"/TN {updater_module.TASK_NAME} /F" in updater_module.UPDATE_BAT
+        assert run == ["schtasks", "/Run", "/TN", task]
+        assert f"/TN {task} /F" in updater_module.update_bat(updater_module.DEFAULT_SERVICE_NAME)
 
     def test_spawn_via_scheduler_success(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -416,7 +417,10 @@ class TestSchedulerSpawn:
             return subprocess.CompletedProcess(command, 0, b"", b"")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        assert AgentUpdater._spawn_via_scheduler(tmp_path / "u.bat", tmp_path) is True
+        assert (
+            AgentUpdater._spawn_via_scheduler(tmp_path / "u.bat", tmp_path, "ves-agent-update")
+            is True
+        )
         assert [c[1] for c in calls] == ["/Create", "/Run"]
 
     def test_spawn_via_scheduler_create_failure(
@@ -430,7 +434,10 @@ class TestSchedulerSpawn:
             return subprocess.CompletedProcess(command, 1, b"", "нет прав".encode())
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        assert AgentUpdater._spawn_via_scheduler(tmp_path / "u.bat", tmp_path) is False
+        assert (
+            AgentUpdater._spawn_via_scheduler(tmp_path / "u.bat", tmp_path, "ves-agent-update")
+            is False
+        )
         assert [c[1] for c in calls] == ["/Create"]
 
     def test_spawn_via_scheduler_missing_schtasks(
@@ -443,4 +450,97 @@ class TestSchedulerSpawn:
             raise FileNotFoundError("schtasks не найден")
 
         monkeypatch.setattr(subprocess, "run", raising_run)
-        assert AgentUpdater._spawn_via_scheduler(tmp_path / "u.bat", tmp_path) is False
+        assert (
+            AgentUpdater._spawn_via_scheduler(tmp_path / "u.bat", tmp_path, "ves-agent-update")
+            is False
+        )
+
+
+# ---------------------------------------------------------------------------
+# Имя службы: на объекте с двумя весами агенты стоят на одном ПК двумя
+# службами (решение 11.08.2026) — обновление каждого должно трогать
+# СВОЮ службу и свою задачу планировщика
+# ---------------------------------------------------------------------------
+
+
+class TestServiceName:
+    def test_missing_file_keeps_historical_name(self, tmp_path: Path) -> None:
+        """Агент установлен до 11.08.2026 (service.txt нет) → ves-agent."""
+        assert updater_module.read_service_name(tmp_path) == "ves-agent"
+
+    def test_name_from_file(self, tmp_path: Path) -> None:
+        """Имя второго экземпляра читается как есть (CRLF от echo не мешает)."""
+        (tmp_path / "service.txt").write_bytes(b"ves-agent-2\r\n")
+        assert updater_module.read_service_name(tmp_path) == "ves-agent-2"
+
+    def test_multiline_file_takes_first_line(self, tmp_path: Path) -> None:
+        """Хвост после имени игнорируется — берётся первая строка."""
+        (tmp_path / "service.txt").write_bytes("ves-agent-2\r\nмусор\r\n".encode())
+        assert updater_module.read_service_name(tmp_path) == "ves-agent-2"
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            b"",
+            b"\r\n",
+            b"ves agent\r\n",  # пробел: в bat распалось бы на аргументы
+            b'ves-agent" & schtasks /Delete /TN x /F\r\n',  # инъекция в команду
+            b"\xff\xfe not-utf8\r\n",
+            "ves-agent-2\r\n".encode("utf-16"),  # «Сохранить как → Юникод»
+            ("a" * 65 + "\r\n").encode(),
+        ],
+    )
+    def test_broken_file_cancels_update(self, tmp_path: Path, content: bytes) -> None:
+        """Файл ЕСТЬ, но испорчен → отказ, а не тихий откат к ves-agent:
+        на ПК с двумя агентами такой откат остановил бы соседа (ревью)."""
+        (tmp_path / "service.txt").write_bytes(content)
+        with pytest.raises(updater_module.UpdateError, match=r"service\.txt"):
+            updater_module.read_service_name(tmp_path)
+
+    def test_broken_file_reported_to_center(
+        self,
+        install_dir: Path,
+        release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
+        spawn_calls: list[tuple[Path, Path, str]],
+    ) -> None:
+        """Отказ виден центру, скачивания и подмены службы не было."""
+        (install_dir / "service.txt").write_bytes(b"ves agent\r\n")
+        payload = _make_release_zip()
+        base_url, requests = release_server(payload)
+        status = _handle(_make_updater(base_url, install_dir), _make_command(payload))
+        assert status.ok is False
+        assert status.error is not None and "service.txt" in status.error
+        assert requests == [], "архив скачивался, хотя имя службы неизвестно"
+        assert not (install_dir / "self-update.bat").exists()
+        assert spawn_calls == []
+
+    def test_update_bat_uses_own_service_and_task(self) -> None:
+        """В bat второго экземпляра нет ни одного упоминания чужой службы."""
+        text = updater_module.update_bat("ves-agent-2")
+        assert "__SERVICE__" not in text and "__TASK__" not in text
+        assert 'nssm.exe" stop ves-agent-2' in text
+        assert 'nssm.exe" start ves-agent-2' in text
+        assert "schtasks /Delete /TN ves-agent-2-update /F" in text
+        # соседняя служба ves-agent не должна фигурировать ни в одной команде
+        # (app\ves-agent.exe — это файл сборки, к службе он не относится)
+        for line in text.splitlines():
+            command = line.strip()
+            assert not command.endswith("stop ves-agent")
+            assert not command.startswith("schtasks /Delete /TN ves-agent-update")
+            assert "stop ves-agent " not in command and "start ves-agent " not in command
+
+    def test_second_agent_updates_own_service(
+        self,
+        install_dir: Path,
+        release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
+        spawn_calls: list[tuple[Path, Path, str]],
+    ) -> None:
+        """Сквозной путь второго агента: bat и задача планировщика — свои."""
+        (install_dir / "service.txt").write_bytes(b"ves-agent-2\r\n")
+        payload = _make_release_zip()
+        base_url, _ = release_server(payload)
+        status = _handle(_make_updater(base_url, install_dir), _make_command(payload))
+        assert status.ok is True
+        text = (install_dir / "self-update.bat").read_bytes().decode("utf-8")
+        assert 'nssm.exe" stop ves-agent-2' in text
+        assert spawn_calls == [(install_dir / "self-update.bat", install_dir, "ves-agent-2-update")]

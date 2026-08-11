@@ -383,7 +383,12 @@ async def run_agent(config: AgentConfig) -> None:
     driver.start()
     cleanup_orphan_photos(storage, config.storage.photos_dir)
 
-    web_app = create_app(runtime, session_secret=config.web.session_secret)
+    web_app = create_app(
+        runtime,
+        session_secret=config.web.session_secret,
+        # порт различает агентов одного ПК: cookie к порту не привязан
+        cookie_name=f"ves_session_{config.web.port}",
+    )
     server = uvicorn.Server(
         uvicorn.Config(web_app, host=config.web.host, port=config.web.port, log_level="info")
     )
