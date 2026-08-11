@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_thumbs.html" import photo_thumbs %}
+{% from "_filters.html" import site_scale, site_scale_cell %}
 {% block title %}Тарирования — Весовая система{% endblock %}
 {% block body %}
 {% set active_tab = 'tares' %}
@@ -10,6 +11,7 @@
     <span class="page-meta">{{ total }} действующих тарирований · реплицируется на агентов</span>
   </div>
   <form method="get" action="/panel/tares" class="filters">
+    {{ site_scale(refs, filters) }}
     <input name="search" placeholder="Поиск по номеру ТС" value="{{ search }}">
     <button type="submit" class="btn-primary">Найти</button>
   </form>
@@ -18,7 +20,7 @@
       <table class="journal">
         <thead><tr>
           <th>Номер ТС</th><th>Прицеп</th><th>Фото</th><th class="num">Тара, kg</th><th>Дата тарирования</th>
-          <th>Объект</th><th>Действует до</th><th>Статус</th>
+          <th>Объект / весы</th><th>Действует до</th><th>Статус</th>
         </tr></thead>
         <tbody>
           {% for tare, weighing, scale, site in rows %}
@@ -28,7 +30,7 @@
             <td class="cell-photos">{{ photo_thumbs(photos.get(weighing.id), '%s · %s' | format(tare.vehicle_number, tare.tared_at | fmt_dt)) }}</td>
             <td class="num cell-gross">{{ tare.tare_value | fmt_kg }}</td>
             <td class="cell-muted">{{ tare.tared_at | fmt_dt }}</td>
-            <td>{{ site.name }}</td>
+            {{ site_scale_cell(site, scale) }}
             <td class="cell-muted">{{ expires(tare.tared_at) | fmt_dt }}</td>
             <td><span class="pill pill-ok"><span class="dot"></span>Действует</span></td>
           </tr>

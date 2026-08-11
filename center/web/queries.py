@@ -179,9 +179,19 @@ def tare_expires_at(tared_at: datetime) -> datetime:
 
 
 def tare_list(
-    session: Session, *, search: str | None = None, limit: int = 100, offset: int = 0
+    session: Session,
+    *,
+    search: str | None = None,
+    site_id: int | None = None,
+    scale_id: int | None = None,
+    limit: int = 100,
+    offset: int = 0,
 ) -> tuple[list[tuple[TareRegistry, Weighing, Scale, Site]], int]:
-    """Реестр активных тар (действующие сверху, просроченные не показываем)."""
+    """Реестр активных тар (действующие сверху, просроченные не показываем).
+
+    ``site_id``/``scale_id`` — фильтры экрана: на объекте бывает несколько
+    весов (решение 11.08.2026), и тарирования разных весов нужно разделять.
+    """
     threshold = three_months_before(datetime.now(UTC))
     query = (
         select(TareRegistry, Weighing, Scale, Site)
@@ -190,6 +200,10 @@ def tare_list(
         .join(Site, Site.id == Scale.site_id)
         .where(TareRegistry.tared_at >= threshold)
     )
+    if site_id is not None:
+        query = query.where(Site.id == site_id)
+    if scale_id is not None:
+        query = query.where(Scale.id == scale_id)
     if search:
         query = query.where(TareRegistry.vehicle_number.like(f"%{search.strip().upper()}%"))
     total = session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
@@ -217,13 +231,46 @@ def photos_for_weighings(session: Session, weighing_ids: list[int]) -> dict[int,
 
 
 @dataclass(frozen=True)
+class FilterOptions:
+    """Данные селекторов «Объект» и «Весы» для списков панели.
+
+    Отдельно от RefsData: спискам не нужны камеры и агенты, а URL камер
+    содержат пароли — в контекст чужих экранов их класть незачем.
+    """
+
+    sites: list[Site]
+    scales: list[tuple[Scale, Site]]
+
+
+def _scales_with_sites(site_id: int | None = None) -> Select[tuple[Scale, Site]]:
+    """Весы с их объектами в предсказуемом порядке (объект, затем весы)."""
+    query = (
+        select(Scale, Site)
+        .join(Site, Site.id == Scale.site_id)
+        .order_by(Site.name, Scale.name, Scale.id)
+    )
+    if site_id is not None:
+        query = query.where(Scale.site_id == site_id)
+    return query
+
+
+def filter_options(session: Session) -> FilterOptions:
+    """Объекты и весы для фильтров журнала и реестра тарирований."""
+    sites = list(session.execute(select(Site).order_by(Site.name)).scalars())
+    scales = [tuple(row) for row in session.execute(_scales_with_sites()).all()]
+    return FilterOptions(sites=sites, scales=scales)
+
+
+@dataclass(frozen=True)
 class RefsData:
     """Справочники: объекты, весы, камеры, агенты."""
 
     sites: list[Site]
     scales: list[tuple[Scale, Site]]
-    cameras: list[tuple[Camera, Scale]]
-    agents: list[tuple[Agent, Scale]]
+    # объект в строках камер и агентов нужен явно: названия весов на разных
+    # объектах совпадают («Весы SCS-80»), без объекта строки неоднозначны
+    cameras: list[tuple[Camera, Scale, Site]]
+    agents: list[tuple[Agent, Scale, Site]]
 
 
 def refs_data(session: Session, site_id: int | None = None) -> RefsData:
@@ -232,14 +279,26 @@ def refs_data(session: Session, site_id: int | None = None) -> RefsData:
     страница нечитаема). Список sites всегда полный: он нужен селекторам.
     """
     sites = list(session.execute(select(Site).order_by(Site.name)).scalars())
-    scales_query = select(Scale, Site).join(Site, Site.id == Scale.site_id).order_by(Site.name)
-    cameras_query = select(Camera, Scale).join(Scale, Scale.id == Camera.scale_id)
-    agents_query = select(Agent, Scale).join(Scale, Scale.id == Agent.scale_id)
+    # порядок строк фиксируем до имени весов: сортировки только по объекту
+    # не хватало — двое весов одного объекта возвращались в произвольном
+    # порядке и прыгали между обновлениями страницы (11.08.2026)
+    scales_query = _scales_with_sites(site_id)
+    cameras_query = (
+        select(Camera, Scale, Site)
+        .join(Scale, Scale.id == Camera.scale_id)
+        .join(Site, Site.id == Scale.site_id)
+        .order_by(Site.name, Scale.name, Scale.id, Camera.role)
+    )
+    agents_query = (
+        select(Agent, Scale, Site)
+        .join(Scale, Scale.id == Agent.scale_id)
+        .join(Site, Site.id == Scale.site_id)
+        .order_by(Site.name, Scale.name, Scale.id)
+    )
     if site_id is not None:
-        scales_query = scales_query.where(Scale.site_id == site_id)
         cameras_query = cameras_query.where(Scale.site_id == site_id)
         agents_query = agents_query.where(Scale.site_id == site_id)
     scales = [tuple(r) for r in session.execute(scales_query).all()]
-    cameras = [tuple(r) for r in session.execute(cameras_query.order_by(Scale.id)).all()]
-    agents = [tuple(r) for r in session.execute(agents_query.order_by(Scale.id)).all()]
+    cameras = [tuple(r) for r in session.execute(cameras_query).all()]
+    agents = [tuple(r) for r in session.execute(agents_query).all()]
     return RefsData(sites=sites, scales=scales, cameras=cameras, agents=agents)

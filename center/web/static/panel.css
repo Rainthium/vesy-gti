@@ -283,6 +283,9 @@ table.journal td {
 table.journal tr:last-child td { border-bottom: none; }
 table.journal .num { text-align: right; }
 table.journal td.cell-muted { color: var(--muted); }
+/* вторая строка в ячейке: имя весов под именем объекта (на объекте
+   бывает несколько весов — решение 11.08.2026) */
+table.journal td .cell-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
 table.journal td.cell-vehicle { font-weight: 700; font-size: 14px; }
 table.journal td.cell-gross { font-weight: 600; }
 table.journal td.cell-netto { font-weight: 700; }

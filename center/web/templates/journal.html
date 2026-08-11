@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_thumbs.html" import photo_thumbs %}
+{% from "_filters.html" import site_scale, site_scale_cell %}
 {% block title %}Взвешивания — Весовая система{% endblock %}
 {% block body %}
 {% set active_tab = 'journal' %}
@@ -10,12 +11,7 @@
     <span class="page-meta">Всего записей под фильтром: {{ total }}</span>
   </div>
   <form method="get" action="/panel/journal" class="filters" id="journal-filters">
-    <select name="site_id">
-      <option value="">Все объекты</option>
-      {% for site in refs.sites %}
-      <option value="{{ site.id }}" {{ 'selected' if filters.site_id == site.id else '' }}>{{ site.name }}</option>
-      {% endfor %}
-    </select>
+    {{ site_scale(refs, filters) }}
     <input type="date" name="date_from" value="{{ filters.date_from }}" title="С даты">
     <input type="date" name="date_to" value="{{ filters.date_to }}" title="По дату">
     <input name="vehicle" placeholder="Номер ТС или прицепа" value="{{ filters.vehicle }}">
@@ -30,7 +26,7 @@
     <div class="journal-scroll">
       <table class="journal">
         <thead>
-          <tr><th>Дата / время</th><th>Объект</th><th>Номер ТС</th><th>Прицеп</th><th>Фото</th><th>Операция</th>
+          <tr><th>Дата / время</th><th>Объект / весы</th><th>Номер ТС</th><th>Прицеп</th><th>Фото</th><th>Операция</th>
           <th class="num">Брутто, kg</th><th class="num">Тара, kg</th><th class="num">Нетто, kg</th>
           <th>Источник</th><th>Код</th></tr>
         </thead>
@@ -38,7 +34,7 @@
           {% for weighing, scale, site in rows %}
           <tr class="clickable" onclick="location.href='/panel/journal/{{ weighing.id }}'">
             <td class="cell-muted">{{ weighing.weighed_at | fmt_dt }}</td>
-            <td>{{ site.name }}</td>
+            {{ site_scale_cell(site, scale) }}
             <td class="cell-vehicle">{{ weighing.vehicle_number or '—' }}</td>
             <td>{{ weighing.trailer_number or '—' }}</td>
             <td class="cell-photos">{{ photo_thumbs(photos.get(weighing.id), '%s · %s' | format(weighing.vehicle_number or 'без номера', weighing.weighed_at | fmt_dt)) }}</td>

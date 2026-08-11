@@ -891,6 +891,10 @@ def refs_env(db: sessionmaker[Session], tmp_path: Path) -> Iterator[RefsEnv]:
         _add_user(session, DISPATCHER_LOGIN, DISPATCHER_PASSWORD, full_name="Диспетчер")
         site = _add_site(session)
         scale = _add_scale(session, site.id)
+        # камера в посеве: иначе строки таблицы камер на странице не
+        # отрисовываются и ошибка в шаблоне прошла бы мимо тестов
+        session.add(Camera(scale_id=scale.id, role=CameraRole.FRONT, snapshot_url="http://cam/1"))
+        session.commit()
         site_id, scale_id = site.id, scale.id
 
     app = FastAPI()
@@ -988,6 +992,17 @@ class TestRefsRoutesAdmin:
         assert response.status_code == 200
         assert "Создать объект" in response.text
         assert "/panel/refs/sites/create" in response.text
+
+    def test_agents_and_cameras_show_site(self, refs_env: RefsEnv) -> None:
+        """В таблицах агентов и камер объект стоит рядом с весами: названия
+        весов на разных объектах совпадают (11.08.2026)."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        response = refs_env.client.get("/panel/refs")
+        assert response.status_code == 200
+        assert "<th>Объект</th><th>Весы</th>" in response.text
+        # строка камеры отрисована (посев содержит камеру) и подписана объектом
+        assert f"cam-{refs_env.scale_id}-front" in response.text
+        assert response.text.count("СВХ «КАНТ»") >= 3  # весы, агенты-раздел, камеры
 
     def test_create_site_via_post(self, refs_env: RefsEnv) -> None:
         """POST sites/create создаёт объект и редиректит с note «создан»."""

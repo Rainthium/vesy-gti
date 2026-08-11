@@ -6,9 +6,9 @@
 {% set kind_names = {'static': 'статические', 'dynamic': 'динамические', 'platform': 'платформенные'} %}
 {# карта камер: (scale_id, role) → camera #}
 {% set cam_map = {} %}
-{% for camera, scale in refs.cameras %}{% set _ = cam_map.update({scale.id ~ ':' ~ camera.role.value: camera}) %}{% endfor %}
+{% for camera, scale, _site in refs.cameras %}{% set _ = cam_map.update({scale.id ~ ':' ~ camera.role.value: camera}) %}{% endfor %}
 {% set agent_scale_ids = [] %}
-{% for agent, scale in refs.agents %}{% set _ = agent_scale_ids.append(scale.id) %}{% endfor %}
+{% for agent, scale, _site in refs.agents %}{% set _ = agent_scale_ids.append(scale.id) %}{% endfor %}
 <main class="content">
   <div class="page-head">
     <h1>Справочники</h1>
@@ -167,10 +167,11 @@
         {% endif %}
         <div class="journal-scroll">
           <table class="journal users">
-            <thead><tr><th>Весы</th><th>Статус</th><th>Версия</th><th>Канал</th><th>Последняя связь</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
+            <thead><tr><th>Объект</th><th>Весы</th><th>Статус</th><th>Версия</th><th>Канал</th><th>Последняя связь</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
             <tbody>
-              {% for agent, scale in refs.agents %}
+              {% for agent, scale, site in refs.agents %}
               <tr>
+                <td>{{ site.name }}</td>
                 <td class="cell-gross">{{ scale.name }}</td>
                 <td><span class="pill {{ 'pill-ok' if agent.status.value == 'online' else 'pill-err' }}"><span class="dot"></span>{{ 'Онлайн' if agent.status.value == 'online' else 'Офлайн' }}</span></td>
                 <td>{{ agent.version or '—' }}</td>
@@ -195,7 +196,7 @@
                 {% endif %}
               </tr>
               {% else %}
-              <tr><td colspan="{{ 6 if can_edit else 5 }}" class="empty">Агенты не заведены</td></tr>
+              <tr><td colspan="{{ 7 if can_edit else 6 }}" class="empty">Агенты не заведены</td></tr>
               {% endfor %}
             </tbody>
           </table>
@@ -209,12 +210,13 @@
         {% endif %}
         <div class="journal-scroll">
           <table class="journal users">
-            <thead><tr><th>Весы</th><th>Роль</th><th>Snapshot (HTTP)</th><th>RTSP</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
+            <thead><tr><th>Объект</th><th>Весы</th><th>Роль</th><th>Snapshot (HTTP)</th><th>RTSP</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
             <tbody>
               {% for scale, site in refs.scales %}
               {% for role in camera_roles %}
               {% set camera = cam_map.get(scale.id ~ ':' ~ role.value) %}
               <tr>
+                <td>{{ site.name }}</td>
                 <td class="cell-gross">{{ scale.name }}</td>
                 <td>{{ 'ПЕРЕД' if role.value == 'front' else 'ЗАД' }}</td>
                 {% if can_edit %}
@@ -233,7 +235,7 @@
               </tr>
               {% endfor %}
               {% else %}
-              <tr><td colspan="{{ 5 if can_edit else 4 }}" class="empty">Весы не заведены</td></tr>
+              <tr><td colspan="{{ 6 if can_edit else 5 }}" class="empty">Весы не заведены</td></tr>
               {% endfor %}
             </tbody>
           </table>

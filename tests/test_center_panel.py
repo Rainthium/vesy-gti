@@ -567,6 +567,33 @@ class TestTareList:
         rows, _ = queries.tare_list(db_session)
         assert [row[0].vehicle_number for row in rows] == ["05KG999ZZZ", "01KG111AAA"]
 
+    def test_filter_by_site_and_scale(self, db_session: Session) -> None:
+        """Двое весов на одном объекте: фильтры делят реестр (11.08.2026)."""
+        site, scale_1 = _add_site_scale(db_session, "kant", "СВХ «КАНТ»", "Весы 1")
+        scale_2 = Scale(site_id=site.id, name="Весы 2", kind=ScaleKind.STATIC, driver="cas22")
+        db_session.add(scale_2)
+        db_session.flush()
+        _, other_scale = _add_site_scale(db_session, "b-site", "СВХ «Б»", "Весы 1")
+        now = datetime.now(UTC)
+        for scale, number in (
+            (scale_1, "01KG111AAA"),
+            (scale_2, "02KG222BBB"),
+            (other_scale, "03KG333CCC"),
+        ):
+            repo.save_weighing_record(
+                db_session,
+                scale.id,
+                _make_taring(vehicle_number=number, weighed_at=now - timedelta(days=1)),
+            )
+
+        rows, total = queries.tare_list(db_session, site_id=site.id)
+        assert total == 2
+        assert {row[0].vehicle_number for row in rows} == {"01KG111AAA", "02KG222BBB"}
+
+        rows, total = queries.tare_list(db_session, scale_id=scale_2.id)
+        assert total == 1
+        assert [row[0].vehicle_number for row in rows] == ["02KG222BBB"]
+
 
 # ---------------------------------------------------------------------------
 # queries.tare_expires_at (чистая функция, без БД)
@@ -631,10 +658,12 @@ class TestRefsData:
             (scale_a.id, site_a.id),
             (scale_b.id, site_b.id),
         }
-        assert [(camera.role, scale.id) for camera, scale in refs.cameras] == [
-            (CameraRole.FRONT, scale_a.id)
+        assert [(camera.role, scale.id, site.id) for camera, scale, site in refs.cameras] == [
+            (CameraRole.FRONT, scale_a.id, site_a.id)
         ]
-        assert [scale.id for _agent, scale in refs.agents] == [scale_a.id]
+        assert [(scale.id, site.id) for _agent, scale, site in refs.agents] == [
+            (scale_a.id, site_a.id)
+        ]
 
     def test_site_filter_narrows_everything_but_sites(self, db_session: Session) -> None:
         """site_id сужает весы/камеры/агентов до объекта; sites — полный
@@ -650,8 +679,8 @@ class TestRefsData:
         refs = queries.refs_data(db_session, site_a.id)
         assert [site.code for site in refs.sites] == ["a-site", "b-site"]
         assert [scale.id for scale, _ in refs.scales] == [scale_a.id]
-        assert [scale.id for _, scale in refs.cameras] == [scale_a.id]
-        assert [scale.id for _, scale in refs.agents] == [scale_a.id]
+        assert [scale.id for _, scale, _site in refs.cameras] == [scale_a.id]
+        assert [scale.id for _, scale, _site in refs.agents] == [scale_a.id]
 
     def test_empty_db_gives_empty_lists(self, db_session: Session) -> None:
         """Пустая БД → пустые справочники, без ошибок."""
@@ -660,6 +689,15 @@ class TestRefsData:
         assert refs.scales == []
         assert refs.cameras == []
         assert refs.agents == []
+
+    def test_scales_of_one_site_ordered_by_name(self, db_session: Session) -> None:
+        """Порядок весов внутри объекта задан именем: сортировки только по
+        объекту не хватало — строки прыгали между обновлениями (11.08.2026)."""
+        site, _ = _add_site_scale(db_session, "kant", "СВХ «КАНТ»", "Весы Б")
+        db_session.add(Scale(site_id=site.id, name="Весы А", kind=ScaleKind.STATIC, driver="cas22"))
+        db_session.commit()
+        refs = queries.refs_data(db_session)
+        assert [scale.name for scale, _site in refs.scales] == ["Весы А", "Весы Б"]
 
 
 # ---------------------------------------------------------------------------
@@ -822,6 +860,87 @@ class TestPanelJournalRoutes:
         response = panel_env.client.get("/panel/journal", params={"page": page})
         assert response.status_code == 200
         assert "01KG777AAA" in response.text
+
+    def test_scale_filter_narrows_rows(self, panel_env: PanelEnv) -> None:
+        """Фильтр по весам: записи соседних весов не показываются."""
+        _login(panel_env)
+        response = panel_env.client.get("/panel/journal", params={"scale_id": panel_env.scale_id})
+        assert response.status_code == 200
+        assert "01KG777AAA" in response.text
+        assert "28BAHE03KG" not in response.text
+
+    def test_scale_of_other_site_is_dropped(self, panel_env: PanelEnv) -> None:
+        """Весы чужого объекта в фильтре сбрасываются, а не дают пустой список
+        (иначе после смены объекта экран молча пустеет)."""
+        _login(panel_env)
+        with panel_env.factory() as session:
+            site_id = session.get(Scale, panel_env.scale_id).site_id  # type: ignore[union-attr]
+            other_scale_id = session.execute(
+                select(Scale.id).where(Scale.site_id != site_id)
+            ).scalar_one()
+        response = panel_env.client.get(
+            "/panel/journal", params={"site_id": site_id, "scale_id": other_scale_id}
+        )
+        assert response.status_code == 200
+        assert "01KG777AAA" in response.text  # показан выбранный объект
+        assert "28BAHE03KG" not in response.text
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"site_id": "", "scale_id": "", "vehicle": "", "source": ""},
+            {"site_id": "", "scale_id": "", "page": "2"},
+            {"site_id": "abc", "scale_id": "%"},
+            # id в БД — int4: без верхней границы был бы 500 из драйвера
+            {"site_id": "2147483648", "scale_id": "99999999999999999999"},
+            {"site_id": "0"},
+        ],
+    )
+    def test_empty_and_garbage_filters_render(
+        self, panel_env: PanelEnv, params: dict[str, str]
+    ) -> None:
+        """Форма шлёт пустые значения селектов («Все объекты»), а ссылки
+        пагинации — пустые фильтры: это должна быть страница, а не 422."""
+        _login(panel_env)
+        response = panel_env.client.get("/panel/journal", params=params)
+        assert response.status_code == 200
+
+    def test_scale_selector_narrowed_by_site(self, panel_env: PanelEnv) -> None:
+        """Выбран объект → в селекторе весов только его весы, без подписи
+        объекта; без объекта — все весы с подписью объекта."""
+        _login(panel_env)
+        with panel_env.factory() as session:
+            site_id = session.get(Scale, panel_env.scale_id).site_id  # type: ignore[union-attr]
+        all_sites = panel_env.client.get("/panel/journal").text
+        assert "СВХ «Кызыл-Кыя» · Весы SCS-80" in all_sites
+        assert "СВХ «КАНТ» · Весы SCS-80 22-3" in all_sites
+
+        one_site = panel_env.client.get("/panel/journal", params={"site_id": site_id}).text
+        assert "СВХ «КАНТ» · Весы SCS-80 22-3" not in one_site
+        assert f'value="{panel_env.scale_id}"' in one_site
+
+    def test_tares_empty_filters_render(self, panel_env: PanelEnv) -> None:
+        """Тот же случай на экране тарирований: «Найти» с «Все объекты»."""
+        _login(panel_env)
+        response = panel_env.client.get(
+            "/panel/tares", params={"site_id": "", "scale_id": "", "search": ""}
+        )
+        assert response.status_code == 200
+        assert "01KG555TTT" in response.text
+
+    def test_tares_filtered_by_scale(self, panel_env: PanelEnv) -> None:
+        """Реестр тарирований тоже фильтруется по весам."""
+        _login(panel_env)
+        response = panel_env.client.get("/panel/tares", params={"scale_id": panel_env.scale_id})
+        assert response.status_code == 200
+        assert "01KG555TTT" in response.text
+        with panel_env.factory() as session:
+            other_scale_id = session.execute(
+                select(Scale.id).where(Scale.id != panel_env.scale_id)
+            ).scalar_one()
+        response = panel_env.client.get("/panel/tares", params={"scale_id": other_scale_id})
+        assert response.status_code == 200
+        assert "01KG555TTT" not in response.text
 
 
 class TestPanelCard:

@@ -1,0 +1,25 @@
+{# Общая пара селекторов «Объект» + «Весы» для списков панели.
+   На объекте бывает несколько весов (решение 11.08.2026), поэтому выбор
+   объекта сужает список весов; без выбранного объекта весы показываются
+   с подписью объекта — названия весов на разных объектах совпадают. #}
+{% macro site_scale(refs, filters) %}
+<select name="site_id">
+  <option value="">Все объекты</option>
+  {% for site in refs.sites %}
+  <option value="{{ site.id }}" {{ 'selected' if filters.site_id == site.id else '' }}>{{ site.name }}</option>
+  {% endfor %}
+</select>
+<select name="scale_id">
+  <option value="">Все весы</option>
+  {% for scale, site in refs.scales %}
+  {% if not filters.site_id or site.id == filters.site_id %}
+  <option value="{{ scale.id }}" {{ 'selected' if filters.scale_id == scale.id else '' }}>{% if not filters.site_id %}{{ site.name }} · {% endif %}{{ scale.name }}</option>
+  {% endif %}
+  {% endfor %}
+</select>
+{% endmacro %}
+
+{# Ячейка списка: объект, под ним — весы #}
+{% macro site_scale_cell(site, scale) %}
+<td>{{ site.name }}<div class="cell-sub">{{ scale.name }}</div></td>
+{% endmacro %}

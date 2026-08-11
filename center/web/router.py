@@ -49,6 +49,7 @@ SessionFactory = Callable[[], Session]
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 BISHKEK = ZoneInfo("Asia/Bishkek")
 PAGE_SIZE = 50
+MAX_DB_ID = 2**31 - 1  # id таблиц — int4; больше в запрос пускать нельзя
 
 
 def _fmt_dt(value: datetime | None) -> str:
@@ -215,6 +216,38 @@ def create_panel_router(
                 note = str(exc)
         return RedirectResponse(f"/panel/?update_note={quote(note)}", status_code=303)
 
+    def _parse_id(raw: str) -> int | None:
+        """Числовой параметр фильтра из строки запроса.
+
+        Селекты формы шлют пустое значение («Все объекты»), а параметр
+        типа ``int | None`` на пустой строке даёт 422 — поэтому фильтры
+        принимаем строками. Мусор трактуем как «без фильтра».
+        """
+        raw = raw.strip()
+        # isascii: юникодные «цифры» (³, ٢) проходят isdigit, но роняют int
+        if not raw or not (raw.isascii() and raw.isdigit()):
+            return None
+        value = int(raw)
+        # id в БД — int4: без верхней границы запрос падал бы 500-й
+        # (NumericValueOutOfRange), а не показывал список без фильтра
+        if not 0 < value <= MAX_DB_ID:
+            return None
+        return value
+
+    def _scale_of_site(
+        refs: queries.FilterOptions, scale_id: int | None, site_id: int | None
+    ) -> int | None:
+        """Сбросить выбор весов, если они не с выбранного объекта.
+
+        Иначе после смены объекта в фильтре оставался бы висеть scale_id
+        соседнего объекта и список молча оказывался бы пустым.
+        """
+        if scale_id is None or site_id is None:
+            return scale_id
+        if any(scale.id == scale_id and scale.site_id == site_id for scale, _ in refs.scales):
+            return scale_id
+        return None
+
     def _parse_filters(
         site_id: int | None,
         scale_id: int | None,
@@ -247,15 +280,18 @@ def create_panel_router(
     async def journal(
         request: Request,
         user: PanelUser,
-        site_id: int | None = None,
-        scale_id: int | None = None,
+        site_id: str = "",
+        scale_id: str = "",
         date_from: str | None = None,
         date_to: str | None = None,
         vehicle: str | None = None,
         source: str | None = None,
         page: int = 1,
     ) -> HTMLResponse:
-        filters = _parse_filters(site_id, scale_id, date_from, date_to, vehicle, source)
+        refs = await asyncio.to_thread(_db, queries.filter_options)
+        site = _parse_id(site_id)
+        scale = _scale_of_site(refs, _parse_id(scale_id), site)
+        filters = _parse_filters(site, scale, date_from, date_to, vehicle, source)
         page = max(1, page)
         rows, total = await asyncio.to_thread(
             _db,
@@ -266,7 +302,6 @@ def create_panel_router(
         photos = await asyncio.to_thread(
             _db, lambda s: queries.photos_for_weighings(s, [w.id for w, _, _ in rows])
         )
-        refs = await asyncio.to_thread(_db, queries.refs_data)
         return render(
             "journal.html",
             request,
@@ -278,8 +313,8 @@ def create_panel_router(
             pages=max(1, -(-total // PAGE_SIZE)),
             refs=refs,
             filters={
-                "site_id": site_id,
-                "scale_id": scale_id,
+                "site_id": site,
+                "scale_id": scale,
                 "date_from": date_from or "",
                 "date_to": date_to or "",
                 "vehicle": vehicle or "",
@@ -296,13 +331,26 @@ def create_panel_router(
 
     @router.get("/tares", response_class=HTMLResponse)
     async def tares(
-        request: Request, user: PanelUser, search: str | None = None, page: int = 1
+        request: Request,
+        user: PanelUser,
+        search: str | None = None,
+        site_id: str = "",
+        scale_id: str = "",
+        page: int = 1,
     ) -> HTMLResponse:
+        refs = await asyncio.to_thread(_db, queries.filter_options)
+        site = _parse_id(site_id)
+        scale = _scale_of_site(refs, _parse_id(scale_id), site)
         page = max(1, page)
         rows, total = await asyncio.to_thread(
             _db,
             lambda s: queries.tare_list(
-                s, search=search, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE
+                s,
+                search=search,
+                site_id=site,
+                scale_id=scale,
+                limit=PAGE_SIZE,
+                offset=(page - 1) * PAGE_SIZE,
             ),
         )
         photos = await asyncio.to_thread(
@@ -318,6 +366,8 @@ def create_panel_router(
             page=page,
             pages=max(1, -(-total // PAGE_SIZE)),
             search=search or "",
+            refs=refs,
+            filters={"site_id": site, "scale_id": scale},
         )
 
     @router.get("/refs", response_class=HTMLResponse)
@@ -688,13 +738,10 @@ def create_panel_router(
     def _parse_site_id(raw: str) -> tuple[int | None, bool]:
         """(site_id, ok): пустое поле — «все объекты», мусор — ошибка,
         а не тихая отвязка от объекта."""
-        raw = raw.strip()
-        if not raw:
+        if not raw.strip():
             return None, True
-        # isascii: юникодные «цифры» (³, ٢) проходят isdigit, но роняют int
-        if not (raw.isascii() and raw.isdigit()):
-            return None, False
-        return int(raw), True
+        parsed = _parse_id(raw)
+        return parsed, parsed is not None
 
     @router.get("/users", response_class=HTMLResponse)
     async def users_page(
