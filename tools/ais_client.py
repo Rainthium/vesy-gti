@@ -26,10 +26,12 @@ def main() -> None:
     parser.add_argument("--operation", choices=["weighing", "taring"], default="weighing")
     parser.add_argument("--vehicle", default=None, help="номер ТС (для тары/нетто)")
     parser.add_argument("--trailer", default=None, help="номер прицепа")
-    # legacy-поля маршрутизации — значения Кызыл-Кыи по умолчанию
-    parser.add_argument("--ip", default="192.168.150.185", help="legacy ip_address")
+    # legacy-поля маршрутизации — значения Кызыл-Кыи по умолчанию.
+    # autoscale — номер весов НА объекте (подтверждено Игорем 12.08.2026:
+    # для одиночных весов АИС шлёт 1; «2» из ранней справки был ошибкой)
+    parser.add_argument("--ip", default="192.168.158.20", help="legacy ip_address")
     parser.add_argument("--port", type=int, default=8087, help="legacy port")
-    parser.add_argument("--autoscale", type=int, default=2)
+    parser.add_argument("--autoscale", type=int, default=1, help="номер весов на объекте")
     parser.add_argument("--username", default="admin")
     parser.add_argument("--password", default="admin")
     parser.add_argument("--timeout", type=float, default=150.0, help="тайм-аут HTTP, с")
