@@ -1,0 +1,20 @@
+{# Окно пагинации: «1 … 5 6 [7] 8 9 … 42» вместо перечня всех страниц —
+   журнал копится годами, страниц будут сотни. base — адрес списка со всеми
+   параметрами фильтров, но БЕЗ page (он добавляется здесь). #}
+{% macro pagination(page, pages, base) %}
+{% if pages > 1 %}
+{% set page = [1, [page, pages] | min] | max %}{# номер из URL мог выйти за диапазон #}
+{% set lo = [1, page - 2] | max %}
+{% set hi = [pages, page + 2] | min %}
+<nav class="pagination">
+  {% if lo > 1 %}<a href="{{ base }}&page=1">1</a>{% endif %}
+  {# многоточие, скрывающее ровно одну страницу, — это её номер #}
+  {% if lo == 3 %}<a href="{{ base }}&page=2">2</a>{% elif lo > 3 %}<span class="page-gap">…</span>{% endif %}
+  {% for p in range(lo, hi + 1) %}
+  <a class="{{ 'active' if p == page else '' }}" href="{{ base }}&page={{ p }}">{{ p }}</a>
+  {% endfor %}
+  {% if hi == pages - 2 %}<a href="{{ base }}&page={{ pages - 1 }}">{{ pages - 1 }}</a>{% elif hi < pages - 2 %}<span class="page-gap">…</span>{% endif %}
+  {% if hi < pages %}<a href="{{ base }}&page={{ pages }}">{{ pages }}</a>{% endif %}
+</nav>
+{% endif %}
+{% endmacro %}

@@ -1435,11 +1435,49 @@ class TestTaresPagination:
                 repo.save_weighing_record(session, scale_id, taring)
 
         page1 = panel_env.client.get("/panel/tares").text
-        assert 'href="/panel/tares?page=2' in page1, "нет перехода на вторую страницу"
+        assert '&page=2"' in page1, "нет перехода на вторую страницу"
         page2 = panel_env.client.get("/panel/tares?page=2").text
         assert page2 != page1
         # хвост реестра доступен: на второй странице есть записи
         assert "Действует" in page2
+
+    def test_pagination_window_instead_of_all_pages(
+        self,
+        panel_env: PanelEnv,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Переключатель — окно вокруг текущей страницы, а не перечень всех.
+
+        Журнал копится годами: перечень из сотен номеров страниц нечитаем
+        и раздувает страницу. Окно: 1 … 4 5 [6] 7 8 … N.
+        """
+        import center.web.router as router_module
+
+        monkeypatch.setattr(router_module, "PAGE_SIZE", 5)
+        _login(panel_env)
+        with panel_env.factory() as session:
+            for i in range(54):
+                taring = _make_taring(
+                    vehicle_number=f"01KG{i:03d}PG",
+                    weighed_at=datetime.now(UTC) - timedelta(hours=i + 1),
+                )
+                repo.save_weighing_record(session, panel_env.scale_id, taring)
+        # 54 новых + 1 тарирование базовой фикстуры = 55 записей → 11 страниц по 5
+        middle = panel_env.client.get("/panel/tares?page=6").text
+        assert "page-gap" in middle, "нет многоточий — перечислены все страницы?"
+        for visible in (1, 4, 5, 6, 7, 8, 11):
+            assert f'&page={visible}"' in middle, f"в окне нет страницы {visible}"
+        for hidden in (2, 3, 9, 10):
+            assert f'&page={hidden}"' not in middle, f"страница {hidden} вне окна, но в разметке"
+
+        # у краёв диапазона окно упирается в край без «дыр»
+        first = panel_env.client.get("/panel/tares").text
+        assert '&page=2"' in first and '&page=11"' in first
+        assert '&page=10"' not in first
+
+        # номер за пределами диапазона не роняет разметку
+        beyond = panel_env.client.get("/panel/tares?page=99").text
+        assert '&page=11"' in beyond or '&page=1"' in beyond
 
 
 # ---------------------------------------------------------------------------

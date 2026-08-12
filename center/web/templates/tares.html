@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% from "_thumbs.html" import photo_thumbs %}
 {% from "_filters.html" import site_scale, site_scale_cell %}
+{% from "_pagination.html" import pagination %}
 {% block title %}Тарирования — Весовая система{% endblock %}
 {% block body %}
 {% set active_tab = 'tares' %}
@@ -40,13 +41,10 @@
         </tbody>
       </table>
     </div>
-    {% if pages > 1 %}
-    <nav class="pagination">
-      {% for p in range(1, pages + 1) %}
-      <a class="{{ 'active' if p == page else '' }}" href="/panel/tares?page={{ p }}&search={{ search | urlencode }}&site_id={{ filters.site_id or '' }}&scale_id={{ filters.scale_id or '' }}">{{ p }}</a>
-      {% endfor %}
-    </nav>
-    {% endif %}
+    {% set base -%}
+    /panel/tares?search={{ search | urlencode }}&site_id={{ filters.site_id or '' }}&scale_id={{ filters.scale_id or '' }}
+    {%- endset %}
+    {{ pagination(page, pages, base | trim) }}
   </div>
   <p class="table-hint">При взвешивании брутто система автоматически подставляет последнее действующее тарирование этого номера ТС. Истёкшие записи в расчёте нетто не участвуют.</p>
 </main>

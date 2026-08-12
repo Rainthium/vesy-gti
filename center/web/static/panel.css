@@ -333,6 +333,15 @@ img.thumb:hover { border-color: var(--green-border); box-shadow: var(--shadow-ca
   color: #fff;
   pointer-events: none;
 }
+.page-gap {
+  min-width: 24px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+}
 
 /* ---------- Карточка записи журнала ---------- */
 
