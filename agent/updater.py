@@ -4,15 +4,23 @@
 - центр присылает по WS команду ``update_command`` (версия, путь
   скачивания, sha256, размер);
 - агент скачивает архив релиза с центра (HTTP, токен агента), сверяет
-  sha256 и размер — повреждённый/подменённый архив отвергается;
-- содержимое ``app/`` из архива раскладывается в ``app_new`` рядом
-  с текущей ``app`` (стандартная раскладка C:/vesy-agent, см.
-  docs/install-agent-windows.md);
-- пишется скрипт ``self-update.bat``: он останавливает службу агента
-  (этим корректно завершая его), подменяет папку (старая остаётся
-  в ``app_old`` для отката) и запускает службу заново. Логика повторяет
-  комплектный update.bat, но скрипт всегда пишется заново — не зависим
-  от того, что лежит на весовом ПК;
+  sha256 и размер — повреждённый/подменённый архив отвергается — и
+  проверяет ОГЛАВЛЕНИЕ архива (есть app/ves-agent.exe, пути без
+  zip-slip); это только чтение, файлы агент не пишет;
+- проверенный архив остаётся лежать как ``update.zip``, а раскладку
+  ``app_new`` делает self-update.bat ДОВЕРЕННЫМИ инструментами Windows
+  (tar, при неудаче PowerShell Expand-Archive): боевой урок 12.08.2026 —
+  360 Total Security на Джалал-Абаде молча блокировал запись системных
+  DLL неподписанным ves-agent.exe (6 отказов Permission denied на
+  ucrtbase.dll), а системным tar/cmd антивирусы доверяют. На ПК без
+  tar и без Expand-Archive (старые Windows) — прежний путь: агент
+  распаковывает сам (может требовать белый список exe в антивирусе,
+  см. docs/install-agent-windows.md «Антивирус»);
+- пишется скрипт ``self-update.bat``: он распаковывает релиз (см. выше),
+  останавливает службу агента (этим корректно завершая его), подменяет
+  папку (старая остаётся в ``app_old`` для отката) и запускает службу
+  заново. Логика повторяет комплектный update.bat, но скрипт всегда
+  пишется заново — не зависим от того, что лежит на весовом ПК;
 - скрипт запускается ОДНОРАЗОВОЙ ЗАДАЧЕЙ ПЛАНИРОВЩИКА Windows
   (schtasks), а не дочерним процессом агента: боевой урок 11.08.2026 —
   nssm при остановке службы убивает всё дерево её процессов, и запущенный
@@ -25,7 +33,15 @@
 
 Занятые весы уважаем: пока идёт операция (runner busy), обновление
 откладывается коротким ожиданием — перезапуск службы посреди
-взвешивания недопустим.
+взвешивания недопустим. Распаковка в bat удлиняет окно между этой
+проверкой и остановкой службы на время распаковки (десятки секунд на
+HDD) — кнопку обновления жмёт человек в свободное от машин окно.
+
+Если bat не смог распаковать или подменить папку, службу он не трогает —
+агент продолжает работать на прежней версии. Такой исход центру никто
+не рапортует (bat с центром не разговаривает), поэтому агент оставляет
+себе сторожок: спустя UPDATE_WATCHDOG_S после запуска bat живой процесс
+пишет ошибку в свой лог — его видно со страницы «Журнал агента» панели.
 
 Несколько агентов на одном ПК (объект с двумя весами, решение
 11.08.2026): имя службы не зашито — install-service.bat записывает его
@@ -48,7 +64,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import agent
 from shared.messages import UpdateCommand, UpdateStatus
@@ -60,19 +76,87 @@ BUSY_WAIT_S = 600.0  # ждём окончания операции не дол�
 BUSY_POLL_S = 2.0
 SPAWN_DELAY_S = 2.0  # пауза перед запуском self-update.bat: успеть отправить статус
 SCHTASKS_TIMEOUT_S = 30.0
+UPDATE_WATCHDOG_S = 900.0  # живой процесс спустя 15 мин после bat = обновление не прошло
+UPDATE_ARCHIVE_NAME = "update.zip"  # проверенный архив, который распакует bat
 DEFAULT_SERVICE_NAME = "ves-agent"  # раскладка до 11.08.2026 (один агент на ПК)
 SERVICE_NAME_FILE = "service.txt"  # пишет install-service.bat при установке
 # имя службы попадает в командную строку bat и в аргументы schtasks —
 # пускаем только безопасный набор (ни пробелов, ни кавычек, ни %&|)
 SERVICE_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
-UPDATE_BAT_TEMPLATE = r"""@echo off
+UPDATE_BAT_HEADER = r"""@echo off
 chcp 65001 >nul
 rem Скрипт автообновления агента __SERVICE__: сгенерирован агентом,
 rem запускается задачей планировщика. Лог — logs\update.log
 set "BASE=%~dp0"
 set "BASE=%BASE:~0,-1%"
-echo [%date% %time%] остановка службы __SERVICE__ >> "%BASE%\logs\update.log"
+"""
+
+# Распаковка релиза доверенными инструментами Windows, а не агентом
+# (антивирусы блокируют запись системных DLL неподписанным exe, урок 360).
+# Архив распаковывается целиком во временную app_unpack, оттуда в app_new
+# забирается только app/ (в корне архива ещё батники и инструкция).
+# Успех решают КОДЫ ВОЗВРАТА инструментов, а не наличие exe (ревью:
+# упавший на середине tar мог успеть положить exe — неполная сборка не
+# должна дойти до подмены); проверка exe перед подменой — контрольная.
+# Неубираемые хвосты прежней попытки (rmdir не смог) — отказ сразу:
+# распаковка поверх устаревших файлов смешала бы две версии.
+# ВАЖНО для cmd: внутри блоков if (...) в текстах echo нельзя использовать
+# скобки — «)» преждевременно закрыла бы блок; «if errorlevel 1» внутри
+# блоков корректен (проверяет errorlevel в момент исполнения, в отличие
+# от %errorlevel%). Команда PowerShell склеена из кусков только в
+# исходнике Python — в bat это одна строка.
+_POWERSHELL_UNPACK = (
+    "powershell -NoProfile -ExecutionPolicy Bypass -Command "
+    "\"Expand-Archive -LiteralPath '%BASE%\\update.zip' "
+    "-DestinationPath '%BASE%\\app_unpack' -Force\""
+)
+UPDATE_BAT_UNPACK = (
+    r"""echo [%date% %time%] распаковка релиза >> "%BASE%\logs\update.log"
+rmdir /s /q "%BASE%\app_unpack" 2>nul
+rmdir /s /q "%BASE%\app_new" 2>nul
+if exist "%BASE%\app_unpack" (
+  echo [%date% %time%] ОШИБКА: app_unpack занята, обновление прервано >> "%BASE%\logs\update.log"
+  del "%BASE%\update.zip" 2>nul
+  schtasks /Delete /TN __TASK__ /F >nul 2>&1
+  exit /b 1
+)
+if exist "%BASE%\app_new" (
+  echo [%date% %time%] ОШИБКА: app_new занята, обновление прервано >> "%BASE%\logs\update.log"
+  del "%BASE%\update.zip" 2>nul
+  schtasks /Delete /TN __TASK__ /F >nul 2>&1
+  exit /b 1
+)
+mkdir "%BASE%\app_unpack"
+tar -xf "%BASE%\update.zip" -C "%BASE%\app_unpack" >> "%BASE%\logs\update.log" 2>&1
+if errorlevel 1 (
+  echo [%date% %time%] tar не справился, пробуем PowerShell >> "%BASE%\logs\update.log"
+  rmdir /s /q "%BASE%\app_unpack" 2>nul
+  mkdir "%BASE%\app_unpack"
+"""
+    + f'  {_POWERSHELL_UNPACK} >> "%BASE%\\logs\\update.log" 2>&1\n'
+    + r"""  if errorlevel 1 (
+    echo [%date% %time%] ОШИБКА: распаковка не прошла, служба не тронута >> "%BASE%\logs\update.log"
+    rmdir /s /q "%BASE%\app_unpack" 2>nul
+    del "%BASE%\update.zip" 2>nul
+    schtasks /Delete /TN __TASK__ /F >nul 2>&1
+    exit /b 1
+  )
+)
+move "%BASE%\app_unpack\app" "%BASE%\app_new" >> "%BASE%\logs\update.log" 2>&1
+rmdir /s /q "%BASE%\app_unpack" 2>nul
+if not exist "%BASE%\app_new\ves-agent.exe" (
+  echo [%date% %time%] ОШИБКА: распаковка не удалась, служба не тронута >> "%BASE%\logs\update.log"
+  rmdir /s /q "%BASE%\app_new" 2>nul
+  del "%BASE%\update.zip" 2>nul
+  schtasks /Delete /TN __TASK__ /F >nul 2>&1
+  exit /b 1
+)
+del "%BASE%\update.zip" 2>nul
+"""
+)
+
+UPDATE_BAT_SWAP = r"""echo [%date% %time%] остановка службы __SERVICE__ >> "%BASE%\logs\update.log"
 "%BASE%\nssm.exe" stop __SERVICE__ >> "%BASE%\logs\update.log" 2>&1
 ping -n 6 127.0.0.1 >nul
 rmdir /s /q "%BASE%\app_old" 2>nul
@@ -129,11 +213,41 @@ def task_name(service: str) -> str:
     return f"{service}-update"
 
 
-def update_bat(service: str) -> str:
-    """Текст self-update.bat для службы ``service``."""
-    return UPDATE_BAT_TEMPLATE.replace("__SERVICE__", service).replace(
-        "__TASK__", task_name(service)
-    )
+def update_bat(service: str, *, unpack: bool = True) -> str:
+    """Текст self-update.bat для службы ``service``.
+
+    ``unpack=True`` (обычный путь) — bat сам распаковывает update.zip
+    доверенными инструментами; ``unpack=False`` — раскладку app_new уже
+    сделал агент (на ПК нет ни tar, ни Expand-Archive).
+    """
+    template = UPDATE_BAT_HEADER + (UPDATE_BAT_UNPACK if unpack else "") + UPDATE_BAT_SWAP
+    return template.replace("__SERVICE__", service).replace("__TASK__", task_name(service))
+
+
+def unpack_via_bat_available() -> bool:
+    """Есть ли на этом ПК доверенный инструмент распаковки для bat.
+
+    Windows 10 1803+ имеет системный tar (bsdtar, zip читает). На более
+    старых Windows PowerShell есть всегда, но Expand-Archive появился
+    только в 5.0 — проверяем именно командлет, иначе обновление вечно
+    падало бы в bat, хотя агент умеет распаковать сам (прежний путь).
+    Вне Windows (dev, тесты) — True: bat там не исполняется.
+    """
+    if sys.platform != "win32":
+        return True
+    if shutil.which("tar"):
+        return True
+    if not shutil.which("powershell"):
+        return False
+    try:
+        probe = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", "Get-Command Expand-Archive"],
+            capture_output=True,
+            timeout=SCHTASKS_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
 
 
 class AgentUpdater:
@@ -155,6 +269,7 @@ class AgentUpdater:
         # каталог установки (C:/vesy-agent): родитель папки app с exe
         self._install_dir = install_dir
         self._lock = asyncio.Lock()
+        self._watchdog_handle: asyncio.TimerHandle | None = None
 
     async def handle(self, command: UpdateCommand) -> UpdateStatus:
         """Выполнить команду обновления; вернуть отчёт для центра."""
@@ -195,32 +310,57 @@ class AgentUpdater:
         # ожидание свободных весов — окно между проверкой busy и рестартом
         # службы должно быть минимальным (замечание ревью 10.08.2026)
         archive = base / "update-download.zip"
-        await asyncio.to_thread(self._download, command, archive)
+        staged = base / UPDATE_ARCHIVE_NAME
+        # в поток: проба PowerShell (subprocess) заблокировала бы event loop
+        unpack_in_bat = await asyncio.to_thread(unpack_via_bat_available)
         try:
+            await asyncio.to_thread(self._download, command, archive)
             await asyncio.to_thread(self._verify, command, archive)
-            await asyncio.to_thread(self._extract, archive, base)
+            await asyncio.to_thread(self._validate_archive, archive)
+            if unpack_in_bat:
+                # проверенный архив остаётся лежать под bat: раскладку app_new
+                # делает доверенный процесс, а не неподписанный агент (урок 360)
+                await asyncio.to_thread(archive.replace, staged)
+            else:
+                logger.warning(
+                    "на ПК нет ни tar, ни Expand-Archive — распаковка процессом агента; "
+                    "сторонний антивирус может её блокировать (см. install-agent-windows.md)"
+                )
+                await asyncio.to_thread(self._extract, archive, base)
+
+            # дождаться окончания текущей операции (перезапуск посреди
+            # взвешивания недопустим)
+            waited = 0.0
+            while self._busy() and waited < BUSY_WAIT_S:
+                await asyncio.sleep(BUSY_POLL_S)
+                waited += BUSY_POLL_S
+            if self._busy():
+                raise UpdateError("весы заняты операцией дольше 10 минут — повторите позже")
+
+            logger.info("обновление до %s: служба %s", command.version, service)
+            bat = base / "self-update.bat"
+            # cmd требует CRLF
+            bat.write_bytes(
+                update_bat(service, unpack=unpack_in_bat).replace("\n", "\r\n").encode("utf-8")
+            )
+            # spawn — отложенно: у ws_client есть 2 секунды отправить update_status
+            # центру ДО того, как nssm stop убьёт агента (иначе успешные
+            # обновления выглядели бы в логах центра «немыми»)
+            loop = asyncio.get_running_loop()
+            loop.call_later(SPAWN_DELAY_S, self._spawn_updater, bat, base, task_name(service))
+            # сторожок: об исходе bat центру никто не рапортует (см. шапку модуля)
+            if self._watchdog_handle is not None:
+                self._watchdog_handle.cancel()
+            self._watchdog_handle = loop.call_later(
+                UPDATE_WATCHDOG_S, self._watchdog, command.version
+            )
+        except BaseException:
+            # не захламлять весовой ПК: отменённое обновление убирает и архив,
+            # подготовленный для bat (следующая команда скачает свой заново)
+            staged.unlink(missing_ok=True)
+            raise
         finally:
             archive.unlink(missing_ok=True)
-
-        # дождаться окончания текущей операции (перезапуск посреди
-        # взвешивания недопустим)
-        waited = 0.0
-        while self._busy() and waited < BUSY_WAIT_S:
-            await asyncio.sleep(BUSY_POLL_S)
-            waited += BUSY_POLL_S
-        if self._busy():
-            raise UpdateError("весы заняты операцией дольше 10 минут — повторите позже")
-
-        logger.info("обновление до %s: служба %s", command.version, service)
-        bat = base / "self-update.bat"
-        # cmd требует CRLF
-        bat.write_bytes(update_bat(service).replace("\n", "\r\n").encode("utf-8"))
-        # spawn — отложенно: у ws_client есть 2 секунды отправить update_status
-        # центру ДО того, как nssm stop убьёт агента (иначе успешные
-        # обновления выглядели бы в логах центра «немыми»)
-        asyncio.get_running_loop().call_later(
-            SPAWN_DELAY_S, self._spawn_updater, bat, base, task_name(service)
-        )
 
     def _download(self, command: UpdateCommand, target: Path) -> None:
         url = self._base_url + urllib.parse.quote(command.url_path)
@@ -245,8 +385,54 @@ class AgentUpdater:
             raise UpdateError("sha256 архива не совпал — обновление отвергнуто")
 
     @staticmethod
+    def _validate_archive(archive: Path) -> None:
+        """Проверить ОГЛАВЛЕНИЕ релиза без распаковки (раскладку сделает bat).
+
+        Правила те же, что у распаковки агентом: в архиве обязан быть
+        app/ves-agent.exe, а пути членов не должны вырываться наружу
+        (zip-slip). Проверяются ВСЕ члены, не только app/ — bat
+        распаковывает архив целиком во временную app_unpack. Пути
+        разбираются по правилам Windows (PureWindowsPath: и «..», и
+        абсолютные, и с буквой диска, и с обратными слэшами) — распаковка
+        происходит на весовом ПК. Здесь только чтение: файлы на диск не
+        пишутся, антивирусу не на что реагировать.
+        """
+        with zipfile.ZipFile(archive) as bundle:
+            members = bundle.namelist()
+            if not any(m.startswith("app/") and m.endswith("ves-agent.exe") for m in members):
+                raise UpdateError("в архиве нет app/ves-agent.exe — это не релиз агента")
+            for member in members:
+                path = PureWindowsPath(member)
+                # root ловит «\evil.txt»: без буквы диска is_absolute() == False,
+                # но при распаковке такой путь указывает в корень диска
+                if path.is_absolute() or path.drive or path.root or ".." in path.parts:
+                    raise UpdateError(f"подозрительный путь в архиве: {member}")
+
+    def _watchdog(self, version: str) -> None:
+        """Агент жив спустя UPDATE_WATCHDOG_S после запуска bat — не обновились.
+
+        Успешное обновление за это время остановило бы службу (и этот
+        процесс вместе с ней). Раз живы — bat не справился (чаще всего
+        распаковка) и службу не тронул. bat с центром не разговаривает,
+        поэтому хотя бы пишем в свой лог: он виден со страницы «Журнал
+        агента» панели, а центр продолжает показывать прежнюю версию.
+        """
+        logger.error(
+            "автообновление до %s: спустя %d мин служба так и не была перезапущена — "
+            "обновление, судя по всему, не прошло; подробности в logs/update.log",
+            version,
+            int(UPDATE_WATCHDOG_S // 60),
+        )
+
+    @staticmethod
     def _extract(archive: Path, base: Path) -> None:
-        """Распаковать app/ из архива релиза в app_new (со сбросом старой)."""
+        """Распаковать app/ из архива в app_new процессом агента.
+
+        С 0.4.8 это ЗАПАСНОЙ путь для ПК без tar и Expand-Archive: обычно
+        распаковывает self-update.bat (см. шапку модуля). Неподписанному
+        агенту антивирус может запрещать запись системных DLL — на таких
+        машинах нужен белый список exe (урок 360, install-agent-windows.md).
+        """
         app_new = base / "app_new"
         if app_new.exists():
             shutil.rmtree(app_new)

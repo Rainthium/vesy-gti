@@ -10,16 +10,23 @@
 - версия, равная текущей, и dev-запуск отклоняются без сетевых обращений;
 - скачивание идёт с токеном агента (сервер без Bearer отвечает 401 —
   успешный сценарий это доказывает);
-- неверный sha256/размер → архив отвергнут, app_new и bat не появляются;
+- неверный sha256/размер/zip-slip → архив отвергнут, ничего не появляется;
+- распаковку делает self-update.bat доверенными инструментами (урок 360,
+  12.08.2026): агент лишь проверяет оглавление и оставляет update.zip;
+  на ПК без tar и Expand-Archive — прежняя распаковка агентом (fallback);
 - self-update.bat пишется с CRLF и содержит остановку/запуск службы;
-- занятые весы (busy) откладывают и в итоге отменяют обновление.
+- занятые весы (busy) откладывают и в итоге отменяют обновление;
+- сторожок: живой процесс спустя UPDATE_WATCHDOG_S после запуска bat
+  пишет ошибку в лог (bat не рапортует центру о своих провалах).
 """
 
 import asyncio
 import hashlib
 import http.server
 import io
+import shutil
 import subprocess
+import sys
 import threading
 import zipfile
 from collections.abc import Callable, Iterator
@@ -199,10 +206,12 @@ class TestUpdaterSuccess:
         release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
         spawn_calls: list[tuple[Path, Path, str]],
     ) -> None:
-        """Скачивание с токеном → проверка → app_new → self-update.bat → запуск.
+        """Скачивание с токеном → проверки → update.zip → self-update.bat → запуск.
 
         Сервер отвечает 401 без Bearer-токена, так что ok=True заодно
-        доказывает, что агент шлёт Authorization.
+        доказывает, что агент шлёт Authorization. Распаковку агент НЕ
+        делает — проверенный архив остаётся лежать update.zip, раскладку
+        app_new выполнит bat доверенными инструментами (урок 360).
         """
         payload = _make_release_zip()
         base_url, requests = release_server(payload)
@@ -217,10 +226,10 @@ class TestUpdaterSuccess:
         assert [path for path, _ in requests] == [RELEASE_PATH]
         assert requests[0][1].get("Authorization") == f"Bearer {TOKEN}"
 
-        # app_new создана с exe и вложенным файлом, содержимое байт-в-байт
-        app_new = install_dir / "app_new"
-        assert (app_new / "ves-agent.exe").read_bytes() == NEW_EXE
-        assert (app_new / "_internal" / "x").read_bytes() == INTERNAL_FILE
+        # агент файлы сборки НЕ раскладывает (это делает bat) — архив
+        # проверен и оставлен под именем update.zip байт-в-байт
+        assert not (install_dir / "app_new").exists(), "app_new распаковал агент, а должен bat"
+        assert (install_dir / "update.zip").read_bytes() == payload
         # старая app не тронута (её подменяет только bat)
         assert (install_dir / "app" / "ves-agent.exe").read_bytes() == b"MZ old-agent-exe"
 
@@ -229,13 +238,20 @@ class TestUpdaterSuccess:
         raw = bat.read_bytes()
         assert raw.count(b"\n") == raw.count(b"\r\n"), "в bat есть строки без CRLF"
         text = raw.decode("utf-8")
+        # распаковка в bat: tar с фолбэком на PowerShell, из update.zip
+        assert 'tar -xf "%BASE%\\update.zip"' in text
+        assert "Expand-Archive" in text
+        assert "app_unpack" in text
         assert 'nssm.exe" stop ves-agent' in text
         assert 'nssm.exe" start ves-agent' in text
         assert "app_new" in text
         # bat запускается задачей планировщика и сам её удаляет в конце
         assert "schtasks /Delete /TN ves-agent-update /F" in text
+        # распаковка идёт ДО остановки службы: простой службы минимален,
+        # а неудачная распаковка оставляет агента работать
+        assert text.index("tar -xf") < text.index('nssm.exe" stop')
 
-        # временный архив удалён
+        # временный архив скачивания удалён (остался только update.zip)
         assert not (install_dir / "update-download.zip").exists()
 
         # запуск скрипта: ровно один вызов с путями bat и базового каталога
@@ -266,6 +282,7 @@ class TestUpdaterVerification:
         assert not (install_dir / "app_new").exists()
         assert not (install_dir / "self-update.bat").exists()
         assert not (install_dir / "update-download.zip").exists(), "архив не удалён"
+        assert not (install_dir / "update.zip").exists(), "отвергнутый архив оставлен под bat"
         assert spawn_calls == []
 
     def test_wrong_size_rejected(
@@ -284,6 +301,7 @@ class TestUpdaterVerification:
         assert status.error is not None and "размер" in status.error
         assert not (install_dir / "app_new").exists()
         assert not (install_dir / "self-update.bat").exists()
+        assert not (install_dir / "update.zip").exists()
         assert spawn_calls == []
 
     def test_zip_without_agent_exe_rejected(
@@ -302,25 +320,46 @@ class TestUpdaterVerification:
         assert status.error is not None and "не релиз агента" in status.error
         assert not (install_dir / "app_new").exists()
         assert not (install_dir / "self-update.bat").exists()
+        assert not (install_dir / "update.zip").exists()
         assert spawn_calls == []
 
-    def test_zip_slip_member_stays_inside_app_new(
+    @pytest.mark.parametrize(
+        "member",
+        [
+            "app/../evil.txt",  # классический zip-slip
+            "../evil.txt",  # вне app/ (bat распаковывает архив целиком)
+            "C:/evil.txt",  # абсолютный путь с буквой диска
+            "\\evil.txt",  # корневой путь Windows (без буквы диска)
+            "app\\..\\evil.txt",  # обратные слэши — для Windows те же разделители
+        ],
+    )
+    def test_zip_slip_member_rejects_whole_archive(
         self,
         install_dir: Path,
         release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
         spawn_calls: list[tuple[Path, Path, str]],
+        member: str,
     ) -> None:
-        """Член архива с app/../ не должен вырваться из app_new."""
+        """Подозрительный путь в оглавлении → архив отвергнут ЦЕЛИКОМ.
+
+        Распаковку делает bat без всяких проверок путей, поэтому агент
+        обязан отбраковать архив заранее — по одному лишь оглавлению.
+        """
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w") as bundle:
             bundle.writestr("app/ves-agent.exe", NEW_EXE)
-            bundle.writestr("app/../evil.txt", b"escaped")
+            bundle.writestr(member, b"escaped")
         payload = buffer.getvalue()
         base_url, _ = release_server(payload)
         updater = _make_updater(base_url, install_dir)
 
-        _handle(updater, _make_command(payload))
-        assert not (install_dir / "evil.txt").exists(), "файл из архива вырвался из app_new"
+        status = _handle(updater, _make_command(payload))
+        assert status.ok is False
+        assert status.error is not None and "подозрительный путь" in status.error
+        assert not (install_dir / "evil.txt").exists(), "файл из архива вырвался наружу"
+        assert not (install_dir / "update.zip").exists(), "опасный архив оставлен под bat"
+        assert not (install_dir / "self-update.bat").exists()
+        assert spawn_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -379,10 +418,177 @@ class TestUpdaterBusy:
         assert status.ok is False
         assert status.error is not None and "заняты" in status.error
         assert polls > 1, "busy опрашивался меньше двух раз — ожидания не было"
-        # подготовка прошла, но рестарт службы не запускался
+        # подготовка прошла, но рестарт службы не запускался; подготовленный
+        # для bat update.zip тоже убран — отменённое обновление не оставляет следов
         assert not (install_dir / "update-download.zip").exists()
+        assert not (install_dir / "update.zip").exists()
         assert not (install_dir / "self-update.bat").exists()
         assert spawn_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Распаковка: обычно её делает bat (урок 360, 12.08.2026), а на ПК без
+# tar и Expand-Archive — прежний путь: агент распаковывает сам
+# ---------------------------------------------------------------------------
+
+
+class TestUnpackFallback:
+    def test_no_tools_agent_extracts_itself(
+        self,
+        install_dir: Path,
+        release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
+        spawn_calls: list[tuple[Path, Path, str]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Нет ни tar, ни Expand-Archive → агент раскладывает app_new сам,
+        bat без блока распаковки, update.zip не остаётся."""
+        monkeypatch.setattr(updater_module, "unpack_via_bat_available", lambda: False)
+        payload = _make_release_zip()
+        base_url, _ = release_server(payload)
+        updater = _make_updater(base_url, install_dir)
+
+        status = _handle(updater, _make_command(payload))
+        assert status.ok is True, f"обновление не прошло: {status.error}"
+
+        # app_new создана агентом, содержимое байт-в-байт
+        app_new = install_dir / "app_new"
+        assert (app_new / "ves-agent.exe").read_bytes() == NEW_EXE
+        assert (app_new / "_internal" / "x").read_bytes() == INTERNAL_FILE
+        assert not (install_dir / "update.zip").exists()
+
+        text = (install_dir / "self-update.bat").read_bytes().decode("utf-8")
+        assert "tar -xf" not in text and "Expand-Archive" not in text
+        assert 'nssm.exe" stop ves-agent' in text
+        assert spawn_calls != []
+
+    def test_update_bat_variants(self) -> None:
+        """unpack=True несёт блок распаковки до остановки службы, False — нет;
+        подстановка службы и задачи работает в обоих."""
+        with_unpack = updater_module.update_bat("ves-agent-2", unpack=True)
+        without = updater_module.update_bat("ves-agent-2", unpack=False)
+        assert "__SERVICE__" not in with_unpack and "__TASK__" not in with_unpack
+        assert "__SERVICE__" not in without and "__TASK__" not in without
+        assert "tar -xf" in with_unpack and "Expand-Archive" in with_unpack
+        assert with_unpack.index("tar -xf") < with_unpack.index('nssm.exe" stop')
+        assert "tar -xf" not in without and "app_unpack" not in without
+        # успех распаковки решают коды возврата инструментов (ревью: tar,
+        # упавший на середине, мог успеть положить exe — считать по exist
+        # нельзя); плюс контрольная проверка exe перед подменой
+        assert with_unpack.count("if errorlevel 1 (") >= 3, (
+            "нет проверок кодов возврата tar/PowerShell"
+        )
+        assert 'if not exist "%BASE%\\app_new\\ves-agent.exe"' in with_unpack
+        # неубираемый хвост прежней попытки (rmdir не смог) — отказ сразу,
+        # а не распаковка поверх устаревших файлов
+        assert 'if exist "%BASE%\\app_unpack"' in with_unpack
+        assert 'if exist "%BASE%\\app_new"' in with_unpack
+        for text in (with_unpack, without):
+            assert 'nssm.exe" stop ves-agent-2' in text
+            assert "schtasks /Delete /TN ves-agent-2-update /F" in text
+
+    def test_unpack_block_has_no_parens_in_if_echo(self) -> None:
+        """Внутри блоков if (...) в bat нельзя использовать скобки в echo —
+        «)» преждевременно закрыла бы блок. Проверяем построчно."""
+        depth = 0
+        for line in updater_module.update_bat("ves-agent").splitlines():
+            stripped = line.strip()
+            if depth > 0 and stripped.startswith("echo"):
+                assert "(" not in stripped and ")" not in stripped, (
+                    f"скобки в echo внутри блока if: {stripped!r}"
+                )
+            depth += stripped.count("(") - stripped.count(")")
+        assert depth == 0, "непарные скобки в bat"
+
+
+class TestUnpackDetection:
+    """unpack_via_bat_available: выбор инструмента распаковки на весовом ПК."""
+
+    def _win(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "platform", "win32")
+
+    def test_non_windows_always_true(self) -> None:
+        """Вне Windows (dev/тесты) bat не исполняется — детекция не мешает."""
+        assert updater_module.unpack_via_bat_available() is True
+
+    def test_tar_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Есть tar (Windows 10 1803+) → True, PowerShell даже не пробуем."""
+        self._win(monkeypatch)
+        monkeypatch.setattr(shutil, "which", lambda name: "tar.exe" if name == "tar" else None)
+
+        def no_run(*args: object, **kwargs: object) -> None:
+            raise AssertionError("PowerShell не должен запускаться, если есть tar")
+
+        monkeypatch.setattr(subprocess, "run", no_run)
+        assert updater_module.unpack_via_bat_available() is True
+
+    def test_no_tools_at_all(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Нет ни tar, ни powershell → False (распаковка агентом)."""
+        self._win(monkeypatch)
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        assert updater_module.unpack_via_bat_available() is False
+
+    @pytest.mark.parametrize(("returncode", "expected"), [(0, True), (1, False)])
+    def test_powershell_probe(
+        self, monkeypatch: pytest.MonkeyPatch, returncode: int, expected: bool
+    ) -> None:
+        """Без tar решает наличие командлета Expand-Archive (PowerShell ≥5):
+        на Windows 7 powershell есть, а командлета нет — там фолбэк."""
+        self._win(monkeypatch)
+        monkeypatch.setattr(
+            shutil,
+            "which",
+            lambda name: "powershell.exe" if name == "powershell" else None,
+        )
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda command, **kwargs: subprocess.CompletedProcess(command, returncode, b"", b""),
+        )
+        assert updater_module.unpack_via_bat_available() is expected
+
+    def test_powershell_probe_failure_means_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Проба PowerShell упала/зависла → False, а не исключение."""
+        self._win(monkeypatch)
+        monkeypatch.setattr(
+            shutil,
+            "which",
+            lambda name: "powershell.exe" if name == "powershell" else None,
+        )
+
+        def raising_run(*args: object, **kwargs: object) -> None:
+            raise subprocess.TimeoutExpired(cmd="powershell", timeout=1)
+
+        monkeypatch.setattr(subprocess, "run", raising_run)
+        assert updater_module.unpack_via_bat_available() is False
+
+
+class TestUpdateWatchdog:
+    def test_alive_after_deadline_logs_error(
+        self,
+        install_dir: Path,
+        release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
+        spawn_calls: list[tuple[Path, Path, str]],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Процесс жив спустя UPDATE_WATCHDOG_S после запуска bat → ошибка
+        в логе агента: bat о своих провалах центру не рапортует, а лог
+        агента виден со страницы «Журнал агента» панели."""
+        monkeypatch.setattr(updater_module, "UPDATE_WATCHDOG_S", 0.03)
+        payload = _make_release_zip()
+        base_url, _ = release_server(payload)
+        updater = _make_updater(base_url, install_dir)
+
+        async def run() -> UpdateStatus:
+            status = await updater.handle(_make_command(payload))
+            # доигрываем оба таймера: spawn (0.01) и сторожок (0.03)
+            await asyncio.sleep(0.1)
+            return status
+
+        with caplog.at_level("ERROR", logger="agent.updater"):
+            status = asyncio.run(run())
+        assert status.ok is True
+        assert any("так и не была перезапущена" in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
