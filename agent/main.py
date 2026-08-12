@@ -269,6 +269,8 @@ class AgentRuntime:
 
 def build_runtime(
     config: AgentConfig,
+    *,
+    local_camera_timeouts: dict[CameraRole, float] | None = None,
 ) -> tuple[
     AgentRuntime,
     Cas22Driver,
@@ -378,6 +380,15 @@ def build_runtime(
             manual=manual,
             camera_health=camera_health,
             storage=storage,
+            # словарь снимается с СЫРОГО config.toml (main передаёт его до
+            # merge): роль, выпавшая из старого снимка центра, не должна
+            # терять локальный таймаут (замечание ревью 12.08.2026). Фолбэк
+            # на post-merge конфиг — для тестов, зовущих build_runtime напрямую
+            local_camera_timeouts=(
+                local_camera_timeouts
+                if local_camera_timeouts is not None
+                else {c.role: c.timeout_s for c in config.cameras}
+            ),
         )
     )
     runtime = AgentRuntime(
@@ -432,10 +443,14 @@ async def watch_scale(watcher: ScaleWatcher, driver: Cas22Driver, interval_s: fl
         await asyncio.sleep(interval_s)
 
 
-async def run_agent(config: AgentConfig) -> None:
+async def run_agent(
+    config: AgentConfig,
+    *,
+    local_camera_timeouts: dict[CameraRole, float] | None = None,
+) -> None:
     """Запустить агента целиком; остановка — отменой (Ctrl-C / stop службы)."""
     runtime, driver, storage, client, uploader, camera_health, watcher, auto_config = build_runtime(
-        config
+        config, local_camera_timeouts=local_camera_timeouts
     )
     driver.start()
     cleanup_orphan_photos(storage, config.storage.photos_dir)
@@ -520,9 +535,13 @@ def main() -> None:
     if args.command == "add-operator":
         _add_operator(config, args.login, args.full_name)
         return
+    # таймауты съёмки — с сырого config.toml, ДО наложения снимка центра:
+    # merge мог выбросить роль, которой нет в старом снимке, а живой
+    # scale_config позже может её вернуть — локальный таймаут должен выжить
+    local_camera_timeouts = {camera.role: camera.timeout_s for camera in config.cameras}
     config = apply_stored_settings(config)
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(run_agent(config))
+        asyncio.run(run_agent(config, local_camera_timeouts=local_camera_timeouts))
 
 
 if __name__ == "__main__":

@@ -25,7 +25,14 @@ from pathlib import Path
 
 import pytest
 
-from agent.cameras.capture import CameraConfig, CameraShot, capture, capture_all, sanitize_url
+from agent.cameras.capture import (
+    DEFAULT_TIMEOUT_S,
+    CameraConfig,
+    CameraShot,
+    capture,
+    capture_all,
+    sanitize_url,
+)
 from shared.enums import CameraRole
 
 # Валидный с точки зрения модуля JPEG: магия FF D8 + произвольное тело
@@ -156,7 +163,9 @@ class TestCameraConfig:
         """Достаточно одного snapshot_url."""
         config = CameraConfig(role=CameraRole.FRONT, snapshot_url="http://cam/snap.jpg")
         assert config.rtsp_url is None
-        assert config.timeout_s == 5.0
+        # дефолт поднят до 15 с (урок Джалал-Абада 12.08.2026: запуск
+        # ffmpeg с HDD + ключевой кадр RTSP не укладывались в 5 с)
+        assert config.timeout_s == DEFAULT_TIMEOUT_S == 15.0
 
     def test_rtsp_url_only_is_valid(self) -> None:
         """Достаточно одного rtsp_url."""

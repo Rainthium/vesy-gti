@@ -22,14 +22,14 @@ import asyncio
 import logging
 from typing import Protocol
 
-from agent.cameras.capture import CameraConfig
+from agent.cameras.capture import DEFAULT_TIMEOUT_S, CameraConfig
 from agent.config import AgentConfig, CameraSection, CycleSection, ScaleSection
 from agent.drivers.cas22 import Cas22Driver
 from agent.sync.storage import AgentStorage
 from agent.weighing.auto import AutoOperationRunner
 from agent.weighing.manual import ManualOperationFlow
 from agent.weighing.watcher import ScaleWatcher
-from shared.enums import ScaleStatus
+from shared.enums import CameraRole, ScaleStatus
 from shared.messages import ConfigStatus, ScaleConfigUpdate, ScaleSettingsPayload
 
 logger = logging.getLogger(__name__)
@@ -61,11 +61,16 @@ def merge_center_settings(config: AgentConfig, payload: ScaleSettingsPayload) ->
     # пустой список камер игнорируем (центр такого не шлёт; агент без
     # камер не смог бы провести ни одну операцию — ERR_CAMERA)
     if payload.cameras:
+        # таймаут съёмки — свойство площадки (скорость весового ПК и камер),
+        # центр им не управляет: наследуется от локальной камеры той же роли
+        # (урок Джалал-Абада 12.08.2026 — центр затирал поднятый таймаут)
+        local_timeouts = {camera.role: camera.timeout_s for camera in config.cameras}
         updates["cameras"] = [
             CameraSection(
                 role=camera.role,
                 snapshot_url=camera.snapshot_url,
                 rtsp_url=camera.rtsp_url,
+                timeout_s=local_timeouts.get(camera.role, DEFAULT_TIMEOUT_S),
             )
             for camera in payload.cameras
         ]
@@ -92,6 +97,7 @@ class SettingsManager:
         manual: ManualOperationFlow,
         camera_health: "CameraHealthLike",
         storage: AgentStorage,
+        local_camera_timeouts: dict[CameraRole, float] | None = None,
     ) -> None:
         self._driver = driver
         self._watcher = watcher
@@ -99,6 +105,9 @@ class SettingsManager:
         self._manual = manual
         self._camera_health = camera_health
         self._storage = storage
+        # таймауты съёмки локального конфига по ролям: камеры из центра
+        # наследуют их (см. merge_center_settings — та же логика при старте)
+        self._local_camera_timeouts = local_camera_timeouts or {}
         self._lock = asyncio.Lock()  # настройки применяются по одной
 
     async def handle(self, update: ScaleConfigUpdate) -> ConfigStatus:
@@ -124,6 +133,7 @@ class SettingsManager:
                     role=camera.role,
                     snapshot_url=camera.snapshot_url,
                     rtsp_url=camera.rtsp_url,
+                    timeout_s=self._local_camera_timeouts.get(camera.role, DEFAULT_TIMEOUT_S),
                 )
                 for camera in settings.cameras
             ]

@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 import agent.settings as agent_settings
-from agent.cameras.capture import CameraConfig
+from agent.cameras.capture import DEFAULT_TIMEOUT_S, CameraConfig
 from agent.config import (
     AgentConfig,
     CameraSection,
@@ -115,6 +115,35 @@ class TestMergeCenterSettings:
         ]
         assert merged.cycle == config.cycle
         assert merged.scale is config.scale
+
+    def test_center_cameras_inherit_local_timeout_by_role(self) -> None:
+        """Камеры из центра наследуют timeout_s локальной камеры той же роли:
+        таймаут — свойство площадки, центр им не управляет (урок Джалал-Абада
+        12.08.2026 — снимок центра затирал поднятый локально таймаут).
+        Роль без локальной пары получает дефолт."""
+        config = make_agent_config()
+        config = config.model_copy(
+            update={
+                "cameras": [
+                    CameraSection(
+                        role=CameraRole.FRONT,
+                        snapshot_url="http://local/front",
+                        timeout_s=25.0,
+                    )
+                ]
+            }
+        )
+        payload = ScaleSettingsPayload(
+            cameras=[
+                CameraSettings(role=CameraRole.FRONT, snapshot_url="http://u:p@10.0.0.5/front"),
+                CameraSettings(role=CameraRole.REAR, rtsp_url="rtsp://u:p@10.0.0.6/rear"),
+            ]
+        )
+        merged = merge_center_settings(config, payload)
+        assert [(c.role, c.timeout_s) for c in merged.cameras] == [
+            (CameraRole.FRONT, 25.0),
+            (CameraRole.REAR, DEFAULT_TIMEOUT_S),
+        ]
 
     def test_port_only_keeps_local_baudrate_and_driver(self) -> None:
         """scale_port без baudrate: порт из центра, скорость и драйвер локальные."""
@@ -236,7 +265,11 @@ class FakeCameraHealth:
 class ManagerEnv:
     """Собранный SettingsManager с фейками и памятью на диске (in-memory)."""
 
-    def __init__(self, watcher: Any = None) -> None:
+    def __init__(
+        self,
+        watcher: Any = None,
+        local_camera_timeouts: dict[CameraRole, float] | None = None,
+    ) -> None:
         self.driver = FakeDriver()
         # Any: сюда подставляется и FakeWatcher, и реальный ScaleWatcher
         self.watcher: Any = watcher if watcher is not None else FakeWatcher()
@@ -251,6 +284,7 @@ class ManagerEnv:
             manual=self.manual,  # type: ignore[arg-type]
             camera_health=self.camera_health,
             storage=self.storage,
+            local_camera_timeouts=local_camera_timeouts,
         )
 
     def close(self) -> None:
@@ -385,6 +419,26 @@ class TestManagerCameras:
         assert env.runner.cameras == []
         assert env.manual.cameras == []
         assert env.camera_health.cameras == []
+
+    def test_cameras_inherit_local_timeout_by_role(self) -> None:
+        """Живое применение тоже наследует локальный таймаут по роли
+        (зеркало merge_center_settings: та же логика при работе онлайн)."""
+        environment = ManagerEnv(local_camera_timeouts={CameraRole.FRONT: 25.0})
+        try:
+            payload = ScaleSettingsPayload(
+                cameras=[
+                    CameraSettings(role=CameraRole.FRONT, snapshot_url="http://u:p@10.0.0.5/f"),
+                    CameraSettings(role=CameraRole.REAR, rtsp_url="rtsp://u:p@10.0.0.6/r"),
+                ]
+            )
+            status = environment.handle(payload)
+            assert status.ok is True
+            assert [(c.role, c.timeout_s) for c in environment.runner.cameras[0]] == [
+                (CameraRole.FRONT, 25.0),
+                (CameraRole.REAR, DEFAULT_TIMEOUT_S),
+            ]
+        finally:
+            environment.close()
 
 
 # --- SettingsManager: COM-порт ---

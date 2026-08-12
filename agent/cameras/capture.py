@@ -29,7 +29,10 @@ from datetime import UTC, datetime
 from shared.enums import CameraRole
 
 JPEG_MAGIC = b"\xff\xd8"
-DEFAULT_TIMEOUT_S = 5.0
+# Урок Джалал-Абада (12.08.2026): прежних 5 с не хватало — запуск ffmpeg.exe
+# (~100 МБ) с HDD под антивирусом плюс ожидание ключевого кадра RTSP-потока
+# занимают больше. Для живой камеры это верхняя граница, а не задержка.
+DEFAULT_TIMEOUT_S = 15.0
 # качество однократного кодирования кадра из RTSP (шкала ffmpeg/mjpeg 2..31,
 # меньше — лучше; 4 ≈ JPEG q85 из architecture «Хранение фото»).
 # Снятый JPEG далее неизменен (правило №2).
