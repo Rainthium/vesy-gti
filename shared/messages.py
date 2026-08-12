@@ -24,6 +24,10 @@ from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, Weighing
 
 PROTOCOL_VERSION = 1
 
+# Потолок строк в одном ответе с журналом: сообщение WS не должно
+# распухать (строка лога бывает длинной)
+MAX_LOG_TAIL_LINES = 500
+
 # Минимальная версия агента, понимающая снимки с секретами
 # (operators_registry с pw_hash, scale_config с URL камер). Более старым
 # агентам центр их НЕ шлёт: старый ws_client логирует незнакомые сообщения
@@ -31,15 +35,30 @@ PROTOCOL_VERSION = 1
 SECURE_SYNC_MIN_VERSION = (0, 4, 0)
 
 
+# Минимальная версия агента, умеющая присылать хвост своего журнала
+# по запросу центра (удалённая диагностика без захода в сеть объекта).
+LOG_TAIL_MIN_VERSION = (0, 4, 5)
+
+
+def _version_tuple(version: str | None) -> tuple[int, ...] | None:
+    if not version:
+        return None
+    try:
+        return tuple(int(p) for p in version.split(".")[:3])
+    except ValueError:
+        return None
+
+
 def supports_secure_sync(version: str | None) -> bool:
     """Можно ли агенту этой версии слать снимки с секретами."""
-    if not version:
-        return False
-    try:
-        parts = tuple(int(p) for p in version.split(".")[:3])
-    except ValueError:
-        return False
-    return parts >= SECURE_SYNC_MIN_VERSION
+    parts = _version_tuple(version)
+    return parts is not None and parts >= SECURE_SYNC_MIN_VERSION
+
+
+def supports_log_tail(version: str | None) -> bool:
+    """Умеет ли агент этой версии отдавать хвост журнала по запросу."""
+    parts = _version_tuple(version)
+    return parts is not None and parts >= LOG_TAIL_MIN_VERSION
 
 
 class CameraStatus(BaseModel):
@@ -291,10 +310,34 @@ class OperatorsRegistryUpdate(BaseModel):
     records: list[OperatorRecord]
 
 
+class LogTailRequest(BaseModel):
+    """Центр → агент: пришли последние строки журнала службы.
+
+    Удалённая диагностика (вопрос Игоря 10.08.2026): чтобы разбирать сбой
+    объекта, не заходя в его сеть. Тот же хвост оператор видит на экране
+    «Диагностика» самого агента.
+    """
+
+    type: Literal["log_tail_request"] = "log_tail_request"
+    request_id: UUID
+    lines: int = Field(default=200, ge=1, le=MAX_LOG_TAIL_LINES)
+
+
+class LogTailResponse(BaseModel):
+    """Агент → центр: хвост журнала службы (пусто — файл недоступен)."""
+
+    type: Literal["log_tail_response"] = "log_tail_response"
+    request_id: UUID
+    agent_id: str
+    # потолок и на приёме: центр не обязан верить размеру ответа клиента
+    lines: list[str] = Field(default_factory=list, max_length=MAX_LOG_TAIL_LINES)
+    location: str = ""  # где лежит файл на весовом ПК — подсказка диспетчеру
+
+
 # --- дискриминированные объединения и разбор ---
 
 AgentMessage = Annotated[
-    Hello | Heartbeat | WeighResult | OfflineSync | UpdateStatus | ConfigStatus,
+    Hello | Heartbeat | WeighResult | OfflineSync | UpdateStatus | ConfigStatus | LogTailResponse,
     Field(discriminator="type"),
 ]
 CenterMessage = Annotated[
@@ -304,7 +347,8 @@ CenterMessage = Annotated[
     | OperatorsRegistryUpdate
     | ScaleConfigUpdate
     | HeartbeatAck
-    | UpdateCommand,
+    | UpdateCommand
+    | LogTailRequest,
     Field(discriminator="type"),
 ]
 

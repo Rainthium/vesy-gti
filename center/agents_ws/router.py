@@ -34,6 +34,7 @@ from shared.messages import (
     Heartbeat,
     HeartbeatAck,
     Hello,
+    LogTailResponse,
     OfflineSync,
     OfflineSyncAck,
     OperatorsRegistryUpdate,
@@ -183,6 +184,11 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                             " (откат COM-порта)" if message.rolled_back else "",
                             message.error,
                         )
+
+                elif isinstance(message, LogTailResponse):
+                    if not hub.resolve_log_tail(message, scale_id=scale_id):
+                        # никто не ждёт: запрос уже отвалился по тайм-ауту
+                        logger.info("весы %d: журнал пришёл поздно, отброшен", scale_id)
 
                 elif isinstance(message, UpdateStatus):
                     if message.ok:

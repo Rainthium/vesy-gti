@@ -11,11 +11,13 @@
 import asyncio
 import logging
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from shared.enums import ErrorCode
 from shared.messages import (
     EquipmentStatus,
+    LogTailRequest,
+    LogTailResponse,
     OperatorsRegistryUpdate,
     ScaleConfigUpdate,
     TareRegistryUpdate,
@@ -27,6 +29,7 @@ from shared.messages import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_WEIGH_TIMEOUT_S = 120.0  # тайм-аут всей операции взвешивания
+DEFAULT_LOG_TAIL_TIMEOUT_S = 20.0  # журнал маленький: агент отвечает за секунды
 
 
 class AgentLink(Protocol):
@@ -50,6 +53,8 @@ class AgentHub:
         self._links: dict[int, AgentLink] = {}
         # request_id -> (scale_id, future результата)
         self._pending: dict[UUID, tuple[int, asyncio.Future[WeighResult]]] = {}
+        # request_id -> (scale_id, future хвоста журнала) — удалённая диагностика
+        self._pending_logs: dict[UUID, tuple[int, asyncio.Future[LogTailResponse]]] = {}
         # последняя самодиагностика из hello/heartbeat (для дашборда панели:
         # состояние индикатора и камер на одном экране, запрос Игоря 09.08.2026)
         self._equipment: dict[int, EquipmentStatus] = {}
@@ -131,6 +136,50 @@ class AgentHub:
             ) from exc
         finally:
             self._pending.pop(request.request_id, None)
+
+    async def request_log_tail(
+        self,
+        scale_id: int,
+        *,
+        lines: int = 200,
+        timeout_s: float = DEFAULT_LOG_TAIL_TIMEOUT_S,
+    ) -> LogTailResponse:
+        """Запросить у агента хвост его журнала и дождаться ответа.
+
+        Удалённая диагностика объекта (вопрос Игоря 10.08.2026): разбирать
+        сбой, не заходя в сеть объекта. Ответ маленький, ждём недолго.
+        """
+        link = self._links.get(scale_id)
+        if link is None:
+            raise AgentHubError(ErrorCode.ERR_AGENT_OFFLINE, "нет связи с агентом объекта")
+        request = LogTailRequest(request_id=uuid4(), lines=lines)
+        future: asyncio.Future[LogTailResponse] = asyncio.get_running_loop().create_future()
+        self._pending_logs[request.request_id] = (scale_id, future)
+        try:
+            try:
+                await link.send_text(request.model_dump_json())
+            except Exception as exc:
+                raise AgentHubError(
+                    ErrorCode.ERR_AGENT_OFFLINE, "соединение с агентом оборвалось"
+                ) from exc
+            return await asyncio.wait_for(future, timeout=timeout_s)
+        except TimeoutError as exc:
+            raise AgentHubError(
+                ErrorCode.ERR_INTERNAL, "агент не прислал журнал за отведённое время"
+            ) from exc
+        finally:
+            self._pending_logs.pop(request.request_id, None)
+
+    def resolve_log_tail(self, response: LogTailResponse, *, scale_id: int) -> bool:
+        """Доставить хвост журнала ожидающему запросу; False — никто не ждал."""
+        entry = self._pending_logs.get(response.request_id)
+        if entry is None:
+            return False
+        pending_scale_id, future = entry
+        if pending_scale_id != scale_id or future.done():
+            return False
+        future.set_result(response)
+        return True
 
     async def send_update_command(self, scale_id: int, command: UpdateCommand) -> None:
         """Отправить агенту команду автообновления (без ожидания результата:

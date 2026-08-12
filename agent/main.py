@@ -332,6 +332,8 @@ def build_runtime(
     async def on_scale_config(update: ScaleConfigUpdate) -> ConfigStatus:
         return await manager_ref[0].handle(update)
 
+    # путь к журналу службы нужен и клиенту (ответ центру), и веб-интерфейсу
+    log_path = default_log_path()
     client = CenterClient(
         ClientConfig(
             url=config.center.url,
@@ -347,6 +349,10 @@ def build_runtime(
         on_update_command=updater.handle,
         on_scale_config=on_scale_config,
         on_server_time=center_clock.set_server_time,
+        on_log_tail=lambda lines: (
+            read_log_tail(log_path, lines=lines),
+            str(log_path) if log_path else "агент запущен не службой (вывод в консоль)",
+        ),
     )
     uploader = PhotoUploader(
         storage,
@@ -387,7 +393,7 @@ def build_runtime(
             online=lambda: client.connected,
         ),
         clock=center_clock,
-        log_path=default_log_path(),
+        log_path=log_path,
     )
     return runtime, driver, storage, client, uploader, camera_health, watcher, auto_config
 

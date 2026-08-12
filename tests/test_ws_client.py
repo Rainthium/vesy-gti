@@ -34,6 +34,7 @@ pytest-asyncio не используется: каждый тест — синх
 import asyncio
 import contextlib
 import socket
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar
 from uuid import UUID, uuid4
@@ -54,6 +55,8 @@ from shared.messages import (
     Heartbeat,
     HeartbeatAck,
     Hello,
+    LogTailRequest,
+    LogTailResponse,
     OfflineSync,
     OfflineSyncAck,
     OperatorRecord,
@@ -1019,5 +1022,93 @@ def test_server_time_callback_exception_keeps_session_alive() -> None:
             await scene.center.expect(Heartbeat)
             assert len(scene.center.connections) == 1
             assert scene.client.connected
+
+    run_scenario(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Хвост журнала по запросу центра (удалённая диагностика, 11.08.2026)
+# ---------------------------------------------------------------------------
+
+
+class LogTailScene(Scene):
+    """Сцена с обработчиком журнала (сигнатура CenterClient)."""
+
+    def __init__(self, handler: Callable[[int], tuple[list[str], str]]) -> None:
+        super().__init__()
+        self._handler = handler
+
+    async def __aenter__(self) -> "LogTailScene":
+        await super().__aenter__()
+        if self.run_task is not None and not self.run_task.done():
+            self.run_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.run_task
+        self.client = CenterClient(
+            make_config(self.center.url),
+            self.storage,
+            equipment_status=make_equipment,
+            on_weigh_request=echo_weigh_handler,
+            on_log_tail=self._handler,
+        )
+        self.start_client()
+        return self
+
+
+def test_log_tail_request_answered() -> None:
+    """Запрос центра → агент отвечает своим хвостом журнала и request_id."""
+    calls: list[int] = []
+
+    def handler(lines: int) -> tuple[list[str], str]:
+        calls.append(lines)
+        return (["первая", "вторая"], "C:/vesy-agent/logs/agent.log")
+
+    async def scenario() -> None:
+        async with LogTailScene(handler) as scene:
+            await scene.center.expect(Hello)
+            request = LogTailRequest(request_id=uuid4(), lines=42)
+            await scene.center.connection.send(request.model_dump_json())
+            response = await scene.center.expect(LogTailResponse)
+            assert response.request_id == request.request_id
+            assert response.lines == ["первая", "вторая"]
+            assert response.location.endswith("agent.log")
+            assert response.agent_id == "agent-test"
+            assert calls == [42], "число строк из запроса не дошло до обработчика"
+            assert scene.client.connected is True
+
+    run_scenario(scenario())
+
+
+def test_log_tail_without_handler_answers_empty() -> None:
+    """Обработчик не настроен: центр получает пустой ответ, а не тишину —
+    иначе панель ждала бы тайм-аут."""
+
+    async def scenario() -> None:
+        async with Scene() as scene:  # обычная сцена, без on_log_tail
+            await scene.center.expect(Hello)
+            request = LogTailRequest(request_id=uuid4())
+            await scene.center.connection.send(request.model_dump_json())
+            response = await scene.center.expect(LogTailResponse)
+            assert response.lines == []
+            assert scene.client.connected is True
+
+    run_scenario(scenario())
+
+
+def test_log_tail_handler_failure_keeps_session() -> None:
+    """Чтение журнала упало (файл занят, нет прав) — пустой ответ, сессия жива."""
+
+    def broken(lines: int) -> tuple[list[str], str]:
+        raise OSError("файл занят")
+
+    async def scenario() -> None:
+        async with LogTailScene(broken) as scene:
+            await scene.center.expect(Hello)
+            await scene.center.connection.send(LogTailRequest(request_id=uuid4()).model_dump_json())
+            response = await scene.center.expect(LogTailResponse)
+            assert response.lines == []
+            # соединение живо: следующий heartbeat приходит на том же канале
+            await scene.center.expect(Heartbeat)
+            assert len(scene.center.connections) == 1
 
     run_scenario(scenario())

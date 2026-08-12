@@ -81,6 +81,8 @@ from shared.messages import (
     EquipmentStatus,
     Heartbeat,
     Hello,
+    LogTailRequest,
+    LogTailResponse,
     OfflineSync,
     OperatorRecord,
     OperatorsRegistryUpdate,
@@ -1560,6 +1562,96 @@ class TestAgentsWsScaleConfig:
             # цикл приёма жив: hello после отчётов обслуживается
             registry = _hello_and_registry(ws)
             assert registry["records"] == []
+
+
+# ---------------------------------------------------------------------------
+# AgentHub: запрос журнала агента (удалённая диагностика, 11.08.2026)
+# ---------------------------------------------------------------------------
+
+
+class TestAgentHubLogTail:
+    def test_request_and_response(self) -> None:
+        """Центр шлёт запрос, агент отвечает — хвост журнала возвращается."""
+
+        async def scenario() -> None:
+            hub = AgentHub()
+            link = FakeLink()
+            hub.attach(1, link)
+            task = asyncio.create_task(hub.request_log_tail(1, lines=50))
+            await asyncio.sleep(0)
+            request = parse_center_message(link.sent[0])
+            assert isinstance(request, LogTailRequest)
+            assert request.lines == 50
+            assert hub.resolve_log_tail(
+                LogTailResponse(
+                    request_id=request.request_id,
+                    agent_id="agent-1",
+                    lines=["строка журнала"],
+                    location="C:/vesy-agent/logs/agent.log",
+                ),
+                scale_id=1,
+            )
+            response = await task
+            assert response.lines == ["строка журнала"]
+            assert response.location.endswith("agent.log")
+
+        asyncio.run(scenario())
+
+    def test_offline_agent_raises(self) -> None:
+        """Агента нет в сети — понятная ошибка, а не ожидание."""
+
+        async def scenario() -> None:
+            hub = AgentHub()
+            with pytest.raises(AgentHubError) as exc:
+                await hub.request_log_tail(42)
+            assert exc.value.code is ErrorCode.ERR_AGENT_OFFLINE
+
+        asyncio.run(scenario())
+
+    def test_timeout_raises_and_forgets_request(self) -> None:
+        """Агент молчит — ошибка по тайм-ауту, запрос не копится в памяти."""
+
+        async def scenario() -> None:
+            hub = AgentHub()
+            hub.attach(1, FakeLink())
+            with pytest.raises(AgentHubError) as exc:
+                await hub.request_log_tail(1, timeout_s=0.05)
+            assert exc.value.code is ErrorCode.ERR_INTERNAL
+            assert hub._pending_logs == {}
+
+        asyncio.run(scenario())
+
+    def test_response_from_other_scale_ignored(self) -> None:
+        """Ответ с ЧУЖИХ ВЕСОВ не закрывает запрос, даже с верным request_id."""
+
+        async def scenario() -> None:
+            hub = AgentHub()
+            link = FakeLink()
+            hub.attach(1, link)
+            task = asyncio.create_task(hub.request_log_tail(1, timeout_s=0.3))
+            await asyncio.sleep(0)
+            request = parse_center_message(link.sent[0])
+            assert isinstance(request, LogTailRequest)
+            request_id = request.request_id
+            assert not hub.resolve_log_tail(
+                LogTailResponse(request_id=request_id, agent_id="чужой", lines=["чужое"]),
+                scale_id=2,
+            )
+            with pytest.raises(AgentHubError):
+                await task
+
+        asyncio.run(scenario())
+
+    def test_late_response_is_not_an_error(self) -> None:
+        """Поздний ответ (после тайм-аута) отбрасывается без исключений."""
+
+        async def scenario() -> None:
+            hub = AgentHub()
+            assert not hub.resolve_log_tail(
+                LogTailResponse(request_id=uuid4(), agent_id="a", lines=[]), scale_id=1
+            )
+
+        asyncio.run(scenario())
 
 
 # ---------------------------------------------------------------------------

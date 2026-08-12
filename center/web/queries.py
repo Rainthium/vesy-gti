@@ -45,14 +45,22 @@ class DashboardScale:
     last_weighing: Weighing | None
 
 
-def dashboard_scales(session: Session) -> list[DashboardScale]:
-    """Сводка по всем весам: агент, статус, последняя операция."""
-    rows = session.execute(
+def dashboard_scales(session: Session, site_scope: int | None = None) -> list[DashboardScale]:
+    """Сводка по весам: агент, статус, последняя операция.
+
+    ``site_scope`` — объект, которым ограничен пользователь панели
+    (диспетчер объекта видит только свои весы, решение 11.08.2026);
+    None — видно всё (администратор и пользователи без привязки).
+    """
+    query = (
         select(Scale, Site, Agent)
         .join(Site, Site.id == Scale.site_id)
         .outerjoin(Agent, Agent.scale_id == Scale.id)
         .order_by(Site.name, Scale.name)
-    ).all()
+    )
+    if site_scope is not None:
+        query = query.where(Scale.site_id == site_scope)
+    rows = session.execute(query).all()
     result = []
     for scale, site, agent in rows:
         last = session.execute(
@@ -77,7 +85,9 @@ class JournalFilters:
     source: WeighingSource | None = None
 
 
-def _journal_query(filters: JournalFilters) -> Select[tuple[Weighing, Scale, Site]]:
+def _journal_query(
+    filters: JournalFilters, site_scope: int | None = None
+) -> Select[tuple[Weighing, Scale, Site]]:
     query = (
         select(Weighing, Scale, Site)
         .join(Scale, Scale.id == Weighing.scale_id)
@@ -86,7 +96,10 @@ def _journal_query(filters: JournalFilters) -> Select[tuple[Weighing, Scale, Sit
         # больше не сохраняются, а исторические ERR-строки скрываем
         .where(Weighing.code == ErrorCode.OK)
     )
-    if filters.site_id is not None:
+    if site_scope is not None:
+        # ограничение пользователя сильнее фильтра экрана
+        query = query.where(Site.id == site_scope)
+    elif filters.site_id is not None:
         query = query.where(Site.id == filters.site_id)
     if filters.scale_id is not None:
         query = query.where(Scale.id == filters.scale_id)
@@ -107,10 +120,15 @@ def _journal_query(filters: JournalFilters) -> Select[tuple[Weighing, Scale, Sit
 
 
 def journal_page(
-    session: Session, filters: JournalFilters, *, limit: int = 50, offset: int = 0
+    session: Session,
+    filters: JournalFilters,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    site_scope: int | None = None,
 ) -> tuple[list[tuple[Weighing, Scale, Site]], int]:
     """Страница журнала (новые первыми) и общее число записей под фильтром."""
-    query = _journal_query(filters)
+    query = _journal_query(filters, site_scope)
     total = session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
     rows = session.execute(
         query.order_by(
@@ -120,6 +138,27 @@ def journal_page(
         .offset(offset)
     ).all()
     return [tuple(row) for row in rows], int(total)
+
+
+def journal_export_rows(
+    session: Session,
+    filters: JournalFilters,
+    *,
+    limit: int,
+    site_scope: int | None = None,
+) -> list[tuple[Weighing, Scale, Site]]:
+    """Строки журнала для выгрузки: те же фильтры, но без страниц.
+
+    ``limit`` — потолок выгрузки: файл на миллион строк не нужен ни Excel,
+    ни браузеру; о срезе экран предупреждает.
+    """
+    query = _journal_query(filters, site_scope)
+    rows = session.execute(
+        query.order_by(
+            desc(func.coalesce(Weighing.weighed_at, Weighing.created_at)), desc(Weighing.id)
+        ).limit(limit)
+    ).all()
+    return [tuple(row) for row in rows]
 
 
 @dataclass(frozen=True)
@@ -134,13 +173,20 @@ class WeighingCard:
     storno_of: Weighing | None
 
 
-def weighing_card(session: Session, weighing_id: int) -> WeighingCard | None:
-    row = session.execute(
+def weighing_card(
+    session: Session, weighing_id: int, *, site_scope: int | None = None
+) -> WeighingCard | None:
+    """Карточка записи; ``site_scope`` — объект пользователя: чужая запись
+    для него не существует (404), а не «нет доступа»."""
+    query = (
         select(Weighing, Scale, Site)
         .join(Scale, Scale.id == Weighing.scale_id)
         .join(Site, Site.id == Scale.site_id)
         .where(Weighing.id == weighing_id)
-    ).one_or_none()
+    )
+    if site_scope is not None:
+        query = query.where(Site.id == site_scope)
+    row = session.execute(query).one_or_none()
     if row is None:
         return None
     weighing, scale, site = row
@@ -186,6 +232,7 @@ def tare_list(
     scale_id: int | None = None,
     limit: int = 100,
     offset: int = 0,
+    site_scope: int | None = None,
 ) -> tuple[list[tuple[TareRegistry, Weighing, Scale, Site]], int]:
     """Реестр активных тар (действующие сверху, просроченные не показываем).
 
@@ -200,7 +247,10 @@ def tare_list(
         .join(Site, Site.id == Scale.site_id)
         .where(TareRegistry.tared_at >= threshold)
     )
-    if site_id is not None:
+    if site_scope is not None:
+        # ограничение пользователя сильнее фильтра экрана
+        query = query.where(Site.id == site_scope)
+    elif site_id is not None:
         query = query.where(Site.id == site_id)
     if scale_id is not None:
         query = query.where(Scale.id == scale_id)
@@ -254,10 +304,19 @@ def _scales_with_sites(site_id: int | None = None) -> Select[tuple[Scale, Site]]
     return query
 
 
-def filter_options(session: Session) -> FilterOptions:
-    """Объекты и весы для фильтров журнала и реестра тарирований."""
-    sites = list(session.execute(select(Site).order_by(Site.name)).scalars())
-    scales = [tuple(row) for row in session.execute(_scales_with_sites()).all()]
+def filter_options(session: Session, site_scope: int | None = None) -> FilterOptions:
+    """Объекты и весы для фильтров журнала и реестра тарирований.
+
+    При ограничении по объекту в списках остаётся только он: показывать
+    диспетчеру чужие объекты в селекторе незачем.
+    """
+    sites_query = select(Site).order_by(Site.name)
+    scales_query = _scales_with_sites()
+    if site_scope is not None:
+        sites_query = sites_query.where(Site.id == site_scope)
+        scales_query = scales_query.where(Scale.site_id == site_scope)
+    sites = list(session.execute(sites_query).scalars())
+    scales = [tuple(row) for row in session.execute(scales_query).all()]
     return FilterOptions(sites=sites, scales=scales)
 
 
@@ -273,12 +332,21 @@ class RefsData:
     agents: list[tuple[Agent, Scale, Site]]
 
 
-def refs_data(session: Session, site_id: int | None = None) -> RefsData:
+def refs_data(
+    session: Session, site_id: int | None = None, *, site_scope: int | None = None
+) -> RefsData:
     """Справочники; ``site_id`` сужает весы/камеры/агентов до одного объекта
     (фильтр экрана, запрос Игоря 11.08.2026 — на 13 объектах без него
     страница нечитаема). Список sites всегда полный: он нужен селекторам.
     """
-    sites = list(session.execute(select(Site).order_by(Site.name)).scalars())
+    # пользователь, привязанный к объекту, видит только его — в том числе
+    # в селекторах (решение 11.08.2026)
+    if site_scope is not None:
+        site_id = site_scope
+    sites_query = select(Site).order_by(Site.name)
+    if site_scope is not None:
+        sites_query = sites_query.where(Site.id == site_scope)
+    sites = list(session.execute(sites_query).scalars())
     # порядок строк фиксируем до имени весов: сортировки только по объекту
     # не хватало — двое весов одного объекта возвращались в произвольном
     # порядке и прыгали между обновлениями страницы (11.08.2026)

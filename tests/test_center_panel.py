@@ -49,6 +49,7 @@ from center.db import repo
 from center.db.models import (
     Agent,
     AgentStatus,
+    AuditLog,
     Camera,
     Scale,
     ScaleKind,
@@ -56,12 +57,21 @@ from center.db.models import (
     User,
     UserRole,
     Weighing,
+    WeighingPhoto,
 )
 from center.db.session import database_url, make_session_factory
 from center.web import queries
 from center.web.router import create_panel_router
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
-from shared.messages import CameraStatus, EquipmentStatus, PhotoMeta, WeighingRecord
+from shared.messages import (
+    CameraStatus,
+    EquipmentStatus,
+    LogTailRequest,
+    LogTailResponse,
+    PhotoMeta,
+    WeighingRecord,
+    parse_center_message,
+)
 from shared.passwords import verify_password
 from tests.test_center_db import ALL_TABLES, _upgrade_head
 
@@ -1226,3 +1236,383 @@ class TestDashboardEquipment:
         )
         page = panel_env.client.get("/panel/").text
         assert "Индикатор" not in page
+
+
+# ---------------------------------------------------------------------------
+# Разграничение видимости по объекту (решение 11.08.2026, перед тиражом)
+# ---------------------------------------------------------------------------
+
+
+def _bind_user_to_site(env: PanelEnv, site_code: str) -> None:
+    """Привязать пользователя панели к объекту (как это делает админ)."""
+    with env.factory() as session:
+        site_id = session.execute(select(Site.id).where(Site.code == site_code)).scalar_one()
+        user = session.execute(select(User).where(User.login == PANEL_LOGIN)).scalar_one()
+        user.site_id = site_id
+        session.commit()
+
+
+def _make_admin(env: PanelEnv) -> None:
+    with env.factory() as session:
+        user = session.execute(select(User).where(User.login == PANEL_LOGIN)).scalar_one()
+        user.role = UserRole.ADMIN
+        session.commit()
+
+
+class TestSiteScope:
+    def test_dashboard_shows_only_own_site(self, panel_env: PanelEnv) -> None:
+        """Диспетчер объекта видит на дашборде только свои весы."""
+        _login(panel_env)
+        _bind_user_to_site(panel_env, "kyzyl-kyia")
+        page = panel_env.client.get("/panel/").text
+        assert "Кызыл-Кыя" in page
+        assert "КАНТ" not in page
+
+    def test_journal_hides_other_sites(self, panel_env: PanelEnv) -> None:
+        """В журнале не видно записей чужого объекта — даже без фильтра."""
+        _login(panel_env)
+        _bind_user_to_site(panel_env, "kyzyl-kyia")
+        page = panel_env.client.get("/panel/journal").text
+        assert "01KG777AAA" in page  # своя запись
+        assert "28BAHE03KG" not in page  # запись соседнего объекта
+
+    def test_journal_filter_cannot_widen_scope(self, panel_env: PanelEnv) -> None:
+        """Подстановка чужого site_id в адрес не расширяет видимость."""
+        _login(panel_env)
+        _bind_user_to_site(panel_env, "kyzyl-kyia")
+        with panel_env.factory() as session:
+            other_id = session.execute(select(Site.id).where(Site.code == "kant")).scalar_one()
+        page = panel_env.client.get(f"/panel/journal?site_id={other_id}").text
+        assert "28BAHE03KG" not in page, "фильтром удалось выйти за свой объект"
+
+    def test_selectors_offer_only_own_site(self, panel_env: PanelEnv) -> None:
+        """В селекторах фильтров остаётся только свой объект."""
+        _login(panel_env)
+        _bind_user_to_site(panel_env, "kyzyl-kyia")
+        page = panel_env.client.get("/panel/journal").text
+        assert "СВХ «КАНТ»" not in page
+
+    def test_foreign_record_card_is_404(self, panel_env: PanelEnv) -> None:
+        """Карточка чужой записи недоступна по прямой ссылке."""
+        _login(panel_env)
+        with panel_env.factory() as session:
+            foreign_id = session.execute(
+                select(Weighing.id).where(Weighing.vehicle_number == "28BAHE03KG")
+            ).scalar_one()
+        _bind_user_to_site(panel_env, "kyzyl-kyia")
+        assert panel_env.client.get(f"/panel/journal/{foreign_id}").status_code == 404
+        # своя запись по-прежнему открывается
+        assert panel_env.client.get(f"/panel/journal/{panel_env.weighing_id}").status_code == 200
+
+    def test_tares_limited_to_own_site(self, panel_env: PanelEnv) -> None:
+        """Реестр тарирований тоже ограничен своим объектом."""
+        _login(panel_env)
+        _bind_user_to_site(panel_env, "kant")
+        page = panel_env.client.get("/panel/tares").text
+        assert "01KG555TTT" not in page, "видна тара чужого объекта"
+
+    def test_refs_limited_to_own_site(self, panel_env: PanelEnv) -> None:
+        """Справочники показывают только свой объект."""
+        _login(panel_env)
+        _bind_user_to_site(panel_env, "kyzyl-kyia")
+        page = panel_env.client.get("/panel/refs").text
+        assert "СВХ «КАНТ»" not in page
+
+    def test_user_without_site_sees_everything(self, panel_env: PanelEnv) -> None:
+        """Диспетчер без привязки (головной офис) видит все объекты."""
+        _login(panel_env)
+        page = panel_env.client.get("/panel/").text
+        assert "Кызыл-Кыя" in page and "КАНТ" in page
+
+    def test_admin_sees_everything_despite_binding(self, panel_env: PanelEnv) -> None:
+        """Админ видит систему целиком, даже будучи привязан к объекту."""
+        _login(panel_env)
+        _bind_user_to_site(panel_env, "kyzyl-kyia")
+        _make_admin(panel_env)
+        page = panel_env.client.get("/panel/").text
+        assert "Кызыл-Кыя" in page and "КАНТ" in page
+
+    def test_binding_applies_without_relogin(self, panel_env: PanelEnv) -> None:
+        """Привязка применяется сразу: сессия не кэширует права."""
+        _login(panel_env)
+        assert "КАНТ" in panel_env.client.get("/panel/").text
+        _bind_user_to_site(panel_env, "kyzyl-kyia")
+        assert "КАНТ" not in panel_env.client.get("/panel/").text
+
+
+# ---------------------------------------------------------------------------
+# Выгрузка журнала в CSV (architecture §4.3) и пагинация тарирований
+# ---------------------------------------------------------------------------
+
+
+class TestJournalExport:
+    def test_csv_has_bom_and_semicolons(self, panel_env: PanelEnv) -> None:
+        """Файл открывается в Excel двойным щелчком: BOM + точка с запятой."""
+        _login(panel_env)
+        response = panel_env.client.get("/panel/journal/export.csv")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/csv")
+        assert "attachment" in response.headers["content-disposition"]
+        assert ".csv" in response.headers["content-disposition"]
+        text = response.content.decode("utf-8")
+        assert text.startswith("\ufeff"), "нет BOM — Excel испортит кириллицу"
+        # запятые в шапке есть («Брутто, кг»), поэтому проверяем состав колонок
+        header = text.lstrip("\ufeff").splitlines()[0].split(";")
+        assert header[:4] == ["Дата и время", "Объект", "Весы", "Номер ТС"]
+        assert len(header) == 11
+
+    def test_rows_contain_journal_data(self, panel_env: PanelEnv) -> None:
+        """В выгрузке есть записи с номерами, объектом и весами."""
+        _login(panel_env)
+        text = panel_env.client.get("/panel/journal/export.csv").content.decode("utf-8")
+        assert "01KG777AAA" in text
+        assert "СВХ «Кызыл-Кыя»" in text
+        assert "Весы SCS-80" in text
+        assert "Взвешивание" in text
+
+    def test_filters_apply(self, panel_env: PanelEnv) -> None:
+        """Выгрузка идёт под теми же фильтрами, что и экран."""
+        _login(panel_env)
+        text = panel_env.client.get("/panel/journal/export.csv?vehicle=28BAHE").content.decode(
+            "utf-8"
+        )
+        assert "28BAHE03KG" in text
+        assert "01KG777AAA" not in text
+
+    def test_scope_applies(self, panel_env: PanelEnv) -> None:
+        """Ограниченный объектом пользователь не выгрузит чужие записи."""
+        _login(panel_env)
+        _bind_user_to_site(panel_env, "kyzyl-kyia")
+        text = panel_env.client.get("/panel/journal/export.csv").content.decode("utf-8")
+        assert "01KG777AAA" in text
+        assert "28BAHE03KG" not in text
+
+    def test_requires_login(self, panel_env: PanelEnv) -> None:
+        """Без входа выгрузка недоступна."""
+        response = panel_env.client.get("/panel/journal/export.csv", follow_redirects=False)
+        assert response.status_code == 303
+
+    def test_formula_injection_neutralised(self, panel_env: PanelEnv) -> None:
+        """Номер вида «=1+1» не должен вычисляться при открытии в Excel.
+
+        Номера приходят из АИС и ручного ввода оператора, поэтому значение
+        экранируется апострофом (находка ревью 11.08.2026).
+        """
+        _login(panel_env)
+        with panel_env.factory() as session:
+            repo.save_weighing_record(
+                session, panel_env.scale_id, _make_record(vehicle_number="=1+1")
+            )
+        text = panel_env.client.get("/panel/journal/export.csv").content.decode("utf-8")
+        assert ";'=1+1;" in text
+        assert ";=1+1;" not in text
+
+    def test_truncation_is_announced(self, panel_env: PanelEnv, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """Обрезанная по потолку выгрузка честно говорит об этом в файле."""
+        import center.web.router as router_module
+
+        monkeypatch.setattr(router_module, "EXPORT_LIMIT", 1)
+        _login(panel_env)
+        text = panel_env.client.get("/panel/journal/export.csv").content.decode("utf-8")
+        assert "ВНИМАНИЕ" in text and "сузьте фильтры" in text
+
+
+class TestTaresPagination:
+    def test_pagination_block_appears(self, panel_env: PanelEnv) -> None:
+        """При числе тар больше страницы появляется переключатель страниц.
+
+        Раньше маршрут считал pages, но в шаблоне блока не было — хвост
+        реестра был недостижим (находка ревью 11.08.2026).
+        """
+        _login(panel_env)
+        with panel_env.factory() as session:
+            scale_id = panel_env.scale_id
+            for i in range(55):
+                taring = _make_taring(
+                    vehicle_number=f"01KG{i:03d}PG",
+                    weighed_at=datetime.now(UTC) - timedelta(hours=i + 1),
+                )
+                repo.save_weighing_record(session, scale_id, taring)
+
+        page1 = panel_env.client.get("/panel/tares").text
+        assert 'href="/panel/tares?page=2' in page1, "нет перехода на вторую страницу"
+        page2 = panel_env.client.get("/panel/tares?page=2").text
+        assert page2 != page1
+        # хвост реестра доступен: на второй странице есть записи
+        assert "Действует" in page2
+
+
+# ---------------------------------------------------------------------------
+# Журнал агента в панели (удалённая диагностика, 11.08.2026)
+# ---------------------------------------------------------------------------
+
+
+class _LogLink:
+    """Фейковое соединение агента: отвечает на запрос журнала."""
+
+    def __init__(self, hub: AgentHub, scale_id: int, lines: list[str]) -> None:
+        self._hub = hub
+        self._scale_id = scale_id
+        self._lines = lines
+        self.sent: list[str] = []
+
+    async def send_text(self, data: str) -> None:
+        self.sent.append(data)
+        request = parse_center_message(data)
+        assert isinstance(request, LogTailRequest)
+        self._hub.resolve_log_tail(
+            LogTailResponse(
+                request_id=request.request_id,
+                agent_id="agent-1",
+                lines=self._lines,
+                location="C:/vesy-agent/logs/agent.log",
+            ),
+            scale_id=self._scale_id,
+        )
+
+
+def _set_agent_version(env: PanelEnv, version: str) -> None:
+    with env.factory() as session:
+        agent = session.execute(select(Agent).where(Agent.scale_id == env.scale_id)).scalar_one()
+        agent.version = version
+        session.commit()
+
+
+class TestAgentLogPage:
+    def test_admin_sees_log_lines(self, panel_env: PanelEnv) -> None:
+        """Админ открывает страницу — центр спрашивает агента и показывает строки."""
+        _login(panel_env)
+        _make_admin(panel_env)
+        _set_agent_version(panel_env, "0.4.5")
+        panel_env.hub.attach(
+            panel_env.scale_id, _LogLink(panel_env.hub, panel_env.scale_id, ["строка журнала"])
+        )
+        page = panel_env.client.get(f"/panel/scales/{panel_env.scale_id}/log").text
+        assert "строка журнала" in page
+        assert "agent.log" in page
+
+    def test_log_content_escaped(self, panel_env: PanelEnv) -> None:
+        """Лог — данные: разметка из строк не исполняется."""
+        _login(panel_env)
+        _make_admin(panel_env)
+        _set_agent_version(panel_env, "0.4.5")
+        panel_env.hub.attach(
+            panel_env.scale_id,
+            _LogLink(panel_env.hub, panel_env.scale_id, ["<script>alert(1)</script>"]),
+        )
+        page = panel_env.client.get(f"/panel/scales/{panel_env.scale_id}/log").text
+        assert "<script>alert(1)</script>" not in page
+        assert "&lt;script&gt;" in page
+
+    def test_view_is_audited(self, panel_env: PanelEnv) -> None:
+        """Каждый просмотр журнала объекта попадает в аудит — по логину."""
+        _login(panel_env)
+        _make_admin(panel_env)
+        _set_agent_version(panel_env, "0.4.5")
+        panel_env.hub.attach(
+            panel_env.scale_id, _LogLink(panel_env.hub, panel_env.scale_id, ["строка"])
+        )
+        panel_env.client.get(f"/panel/scales/{panel_env.scale_id}/log")
+        with panel_env.factory() as session:
+            entry = session.execute(
+                select(AuditLog).where(AuditLog.action == "agent_log_view")
+            ).scalar_one()
+        assert entry.actor == f"panel:{PANEL_LOGIN}", "в аудите должен быть логин"
+        assert entry.details == {"scale_id": panel_env.scale_id}
+
+    def test_dispatcher_forbidden(self, panel_env: PanelEnv) -> None:
+        """Диспетчеру журнал агента недоступен (403)."""
+        _login(panel_env)
+        response = panel_env.client.get(f"/panel/scales/{panel_env.scale_id}/log")
+        assert response.status_code == 403
+
+    def test_old_agent_explained(self, panel_env: PanelEnv) -> None:
+        """Агент старой версии запроса не получает — панель объясняет почему."""
+        _login(panel_env)
+        _make_admin(panel_env)
+        _set_agent_version(panel_env, "0.4.4")
+        link = _LogLink(panel_env.hub, panel_env.scale_id, ["не должно уехать"])
+        panel_env.hub.attach(panel_env.scale_id, link)
+        page = panel_env.client.get(f"/panel/scales/{panel_env.scale_id}/log").text
+        assert "0.4.5" in page and "обновите" in page.lower()
+        assert link.sent == [], "старому агенту ушёл запрос журнала"
+
+    def test_offline_agent_explained(self, panel_env: PanelEnv) -> None:
+        """Агент не в сети — понятное объяснение вместо ожидания."""
+        _login(panel_env)
+        _make_admin(panel_env)
+        _set_agent_version(panel_env, "0.4.5")
+        page = panel_env.client.get(f"/panel/scales/{panel_env.scale_id}/log").text
+        assert "не в сети" in page
+
+    def test_unknown_scale_404(self, panel_env: PanelEnv) -> None:
+        """Несуществующие весы — 404."""
+        _login(panel_env)
+        _make_admin(panel_env)
+        assert panel_env.client.get("/panel/scales/9999/log").status_code == 404
+
+
+class TestUpdateAgentPermissions:
+    def test_dispatcher_cannot_update_agent(self, panel_env: PanelEnv) -> None:
+        """Обновление агента — сервисное действие с простоем весов: только админ.
+
+        Раньше маршрут требовал лишь входа в панель, и диспетчер чужого
+        объекта мог перезапустить службу подбором scale_id (находка ревью).
+        """
+        _login(panel_env)
+        response = panel_env.client.post(
+            f"/panel/scales/{panel_env.scale_id}/update-agent", follow_redirects=False
+        )
+        assert response.status_code == 403
+
+    def test_admin_can_update_agent(self, panel_env: PanelEnv) -> None:
+        """Админу маршрут доступен (релизов нет — вернётся заметка)."""
+        _login(panel_env)
+        _make_admin(panel_env)
+        response = panel_env.client.post(
+            f"/panel/scales/{panel_env.scale_id}/update-agent", follow_redirects=False
+        )
+        assert response.status_code == 303
+
+
+class TestDisabledUserLosesAccess:
+    def test_disabling_user_does_not_widen_visibility(self, panel_env: PanelEnv) -> None:
+        """Отключение учётки при живой сессии закрывает панель, а НЕ открывает
+        её целиком (находка ревью 11.08.2026: fail-open в правах)."""
+        _login(panel_env)
+        _bind_user_to_site(panel_env, "kyzyl-kyia")
+        assert "КАНТ" not in panel_env.client.get("/panel/").text
+        with panel_env.factory() as session:
+            user = session.execute(select(User).where(User.login == PANEL_LOGIN)).scalar_one()
+            user.is_active = False
+            session.commit()
+        response = panel_env.client.get("/panel/", follow_redirects=False)
+        assert response.status_code == 303
+        export = panel_env.client.get("/panel/journal/export.csv", follow_redirects=False)
+        assert export.status_code == 303
+
+
+class TestPanelPhotoScope:
+    def test_foreign_photo_not_served(self, panel_env: PanelEnv) -> None:
+        """Снимок чужого объекта не отдаётся даже по прямому пути."""
+        _login(panel_env)
+        with panel_env.factory() as session:
+            path = session.execute(select(WeighingPhoto.path)).scalars().first()
+        assert path is not None
+        file = panel_env.photos_dir / path.lstrip("/")
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_bytes(b"\xff\xd8jpeg\xff\xd9")
+
+        thumb = path.replace(".jpeg", "_thumb.jpeg")
+        thumb_file = panel_env.photos_dir / thumb.lstrip("/")
+        thumb_file.write_bytes(b"\xff\xd8thumb\xff\xd9")
+
+        assert panel_env.client.get(f"/panel/photos{path}").status_code == 200
+        _bind_user_to_site(panel_env, "kyzyl-kyia")  # свой объект: и кадр, и миниатюра
+        assert panel_env.client.get(f"/panel/photos{path}").status_code == 200
+        assert panel_env.client.get(f"/panel/photos{thumb}").status_code == 200, (
+            "миниатюра своего объекта не отдалась — в списках были бы пустые квадраты"
+        )
+        _bind_user_to_site(panel_env, "kant")  # объект, которому снимок не принадлежит
+        assert panel_env.client.get(f"/panel/photos{path}").status_code == 404
+        assert panel_env.client.get(f"/panel/photos{thumb}").status_code == 404

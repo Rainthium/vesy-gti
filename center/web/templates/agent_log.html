@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Журнал агента — {{ scale.name }} — Весовая система{% endblock %}
+{% block body %}
+{% set active_tab = 'dashboard' %}
+{% include "_header.html" %}
+<main class="content">
+  <div class="page-head">
+    <h1>Журнал агента</h1>
+    <span class="page-meta">{{ site.name }} · {{ scale.name }}{% if location %} · {{ location }}{% endif %}</span>
+  </div>
+
+  {% if error %}
+  <div class="flash-note">{{ error }}</div>
+  {% endif %}
+
+  <div class="table-card">
+    {% if lines %}
+    <pre class="log-tail">{% for line in lines %}{{ line }}
+{% endfor %}</pre>
+    {% elif not error %}
+    <p class="empty">Журнал пуст: агент запущен не службой либо файл ещё не создан.</p>
+    {% endif %}
+    <div class="log-actions">
+      <a class="btn-outline" href="/panel/scales/{{ scale.id }}/log">Запросить снова</a>
+      <a class="btn-outline" href="/panel/">К объектам</a>
+      <span class="page-meta">журнал запрашивается у агента в момент открытия страницы</span>
+    </div>
+  </div>
+</main>
+{% endblock %}

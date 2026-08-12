@@ -41,6 +41,8 @@ from shared.messages import (
     Heartbeat,
     HeartbeatAck,
     Hello,
+    LogTailRequest,
+    LogTailResponse,
     OfflineSync,
     OfflineSyncAck,
     OperatorsRegistryUpdate,
@@ -94,6 +96,7 @@ class CenterClient:
         on_update_command: Callable[[UpdateCommand], Awaitable[UpdateStatus]] | None = None,
         on_scale_config: Callable[[ScaleConfigUpdate], Awaitable[ConfigStatus]] | None = None,
         on_server_time: Callable[[datetime], None] | None = None,
+        on_log_tail: Callable[[int], tuple[list[str], str]] | None = None,
     ) -> None:
         self._config = config
         self._storage = storage
@@ -102,6 +105,7 @@ class CenterClient:
         self._on_update_command = on_update_command
         self._on_scale_config = on_scale_config
         self._on_server_time = on_server_time
+        self._on_log_tail = on_log_tail
         self._connected = asyncio.Event()
         self._stopping = False
         self._request_tasks: set[asyncio.Task[None]] = set()
@@ -219,6 +223,39 @@ class CenterClient:
                 self._spawn_config_handler(connection, message)
             elif isinstance(message, UpdateCommand):
                 self._spawn_update_handler(connection, message)
+            elif isinstance(message, LogTailRequest):
+                await self._send_log_tail(connection, message)
+
+    async def _send_log_tail(
+        self, connection: websockets.ClientConnection, request: LogTailRequest
+    ) -> None:
+        """Ответить центру хвостом журнала службы (удалённая диагностика).
+
+        Чтение файла — в потоке: журнал бывает большим, а heartbeat в это
+        время замирать не должен. Ошибка чтения не рвёт соединение: центр
+        получит пустой ответ и покажет, что журнал недоступен.
+        """
+        lines: list[str] = []
+        location = ""
+        if self._on_log_tail is None:
+            logger.warning("запрошен журнал, но обработчик не настроен")
+        else:
+            try:
+                lines, location = await asyncio.to_thread(self._on_log_tail, request.lines)
+            except Exception:
+                logger.exception("чтение журнала для центра упало")
+        response = LogTailResponse(
+            request_id=request.request_id,
+            agent_id=self._config.agent_id,
+            lines=lines,
+            location=location,
+        )
+        with contextlib.suppress(Exception):
+            await connection.send(response.model_dump_json())
+        if lines:
+            logger.info("журнал отправлен центру: %d строк", len(lines))
+        else:
+            logger.warning("центру отправлен пустой журнал (файл недоступен)")
 
     def _spawn_config_handler(
         self, connection: websockets.ClientConnection, update: ScaleConfigUpdate

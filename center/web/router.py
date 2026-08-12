@@ -14,35 +14,52 @@
 
 import asyncio
 import contextlib
+import csv
+import io
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from center.agents_ws.hub import AgentHub, AgentHubError
 from center.db import repo
-from center.db.models import ReleaseChannel, Scale, ScaleKind, Site, UserRole
+from center.db.models import (
+    Agent,
+    AuditLog,
+    ReleaseChannel,
+    Scale,
+    ScaleKind,
+    Site,
+    UserRole,
+    Weighing,
+)
 from center.releases import AgentRelease, latest_release
 from center.web import queries, refs_admin, users_admin
-from shared.enums import CameraRole, WeighingSource
+from shared.enums import CameraRole, Operation, WeighingSource
 from shared.messages import (
     CycleSettings,
     EquipmentStatus,
     OperatorsRegistryUpdate,
     ScaleConfigUpdate,
     UpdateCommand,
+    supports_log_tail,
     supports_secure_sync,
 )
 
 logger = logging.getLogger(__name__)
+
+LOG_TAIL_LINES = 200  # сколько строк журнала просить у агента
+EXPORT_LIMIT = 20_000  # потолок строк выгрузки (Excel и браузер не резиновые)
 
 SessionFactory = Callable[[], Session]
 
@@ -50,6 +67,26 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 BISHKEK = ZoneInfo("Asia/Bishkek")
 PAGE_SIZE = 50
 MAX_DB_ID = 2**31 - 1  # id таблиц — int4; больше в запрос пускать нельзя
+
+
+def _csv_number(value: float | None) -> str:
+    """Число для CSV: пусто вместо None, вес целыми килограммами."""
+    if value is None:
+        return ""
+    return f"{value:.0f}"
+
+
+def _csv_text(value: str | None) -> str:
+    """Текст для CSV с защитой от формул Excel.
+
+    Номера ТС приходят из АИС и ручного ввода оператора: значение вроде
+    «=1+1» Excel вычислил бы при открытии файла (находка ревью
+    11.08.2026). Апостроф впереди заставляет показать текст как есть.
+    """
+    text = (value or "").strip()
+    if text[:1] in {"=", "+", "-", "@"}:  # табуляция и \r срезаны strip
+        return "'" + text
+    return text
 
 
 def _fmt_dt(value: datetime | None) -> str:
@@ -104,6 +141,27 @@ def create_panel_router(
         return str(user)
 
     PanelUser = Annotated[str, Depends(current_user)]
+
+    async def current_scope(request: Request) -> int | None:
+        """Объект, которым ограничен пользователь панели (None — все).
+
+        Права берём из БД на каждый запрос, как и у админа: смена
+        привязки или роли применяется сразу, без перевхода. Админ видит
+        все объекты; остальные — только свой, если он задан (решение
+        11.08.2026, перед тиражом на 13 объектов).
+        """
+        login = request.session.get("panel_login")
+        if not login:
+            raise HTTPException(status_code=303, headers={"Location": "/panel/login"})
+        active, site_id = await asyncio.to_thread(
+            _db, lambda s: users_admin.visible_site_id(s, str(login))
+        )
+        if not active:
+            # учётку отключили при живой сессии — на вход, а не «видно всё»
+            raise HTTPException(status_code=303, headers={"Location": "/panel/login"})
+        return site_id
+
+    PanelScope = Annotated[int | None, Depends(current_scope)]
 
     def render(template: str, request: Request, **extra: Any) -> HTMLResponse:
         context: dict[str, Any] = {"request": request, **extra}
@@ -169,8 +227,8 @@ def create_panel_router(
         return await asyncio.to_thread(latest_release, releases_dir)
 
     @router.get("/", response_class=HTMLResponse)
-    async def dashboard(request: Request, user: PanelUser) -> HTMLResponse:
-        scales = await asyncio.to_thread(_db, queries.dashboard_scales)
+    async def dashboard(request: Request, user: PanelUser, scope: PanelScope) -> HTMLResponse:
+        scales = await asyncio.to_thread(_db, lambda s: queries.dashboard_scales(s, scope))
         return render(
             "dashboard.html",
             request,
@@ -182,8 +240,10 @@ def create_panel_router(
         )
 
     @router.get("/fragments/dashboard", response_class=HTMLResponse)
-    async def dashboard_fragment(request: Request, user: PanelUser) -> HTMLResponse:
-        scales = await asyncio.to_thread(_db, queries.dashboard_scales)
+    async def dashboard_fragment(
+        request: Request, user: PanelUser, scope: PanelScope
+    ) -> HTMLResponse:
+        scales = await asyncio.to_thread(_db, lambda s: queries.dashboard_scales(s, scope))
         return render(
             "fragments/dashboard_grid.html",
             request,
@@ -194,8 +254,13 @@ def create_panel_router(
         )
 
     @router.post("/scales/{scale_id}/update-agent")
-    async def update_agent(request: Request, user: PanelUser, scale_id: int) -> RedirectResponse:
-        """Разослать агенту команду автообновления до актуального релиза."""
+    async def update_agent(request: Request, admin: PanelAdmin, scale_id: int) -> RedirectResponse:
+        """Разослать агенту команду автообновления до актуального релиза.
+
+        Только админ: перезапуск службы — простой весов, и запускать его
+        чужому объекту по подобранному scale_id нельзя (находка ревью
+        11.08.2026: прежде маршрут требовал лишь входа в панель).
+        """
         release = await _latest_release()
         if release is None:
             note = "релизы агента на центр не выложены"
@@ -211,10 +276,100 @@ def create_panel_router(
             try:
                 await hub.send_update_command(scale_id, command)
                 note = f"команда обновления до v{release.version} отправлена агенту"
-                logger.info("панель (%s): весы %d — %s", user, scale_id, note)
+                logger.info("панель (%s): весы %d — %s", admin, scale_id, note)
             except AgentHubError as exc:
                 note = str(exc)
         return RedirectResponse(f"/panel/?update_note={quote(note)}", status_code=303)
+
+    def _agent_of(session: Session, scale_id: int) -> Agent | None:
+        return session.execute(select(Agent).where(Agent.scale_id == scale_id)).scalar_one_or_none()
+
+    def _photo_belongs_to_site(session: Session, file_path: str, site_id: int) -> bool:
+        """Принадлежит ли снимок объекту (uuid из имени файла → весы → объект).
+
+        Канонический путь центра — ``/vesy/ГГГГ/ММ/ДД/<uuid.hex>_photoN.jpeg``,
+        поэтому запись находится по uuid: он уникален и проиндексирован, а
+        поиск по самому пути был бы полным просмотром таблицы (замечание
+        ревью 11.08.2026). Миниатюры (``..._thumb.jpeg``) в БД не числятся —
+        они производные от кадра и живут по правам оригинала.
+        """
+        name = Path(file_path).name
+        hex_part = name.split("_", 1)[0]
+        try:
+            record_uuid = UUID(hex=hex_part)
+        except ValueError:
+            return False
+        return (
+            session.execute(
+                select(Weighing.id)
+                .join(Scale, Scale.id == Weighing.scale_id)
+                .where(Weighing.uuid == record_uuid, Scale.site_id == site_id)
+            ).first()
+            is not None
+        )
+
+    def _audit_log_view(session: Session, user: str, scale_id: int) -> None:
+        """Кто и когда смотрел журнал объекта (как у скачивания фото)."""
+        session.add(
+            AuditLog(
+                actor=f"panel:{user}",
+                action="agent_log_view",
+                details={"scale_id": scale_id},
+            )
+        )
+        session.commit()
+
+    @router.get("/scales/{scale_id}/log", response_class=HTMLResponse)
+    async def agent_log_page(
+        request: Request, user: PanelUser, admin: PanelAdmin, scale_id: int
+    ) -> HTMLResponse:
+        """Журнал агента, запрошенный у него по WS (удалённая диагностика).
+
+        Только админ: в строках лога может оказаться чувствительное
+        (адреса камер, диагностика сети объекта). Каждый запрос пишется
+        в аудит — кто и когда смотрел журнал объекта.
+        """
+        row = await asyncio.to_thread(
+            _db,
+            lambda s: (
+                None
+                if (scale := s.get(Scale, scale_id)) is None
+                else (scale, s.get(Site, scale.site_id), _agent_of(s, scale_id))
+            ),
+        )
+        if row is None:
+            raise HTTPException(status_code=404)
+        scale, site, agent = row
+        lines: list[str] = []
+        location = ""
+        error: str | None = None
+        if agent is None:
+            error = "агент для этих весов не заведён"
+        elif not hub.connected(scale_id):
+            error = "агент не в сети — журнал доступен только при связи"
+        elif not supports_log_tail(agent.version):
+            error = (
+                f"агент версии {agent.version or '—'} не умеет присылать журнал "
+                "(нужна 0.4.5 или новее — обновите агента кнопкой на дашборде)"
+            )
+        else:
+            try:
+                response = await hub.request_log_tail(scale_id, lines=LOG_TAIL_LINES)
+                lines, location = response.lines, response.location
+                await asyncio.to_thread(_db, lambda s: _audit_log_view(s, admin, scale_id))
+                logger.info("панель (%s): запрошен журнал агента весов %d", admin, scale_id)
+            except AgentHubError as exc:
+                error = str(exc)
+        return render(
+            "agent_log.html",
+            request,
+            user=user,
+            scale=scale,
+            site=site,
+            lines=lines,
+            location=location,
+            error=error,
+        )
 
     def _parse_id(raw: str) -> int | None:
         """Числовой параметр фильтра из строки запроса.
@@ -280,6 +435,7 @@ def create_panel_router(
     async def journal(
         request: Request,
         user: PanelUser,
+        scope: PanelScope,
         site_id: str = "",
         scale_id: str = "",
         date_from: str | None = None,
@@ -288,7 +444,7 @@ def create_panel_router(
         source: str | None = None,
         page: int = 1,
     ) -> HTMLResponse:
-        refs = await asyncio.to_thread(_db, queries.filter_options)
+        refs = await asyncio.to_thread(_db, lambda s: queries.filter_options(s, scope))
         site = _parse_id(site_id)
         scale = _scale_of_site(refs, _parse_id(scale_id), site)
         filters = _parse_filters(site, scale, date_from, date_to, vehicle, source)
@@ -296,7 +452,7 @@ def create_panel_router(
         rows, total = await asyncio.to_thread(
             _db,
             lambda s: queries.journal_page(
-                s, filters, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE
+                s, filters, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE, site_scope=scope
             ),
         )
         photos = await asyncio.to_thread(
@@ -322,9 +478,86 @@ def create_panel_router(
             },
         )
 
+    @router.get("/journal/export.csv")
+    async def journal_export(
+        request: Request,
+        user: PanelUser,
+        scope: PanelScope,
+        site_id: str = "",
+        scale_id: str = "",
+        date_from: str | None = None,
+        date_to: str | None = None,
+        vehicle: str | None = None,
+        source: str | None = None,
+    ) -> Response:
+        """Выгрузка журнала под текущими фильтрами (architecture §4.3).
+
+        CSV с BOM и точкой с запятой: Excel открывает такой файл двойным
+        щелчком, без мастера импорта. Ограничения пользователя по объекту
+        действуют и здесь — выгрузить чужой объект нельзя.
+        """
+        refs = await asyncio.to_thread(_db, lambda s: queries.filter_options(s, scope))
+        site = _parse_id(site_id)
+        scale = _scale_of_site(refs, _parse_id(scale_id), site)
+        filters = _parse_filters(site, scale, date_from, date_to, vehicle, source)
+        rows = await asyncio.to_thread(
+            _db,
+            lambda s: queries.journal_export_rows(s, filters, limit=EXPORT_LIMIT, site_scope=scope),
+        )
+        logger.info("панель (%s): выгрузка журнала, строк %d", user, len(rows))
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, delimiter=";", lineterminator="\r\n")
+        writer.writerow(
+            [
+                "Дата и время",
+                "Объект",
+                "Весы",
+                "Номер ТС",
+                "Прицеп",
+                "Операция",
+                "Брутто, кг",
+                "Тара, кг",
+                "Нетто, кг",
+                "Источник",
+                "Оператор",
+            ]
+        )
+        for weighing, scale_row, site_row in rows:
+            moment = weighing.weighed_at or weighing.created_at
+            writer.writerow(
+                [
+                    _fmt_dt(moment),
+                    _csv_text(site_row.name),
+                    _csv_text(scale_row.name),
+                    _csv_text(weighing.vehicle_number),
+                    _csv_text(weighing.trailer_number),
+                    "Взвешивание" if weighing.operation is Operation.WEIGHING else "Тарирование",
+                    _csv_number(weighing.massa),
+                    _csv_number(weighing.tare_value),
+                    _csv_number(weighing.netto),
+                    "АИС" if weighing.source is WeighingSource.AIS else "Вручную (офлайн)",
+                    _csv_text(weighing.operator),
+                ]
+            )
+        if len(rows) == EXPORT_LIMIT:
+            # молча обрезанный отчёт хуже отсутствующего: пишем в файл
+            writer.writerow([f"ВНИМАНИЕ: показаны первые {EXPORT_LIMIT} строк — сузьте фильтры"])
+            logger.warning("панель (%s): выгрузка обрезана по потолку", user)
+        stamp = datetime.now(BISHKEK).strftime("%Y-%m-%d_%H-%M")
+        body = "\ufeff" + buffer.getvalue()  # BOM: Excel понимает UTF-8
+        return Response(
+            content=body.encode("utf-8"),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="vzveshivaniya_{stamp}.csv"'},
+        )
+
     @router.get("/journal/{weighing_id}", response_class=HTMLResponse)
-    async def journal_card(request: Request, user: PanelUser, weighing_id: int) -> HTMLResponse:
-        card = await asyncio.to_thread(_db, lambda s: queries.weighing_card(s, weighing_id))
+    async def journal_card(
+        request: Request, user: PanelUser, scope: PanelScope, weighing_id: int
+    ) -> HTMLResponse:
+        card = await asyncio.to_thread(
+            _db, lambda s: queries.weighing_card(s, weighing_id, site_scope=scope)
+        )
         if card is None:
             raise HTTPException(status_code=404)
         return render("record.html", request, user=user, card=card)
@@ -333,12 +566,13 @@ def create_panel_router(
     async def tares(
         request: Request,
         user: PanelUser,
+        scope: PanelScope,
         search: str | None = None,
         site_id: str = "",
         scale_id: str = "",
         page: int = 1,
     ) -> HTMLResponse:
-        refs = await asyncio.to_thread(_db, queries.filter_options)
+        refs = await asyncio.to_thread(_db, lambda s: queries.filter_options(s, scope))
         site = _parse_id(site_id)
         scale = _scale_of_site(refs, _parse_id(scale_id), site)
         page = max(1, page)
@@ -351,6 +585,7 @@ def create_panel_router(
                 scale_id=scale,
                 limit=PAGE_SIZE,
                 offset=(page - 1) * PAGE_SIZE,
+                site_scope=scope,
             ),
         )
         photos = await asyncio.to_thread(
@@ -371,13 +606,17 @@ def create_panel_router(
         )
 
     @router.get("/refs", response_class=HTMLResponse)
-    async def refs(request: Request, user: PanelUser, site: str = "") -> HTMLResponse:
+    async def refs(
+        request: Request, user: PanelUser, scope: PanelScope, site: str = ""
+    ) -> HTMLResponse:
         # общий фильтр по объекту: сужает весы/агентов/камеры разом
         # (запрос Игоря 11.08.2026); мусорное значение = «все объекты»
         site_filter, site_ok = _parse_site_id(site)
         if not site_ok:
             site_filter = None
-        data = await asyncio.to_thread(_db, lambda s: queries.refs_data(s, site_filter))
+        data = await asyncio.to_thread(
+            _db, lambda s: queries.refs_data(s, site_filter, site_scope=scope)
+        )
         # токен агента из flash-сессии: показывается ОДИН раз после выпуска
         # (в URL секретам не место, поэтому не query-параметром)
         agent_token = request.session.pop("refs_agent_token", None)
@@ -876,10 +1115,22 @@ def create_panel_router(
     # --- фото для пользователей панели (по сессии, не по сервисному токену) ---
 
     @router.get("/photos/{file_path:path}")
-    def panel_photo(file_path: str, user: PanelUser) -> Response:
+    async def panel_photo(file_path: str, user: PanelUser, scope: PanelScope) -> Response:
+        """Снимок записи для экранов панели.
+
+        Ограничение по объекту действует и здесь: путь содержит uuid
+        записи и сам по себе неугадываем, но держать доступ только на
+        неугадываемости нельзя (замечание ревью 11.08.2026).
+        """
         full = (photos_dir / file_path.lstrip("/")).resolve()
         if not full.is_relative_to(photos_dir.resolve()) or not full.is_file():
             raise HTTPException(status_code=404)
+        if scope is not None:
+            allowed = await asyncio.to_thread(
+                _db, lambda s: _photo_belongs_to_site(s, file_path, scope)
+            )
+            if not allowed:
+                raise HTTPException(status_code=404)
         return FileResponse(full, media_type="image/jpeg")
 
     return router

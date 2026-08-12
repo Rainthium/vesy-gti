@@ -21,6 +21,8 @@
       <option value="local_offline" {{ 'selected' if filters.source == 'local_offline' else '' }}>Вручную (офлайн)</option>
     </select>
     <button type="submit" class="btn-primary">Показать</button>
+    <a class="btn-outline" title="Выгрузить в CSV (открывается в Excel)"
+       href="/panel/journal/export.csv?site_id={{ filters.site_id or '' }}&scale_id={{ filters.scale_id or '' }}&date_from={{ filters.date_from | urlencode }}&date_to={{ filters.date_to | urlencode }}&vehicle={{ filters.vehicle | urlencode }}&source={{ filters.source | urlencode }}">Выгрузить</a>
   </form>
   <div class="table-card">
     <div class="journal-scroll">

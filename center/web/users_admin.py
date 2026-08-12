@@ -189,3 +189,27 @@ def is_active_admin(session: Session, login: str) -> bool:
         select(User).where(User.login == login, User.is_active)
     ).scalar_one_or_none()
     return user is not None and user.role is UserRole.ADMIN
+
+
+def visible_site_id(session: Session, login: str) -> tuple[bool, int | None]:
+    """(активен ли пользователь, объект-ограничение); None — видно всё.
+
+    Решение 11.08.2026 (перед тиражом на 13 объектов): администратор
+    видит систему целиком, остальные — только объект своей привязки.
+    Пользователь без привязки (site_id NULL) видит всё: так заведены
+    диспетчеры головного офиса. Права читаются по БД на каждый запрос —
+    смена привязки применяется сразу, без перевхода.
+
+    Первый элемент отделяет «нет ограничений» от «пользователя нет или
+    он отключён»: иначе отключение УВЕЛИЧИВАЛО бы видимость живой
+    сессии — уволенный сотрудник с открытой вкладкой видел бы все
+    объекты (находка ревью 11.08.2026).
+    """
+    user = session.execute(
+        select(User).where(User.login == login, User.is_active)
+    ).scalar_one_or_none()
+    if user is None:
+        return False, None
+    if user.role is UserRole.ADMIN:
+        return True, None
+    return True, user.site_id
