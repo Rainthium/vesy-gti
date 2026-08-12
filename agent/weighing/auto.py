@@ -40,7 +40,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from agent.cameras.capture import CameraConfig, capture_all
+from agent.cameras.capture import CameraConfig
+from agent.cameras.stream import CameraStreams, shots_or_capture_all
 from agent.drivers.base import ScaleState
 from agent.sync.storage import AgentStorage, photo_meta
 from agent.weighing.cycle import CycleConfig
@@ -78,6 +79,7 @@ class AutoOperationRunner:
         photos_dir: str | Path,
         config: AutoConfig | None = None,
         ffmpeg_path: str = "ffmpeg",
+        streams: CameraStreams | None = None,
         clock: Callable[[], float] = time.monotonic,
         now_utc: Callable[[], datetime] | None = None,
     ) -> None:
@@ -88,6 +90,8 @@ class AutoOperationRunner:
         self._photos_dir = Path(photos_dir)
         self._config = config or AutoConfig()
         self._ffmpeg_path = ffmpeg_path
+        # буфер потоковых камер: кадр мгновенно, без RTSP-подключения
+        self._streams = streams
         self._clock = clock
         # время записи: часы центра (agent/clock.py), по умолчанию локальные
         self._now_utc = now_utc or (lambda: datetime.now(UTC))
@@ -194,7 +198,9 @@ class AutoOperationRunner:
         """Финал операции: снимки обеих камер → запись журнала."""
         weighed_at = self._now_utc()
         # блокирующий HTTP/ffmpeg — в поток, чтобы heartbeat не замирал
-        shots = await asyncio.to_thread(capture_all, self._cameras, ffmpeg_path=self._ffmpeg_path)
+        shots = await asyncio.to_thread(
+            shots_or_capture_all, self._cameras, self._streams, ffmpeg_path=self._ffmpeg_path
+        )
         camera_errors = [shot.error or "камера недоступна" for shot in shots if not shot.ok]
         if camera_errors:
             # решение Игоря 09.08.2026: без снимков ОБЕИХ камер операция

@@ -41,6 +41,12 @@ class CameraHealthLike(Protocol):
     def set_cameras(self, cameras: list[CameraConfig]) -> None: ...
 
 
+class CameraStreamsLike(Protocol):
+    """Минимум от потоков камер (реализация — cameras.stream.CameraStreams)."""
+
+    def set_cameras(self, cameras: list[CameraConfig]) -> None: ...
+
+
 # ожидание живого индикатора после смены порта: живой cas22 шлёт поток
 # непрерывно, статус OK появляется за ~1-2 с после открытия порта; запас
 # покрывает пару циклов переоткрытия драйвера (rx_error_timeout_s=3 +
@@ -97,6 +103,7 @@ class SettingsManager:
         manual: ManualOperationFlow,
         camera_health: "CameraHealthLike",
         storage: AgentStorage,
+        camera_streams: "CameraStreamsLike | None" = None,
         local_camera_timeouts: dict[CameraRole, float] | None = None,
     ) -> None:
         self._driver = driver
@@ -104,6 +111,8 @@ class SettingsManager:
         self._runner = runner
         self._manual = manual
         self._camera_health = camera_health
+        # потоки RTSP-камер: смена URL из центра пересоздаёт их на лету
+        self._camera_streams = camera_streams
         self._storage = storage
         # таймауты съёмки локального конфига по ролям: камеры из центра
         # наследуют их (см. merge_center_settings — та же логика при старте)
@@ -140,6 +149,8 @@ class SettingsManager:
             self._runner.set_cameras(cameras)
             self._manual.set_cameras(cameras)
             self._camera_health.set_cameras(cameras)
+            if self._camera_streams is not None:
+                self._camera_streams.set_cameras(cameras)
             logger.info("настройки центра: камеры применены (%d)", len(cameras))
 
         status = ConfigStatus(ok=True)

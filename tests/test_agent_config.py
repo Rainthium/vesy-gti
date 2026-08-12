@@ -245,9 +245,10 @@ class TestBuildRuntime:
                 }
             )
         )
-        runtime, _driver, storage, _client, _uploader, _camera_health, _watcher, _auto = (
+        runtime, _driver, storage, _client, _uploader, _camera_health, _watcher, _auto, streams = (
             build_runtime(config)
         )
+        streams.stop_all()
         try:
             info = runtime.info
             assert info.site_name == "Тестовый объект"
@@ -360,7 +361,8 @@ class TestBuildRuntime:
                 }
             )
         )
-        runtime, _, storage, _, _, _, _, _ = build_runtime(config)
+        runtime, _, storage, _, _, _, _, _, streams = build_runtime(config)
+        streams.stop_all()
         try:
             with pytest.raises(ValueError, match="не настроена"):
                 runtime.camera_snapshot(CameraRole.REAR)

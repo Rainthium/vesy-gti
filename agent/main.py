@@ -23,6 +23,8 @@ import contextlib
 import getpass
 import logging
 import sys
+import threading
+import time
 import urllib.parse
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +34,7 @@ import uvicorn
 
 import agent
 from agent.cameras.capture import CameraConfig, CameraShot, capture
+from agent.cameras.stream import CameraStreams, shot_or_capture
 from agent.clock import CenterClock
 from agent.config import AgentConfig, load_config
 from agent.diagnostics import default_log_path, read_log_tail
@@ -98,6 +101,12 @@ def cleanup_orphan_photos(storage: AgentStorage, photos_dir: Path) -> int:
     return removed
 
 
+# срок жизни кадра превью: браузер оператора просит раз в 2 с; снапшот-
+# камеры (Кызыл-Кыя) успевают каждый раз, RTSP-камеры обновляются
+# с темпом собственной съёмки (2-5 с)
+PREVIEW_TTL_S = 1.5
+
+
 class CameraHealth:
     """Фоновая проверка камер: статусы для heartbeat и дашборда центра.
 
@@ -107,10 +116,19 @@ class CameraHealth:
     любому числу клиентов.
     """
 
-    def __init__(self, cameras: list[CameraConfig], *, interval_s: float, ffmpeg_path: str) -> None:
+    def __init__(
+        self,
+        cameras: list[CameraConfig],
+        *,
+        interval_s: float,
+        ffmpeg_path: str,
+        streams: CameraStreams | None = None,
+    ) -> None:
         self._cameras = cameras
         self._interval_s = interval_s
         self._ffmpeg_path = ffmpeg_path
+        # живой буфер потока считается пробой камеры: не дёргаем её лишний раз
+        self._streams = streams
         self._statuses: dict[CameraRole, CameraStatus] = {}
 
     @property
@@ -125,7 +143,9 @@ class CameraHealth:
 
     async def check_once(self) -> None:
         for camera in self._cameras:
-            shot = await asyncio.to_thread(capture, camera, ffmpeg_path=self._ffmpeg_path)
+            shot = await asyncio.to_thread(
+                shot_or_capture, camera, self._streams, ffmpeg_path=self._ffmpeg_path
+            )
             previous = self._statuses.get(camera.role)
             self._statuses[camera.role] = CameraStatus(
                 role=camera.role,
@@ -164,6 +184,7 @@ class AgentRuntime:
         photos: PhotoLibrary,
         clock: CenterClock,
         log_path: Path | None,
+        streams: CameraStreams | None = None,
     ) -> None:
         self._config = config
         self._driver = driver
@@ -173,6 +194,15 @@ class AgentRuntime:
         self._photos = photos
         self._clock = clock
         self._log_path = log_path
+        self._streams = streams
+        # превью камер: последний готовый кадр по роли + замок «съёмка идёт».
+        # Браузер оператора просит кадр каждые 2 с; RTSP-камера отдаёт его
+        # 2–5 с (Джалал-Абад) — без кэша запросы наслаиваются каскадом
+        # ffmpeg-процессов и лишних RTSP-сессий к камере
+        self._preview_cache: dict[CameraRole, tuple[CameraShot, float]] = {}
+        self._preview_locks: dict[CameraRole, threading.Lock] = {
+            camera.role: threading.Lock() for camera in config.cameras
+        }
         self._info = AgentInfo(
             site_name=config.site_name,
             scale_name=config.scale_name,
@@ -206,10 +236,44 @@ class AgentRuntime:
         return [camera.role for camera in self._config.cameras]
 
     def camera_snapshot(self, role: CameraRole) -> CameraShot:
+        """Кадр для превью оператора: из кэша, съёмка — не чаще одной за раз.
+
+        Свежий кадр (моложе PREVIEW_TTL_S) отдаётся из памяти; если съёмка
+        уже идёт (RTSP-кадр занимает секунды) — отдаётся последний готовый,
+        даже подустаревший: превью живёт с темпом, который тянет камера,
+        а каскад параллельных ffmpeg не возникает.
+        """
         for camera in self._config.cameras:
             if camera.role is role:
-                return capture(camera.to_camera_config(), ffmpeg_path=self._config.ffmpeg_path)
-        raise ValueError(f"камера {role} не настроена")
+                break
+        else:
+            raise ValueError(f"камера {role} не настроена")
+        if self._streams is not None:
+            # потоковая камера: буфер обновляется раз в секунду — превью
+            # живое, ffmpeg на каждый запрос браузера не запускается
+            streamed = self._streams.shot(role)
+            if streamed is not None:
+                return streamed
+        cached = self._preview_cache.get(role)
+        now = time.monotonic()
+        if cached is not None and now - cached[1] < PREVIEW_TTL_S:
+            return cached[0]
+        lock = self._preview_locks.setdefault(role, threading.Lock())
+        if not lock.acquire(blocking=False):
+            # съёмка уже идёт в соседнем запросе — не плодим вторую
+            if cached is not None:
+                return cached[0]
+            return CameraShot(
+                role=role, jpeg=None, captured_at=datetime.now(UTC), error="съёмка уже идёт"
+            )
+        try:
+            shot = capture(camera.to_camera_config(), ffmpeg_path=self._config.ffmpeg_path)
+            # ошибку тоже кэшируем: мёртвая камера не должна заставлять
+            # каждый запрос превью висеть полный таймаут съёмки
+            self._preview_cache[role] = (shot, time.monotonic())
+            return shot
+        finally:
+            lock.release()
 
     def photo_roles(self, weighing_uuid: UUID) -> list[CameraRole]:
         return self._photos.roles_of(weighing_uuid)
@@ -280,6 +344,7 @@ def build_runtime(
     CameraHealth,
     ScaleWatcher,
     AutoConfig,
+    CameraStreams,
 ]:
     """Собрать все кирпичи агента (без запуска фоновых задач)."""
     driver = Cas22Driver(config.scale.port, baudrate=config.scale.baudrate)
@@ -288,10 +353,15 @@ def build_runtime(
     # последнему известному смещению из SQLite (вопрос Игоря 10.08.2026)
     center_clock = CenterClock(storage)
     config.storage.photos_dir.mkdir(parents=True, exist_ok=True)
+    # постоянные потоки RTSP-камер (агент 0.4.7): фоновый ffmpeg держит
+    # соединение и кладёт свежий кадр в память — превью и снимок операции
+    # берут его мгновенно; камерам со снапшотом поток не заводится
+    streams = CameraStreams(config.camera_configs(), ffmpeg_path=config.ffmpeg_path)
     camera_health = CameraHealth(
         config.camera_configs(),
         interval_s=config.camera_check_interval_s,
         ffmpeg_path=config.ffmpeg_path,
+        streams=streams,
     )
 
     # непрерывное наблюдение за платформой (схема UniServer): команда
@@ -307,6 +377,7 @@ def build_runtime(
         photos_dir=config.storage.photos_dir,
         config=auto_config,
         ffmpeg_path=config.ffmpeg_path,
+        streams=streams,
         now_utc=center_clock.now,
     )
 
@@ -370,6 +441,7 @@ def build_runtime(
         photos_dir=config.storage.photos_dir,
         vehicle_threshold_kg=config.cycle.vehicle_threshold_kg,
         ffmpeg_path=config.ffmpeg_path,
+        streams=streams,
         now_utc=center_clock.now,
     )
     manager_ref.append(
@@ -379,6 +451,7 @@ def build_runtime(
             runner=runner,
             manual=manual,
             camera_health=camera_health,
+            camera_streams=streams,
             storage=storage,
             # словарь снимается с СЫРОГО config.toml (main передаёт его до
             # merge): роль, выпавшая из старого снимка центра, не должна
@@ -404,9 +477,10 @@ def build_runtime(
             online=lambda: client.connected,
         ),
         clock=center_clock,
+        streams=streams,
         log_path=log_path,
     )
-    return runtime, driver, storage, client, uploader, camera_health, watcher, auto_config
+    return runtime, driver, storage, client, uploader, camera_health, watcher, auto_config, streams
 
 
 def apply_stored_settings(config: AgentConfig) -> AgentConfig:
@@ -449,8 +523,8 @@ async def run_agent(
     local_camera_timeouts: dict[CameraRole, float] | None = None,
 ) -> None:
     """Запустить агента целиком; остановка — отменой (Ctrl-C / stop службы)."""
-    runtime, driver, storage, client, uploader, camera_health, watcher, auto_config = build_runtime(
-        config, local_camera_timeouts=local_camera_timeouts
+    runtime, driver, storage, client, uploader, camera_health, watcher, auto_config, streams = (
+        build_runtime(config, local_camera_timeouts=local_camera_timeouts)
     )
     driver.start()
     cleanup_orphan_photos(storage, config.storage.photos_dir)
@@ -499,6 +573,7 @@ async def run_agent(
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         driver.stop()
+        streams.stop_all()
         storage.close()
         logger.info("агент остановлен")
 

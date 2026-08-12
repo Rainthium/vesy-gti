@@ -24,7 +24,7 @@
 
 Железо не используется: состояние индикатора — подменяемый держатель,
 watcher тикается вручную фейковыми часами, камеры — monkeypatch
-agent.weighing.auto.capture_all. Асинхронность — через asyncio.run.
+agent.weighing.auto.shots_or_capture_all. Асинхронность — через asyncio.run.
 """
 
 import asyncio
@@ -106,14 +106,20 @@ def good_shots() -> list[CameraShot]:
 
 
 class CaptureMock:
-    """Замена capture_all: в сеть не ходит, фиксирует вызовы, отдаёт заготовку."""
+    """Замена shots_or_capture_all (0.4.7): в сеть не ходит, фиксирует
+    вызовы, отдаёт заготовку."""
 
     def __init__(self) -> None:
         self.shots: list[CameraShot] = good_shots()
         self.calls: list[list[CameraRole]] = []
 
     def __call__(
-        self, configs: list[CameraConfig], *, ffmpeg_path: str = "ffmpeg"
+        self,
+        configs: list[CameraConfig],
+        streams: object = None,
+        *,
+        ffmpeg_path: str = "ffmpeg",
+        max_age_s: float = 3.0,
     ) -> list[CameraShot]:
         self.calls.append([config.role for config in configs])
         return list(self.shots)
@@ -136,7 +142,7 @@ class RunnerEnv:
         self.storage = AgentStorage(tmp_path / "agent.db")
         self.photos_dir = tmp_path / "photos"
         self.capture = CaptureMock()
-        monkeypatch.setattr(auto, "capture_all", self.capture)
+        monkeypatch.setattr(auto, "shots_or_capture_all", self.capture)
         self.runner = AutoOperationRunner(
             scale_state=self.scale,
             watcher=self.watcher,

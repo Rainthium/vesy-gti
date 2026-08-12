@@ -28,7 +28,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from agent.cameras.capture import CameraConfig, CameraShot, capture_all
+from agent.cameras.capture import CameraConfig, CameraShot
+from agent.cameras.stream import CameraStreams, shots_or_capture_all
 from agent.drivers.base import ScaleState
 from agent.sync.storage import AgentStorage, StoredPhoto
 from agent.weighing.shots import store_shots
@@ -81,6 +82,7 @@ class ManualOperationFlow:
         photos_dir: str | Path,
         vehicle_threshold_kg: float = DEFAULT_VEHICLE_THRESHOLD_KG,
         ffmpeg_path: str = "ffmpeg",
+        streams: CameraStreams | None = None,
         now_utc: Callable[[], datetime] | None = None,
     ) -> None:
         self._scale_state = scale_state
@@ -90,6 +92,8 @@ class ManualOperationFlow:
         self._photos_dir = Path(photos_dir)
         self._vehicle_threshold_kg = vehicle_threshold_kg
         self._ffmpeg_path = ffmpeg_path
+        # буфер потоковых камер: кадр мгновенно, без RTSP-подключения
+        self._streams = streams
         # время записи: часы центра (agent/clock.py), по умолчанию локальные
         self._now_utc = now_utc or (lambda: datetime.now(UTC))
         self._lock = threading.Lock()
@@ -150,7 +154,7 @@ class ManualOperationFlow:
         weighed_at = self._now_utc()
         record_uuid = uuid4()
 
-        shots = capture_all(self._cameras, ffmpeg_path=self._ffmpeg_path)
+        shots = shots_or_capture_all(self._cameras, self._streams, ffmpeg_path=self._ffmpeg_path)
         camera_errors = [shot.error or "камера недоступна" for shot in shots if not shot.ok]
         if camera_errors:
             # решение Игоря 09.08.2026: без снимков ОБЕИХ камер операция
