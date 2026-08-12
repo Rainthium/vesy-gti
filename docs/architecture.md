@@ -222,9 +222,9 @@ WebSocket поверх TLS, соединение открывает агент, 
 ### 4.3. Веб-панель центра
 
 * Сводка по 13 объектам: связь с агентом, состояние индикатора и камер, последнее взвешивание.
-* Единый журнал взвешиваний: фильтры (объект, дата, номер ТС, источник — АИС/офлайн), фото, экспорт Excel/CSV.
+* Единый журнал взвешиваний: фильтры (объект, дата, номер ТС, источник — АИС/офлайн), фото, выгрузка CSV (открывается в Excel; реализовано 11.08.2026).
 * Справочники: объекты, весы, камеры, пользователи, соответствие «старые адреса UniServer».
-* Роли: администратор, диспетчер (просмотр всего), оператор объекта.
+* Роли: администратор (видит систему целиком и правит справочники), диспетчер (просмотр; при заданной привязке к объекту видит только его, без привязки — все объекты), оператор объекта (учётка агента, реплицируется на весовой ПК). Реализовано 11.08.2026, см. decisions.
 
 ### 4.4. Неизменяемость журнала
 
@@ -239,7 +239,8 @@ sites(id, name, code, timezone, ...)
 scales(id, site_id, name, kind[static|dynamic|platform], driver, port_cfg,
        thresholds, legacy_ip, legacy_port, legacy_autoscale)   -- маршрутизация старого API
 cameras(id, scale_id, role[front|rear], snapshot_url, rtsp_url)
-agents(id, site_id, token_hash, version, last_seen_at, status)
+agents(id, scale_id UNIQUE, token_hash, version, last_seen_at, status, channel)
+                              -- одни весы = один агент (decisions 06.08.2026)
 users(id, login, pw_hash, role, site_id nullable)
 weighings(id, uuid, scale_id, operation[weighing|taring], massa, unit, stable,
           weighed_at, vehicle_number, trailer_number nullable,
