@@ -6,7 +6,7 @@
 {% block body %}
 {% set active_tab = 'journal' %}
 {% include "_header.html" %}
-<main class="content">
+<main class="content content--wide">
   <div class="page-head">
     <h1>Взвешивания</h1>
     <span class="page-meta">Всего записей под фильтром: {{ total }}</span>
@@ -31,7 +31,7 @@
         <thead>
           <tr><th>Дата / время</th><th>Объект / весы</th><th>Номер ТС</th><th>Прицеп</th><th>Фото</th><th>Операция</th>
           <th class="num">Брутто, kg</th><th class="num">Тара, kg</th><th class="num">Нетто, kg</th>
-          <th>Источник</th><th>Код</th></tr>
+          <th class="cell-print"></th><th>Источник</th><th>Код</th></tr>
         </thead>
         <tbody>
           {% for weighing, scale, site in rows %}
@@ -45,11 +45,13 @@
             <td class="num cell-gross">{{ weighing.massa | fmt_kg if weighing.operation.value == 'weighing' else '—' }}</td>
             <td class="num">{{ (weighing.tare_value if weighing.operation.value == 'weighing' else weighing.massa) | fmt_kg }}</td>
             <td class="num cell-netto">{{ weighing.netto | fmt_kg }}</td>
+            {# stopPropagation: клик по печати не должен заодно открывать запись #}
+            <td class="cell-print"><a class="print-link" href="/panel/journal/{{ weighing.id }}/card" target="_blank" title="Печать весовой карточки" onclick="event.stopPropagation()">Печать</a></td>
             <td><span class="pill {{ 'pill-info' if weighing.source.value == 'ais' else 'pill-warn' }}"><span class="dot"></span>{{ 'АИС' if weighing.source.value == 'ais' else 'Вручную (офлайн)' }}</span></td>
             <td class="cell-muted">{{ weighing.code.value }}</td>
           </tr>
           {% else %}
-          <tr><td colspan="11" class="empty">Записей нет</td></tr>
+          <tr><td colspan="12" class="empty">Записей нет</td></tr>
           {% endfor %}
         </tbody>
       </table>

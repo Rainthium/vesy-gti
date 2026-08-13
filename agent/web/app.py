@@ -29,6 +29,7 @@ from starlette.websockets import WebSocketDisconnect
 import agent
 from agent.web.services import AgentServices
 from agent.weighing.manual import ManualFlowError
+from shared import card as weight_card
 from shared.enums import CameraRole, Operation, ScaleStatus
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,8 @@ def create_app(
     # статика локальная (htmx, стили): весовой ПК может быть без интернета
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    # второй каталог — общая с центром печатная форма весовой карточки
+    templates = Jinja2Templates(directory=[str(TEMPLATES_DIR), str(weight_card.TEMPLATES_DIR)])
     templates.env.filters["fmt_time"] = _fmt_time
     templates.env.filters["fmt_kg"] = _fmt_kg
     # версия в адресе статики: без неё браузер оператора продолжал бы
@@ -246,6 +248,74 @@ def create_app(
             content=data,
             media_type="image/jpeg",
             headers={"Cache-Control": "private, max-age=86400"},
+        )
+
+    # --- печатная весовая карточка ---
+
+    _PHOTO_LABELS = {CameraRole.FRONT: "Фото 1 (перед)", CameraRole.REAR: "Фото 2 (зад)"}
+
+    @app.get("/card/{weighing_uuid}", response_class=HTMLResponse)
+    def print_card(weighing_uuid: UUID, request: Request, operator: Operator) -> HTMLResponse:
+        """Печатная весовая карточка записи журнала (задача 13.08.2026).
+
+        Открывается в новой вкладке и сразу зовёт диалог печати. Работает
+        и без связи с центром: запись, поверка и свежие снимки — локальные.
+        Снимок, уже убранный ретеншном (он в центре), при офлайне не
+        печатать нечем — вместо рамки честное предупреждение.
+        """
+        record = services.record_by_uuid(weighing_uuid)
+        if record is None or record.weighed_at is None or record.massa is None:
+            raise HTTPException(status_code=404, detail="запись не найдена")
+        tared_at = None
+        if record.tare_weighing_uuid is not None:
+            tare_record = services.record_by_uuid(record.tare_weighing_uuid)
+            if tare_record is not None:
+                tared_at = tare_record.weighed_at
+            else:
+                # тарирование прошло на других весах: локальной записи нет,
+                # но дата есть в реплике реестра тар
+                registry_row = services.tare_by_weighing_uuid(record.tare_weighing_uuid)
+                if registry_row is not None:
+                    tared_at = registry_row.tared_at
+        photos: list[dict[str, str]] = []
+        unreachable = False
+        for role in (CameraRole.FRONT, CameraRole.REAR):
+            if role not in services.photo_roles(record.uuid):
+                continue
+            if services.photo_available(record.uuid, role):
+                photos.append(
+                    {"label": _PHOTO_LABELS[role], "url": f"/photos/{record.uuid}/{role.value}.jpg"}
+                )
+            else:
+                unreachable = True
+        note = None
+        if unreachable:
+            note = (
+                "Снимки хранятся в центре, а связи с ним сейчас нет — "
+                "напечатайте карточку из панели центра или после восстановления связи."
+            )
+        card = weight_card.build_card(
+            operation=record.operation,
+            weighed_at=record.weighed_at,
+            site_name=services.info.site_name,
+            scale_name=services.info.scale_name,
+            vehicle_number=record.vehicle_number,
+            trailer_number=record.trailer_number,
+            massa=record.massa,
+            tare_value=record.tare_value,
+            netto=record.netto,
+            tared_at=tared_at,
+            operator=record.operator,
+            verification=services.verification(),
+            photos=photos,
+            photos_note=note,
+            record_uuid=str(record.uuid),
+        )
+        # без render(): печатной странице не нужны пилюли шапки и опрос весов
+        return templates.TemplateResponse(
+            request,
+            "card.html",
+            {"request": request, "card": card, "logo": weight_card.logo_data_uri()},
         )
 
     # --- оборудование: действия ---

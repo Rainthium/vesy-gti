@@ -604,13 +604,35 @@ class AgentStorage:
             ).fetchone()
         if row is None:
             return None
+        record = self._tare_from_row(row)
+        if record.tared_at < three_months_before(at):
+            return None
+        return record
+
+    def tare_by_weighing_uuid(self, weighing_uuid: UUID) -> TareRecord | None:
+        """Строка реплики реестра по uuid исходного тарирования.
+
+        Для печатной карточки: дата тарирования, когда сама запись
+        тарирования прошла на других весах и в локальном журнале её нет.
+        Срок действия здесь не проверяется — дата нужна и у тары,
+        успевшей устареть к моменту печати.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM tare_registry_replica WHERE weighing_uuid = ?",
+                (str(weighing_uuid),),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._tare_from_row(row)
+
+    @staticmethod
+    def _tare_from_row(row: sqlite3.Row) -> TareRecord:
         tared_at = datetime.fromisoformat(row["tared_at"])
         if tared_at.tzinfo is None:
             # дата без пояса (не должна приходить, но протокол её не запрещает) —
             # трактуем как UTC, чтобы сравнение не падало TypeError
             tared_at = tared_at.replace(tzinfo=UTC)
-        if tared_at < three_months_before(at):
-            return None
         return TareRecord(
             vehicle_number=row["vehicle_number"],
             trailer_number=row["trailer_number"] or None,

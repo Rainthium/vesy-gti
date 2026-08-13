@@ -37,7 +37,11 @@ class WeighV1Request(BaseModel):
     username: str
     password: str
     autoscale: int
-    # НОВЫЕ поля (ожидают подтверждения АИС); отсутствие operation = weighing
+    # НОВЫЕ поля (АИС реализует запрос по нашему контракту);
+    # отсутствие operation = weighing
     operation: Operation = Operation.WEIGHING
     vehicle_number: str | None = None
     trailer_number: str | None = None
+    # ФИО оператора весового контроля: пишется в запись и печатается
+    # на весовой карточке; без поля запись остаётся без оператора
+    operator: str | None = None

@@ -60,6 +60,7 @@ from shared.messages import (
     ScaleConfigUpdate,
     ScaleSettingsPayload,
     TareRecord,
+    VerificationInfo,
     WeighingRecord,
 )
 
@@ -282,6 +283,29 @@ class AgentRuntime:
         self, weighing_uuid: UUID, role: CameraRole, *, thumb: bool = False
     ) -> bytes | None:
         return self._photos.photo_bytes(weighing_uuid, role, thumb=thumb)
+
+    def record_by_uuid(self, weighing_uuid: UUID) -> WeighingRecord | None:
+        return self._storage.get_weighing(weighing_uuid)
+
+    def tare_by_weighing_uuid(self, weighing_uuid: UUID) -> TareRecord | None:
+        return self._storage.tare_by_weighing_uuid(weighing_uuid)
+
+    def verification(self) -> VerificationInfo | None:
+        """Поверка — из сохранённого снимка настроек центра (SQLite).
+
+        Читается при каждой печати: снимок обновляется scale_config'ом
+        на лету, кэшировать нечего — чтение дешёвое.
+        """
+        raw = self._storage.load_center_settings()
+        if raw is None:
+            return None
+        try:
+            return ScaleSettingsPayload.model_validate_json(raw).verification
+        except ValueError:
+            return None
+
+    def photo_available(self, weighing_uuid: UUID, role: CameraRole) -> bool:
+        return self._photos.photo_available(weighing_uuid, role)
 
     def photo_queue(self) -> tuple[int, int]:
         return self._storage.photo_queue_stats()

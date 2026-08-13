@@ -6,7 +6,7 @@
 {% block body %}
 {% set active_tab = 'tares' %}
 {% include "_header.html" %}
-<main class="content">
+<main class="content content--wide">
   <div class="page-head">
     <h1>Реестр тарирований</h1>
     <span class="page-meta">{{ total }} действующих тарирований · реплицируется на агентов</span>
@@ -21,7 +21,7 @@
       <table class="journal">
         <thead><tr>
           <th>Номер ТС</th><th>Прицеп</th><th>Фото</th><th class="num">Тара, kg</th><th>Дата тарирования</th>
-          <th>Объект / весы</th><th>Действует до</th><th>Статус</th>
+          <th>Объект / весы</th><th>Действует до</th><th class="cell-print"></th><th>Статус</th>
         </tr></thead>
         <tbody>
           {% for tare, weighing, scale, site in rows %}
@@ -33,10 +33,12 @@
             <td class="cell-muted">{{ tare.tared_at | fmt_dt }}</td>
             {{ site_scale_cell(site, scale) }}
             <td class="cell-muted">{{ expires(tare.tared_at) | fmt_dt }}</td>
+            {# stopPropagation: клик по печати не должен заодно открывать запись #}
+            <td class="cell-print"><a class="print-link" href="/panel/journal/{{ weighing.id }}/card" target="_blank" title="Печать тарной карточки" onclick="event.stopPropagation()">Печать</a></td>
             <td><span class="pill pill-ok"><span class="dot"></span>Действует</span></td>
           </tr>
           {% else %}
-          <tr><td colspan="8" class="empty">Действующих тарирований нет</td></tr>
+          <tr><td colspan="9" class="empty">Действующих тарирований нет</td></tr>
           {% endfor %}
         </tbody>
       </table>

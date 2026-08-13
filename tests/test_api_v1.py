@@ -172,6 +172,14 @@ class TestWeighV1RequestSchema:
         assert request.vehicle_number is None
         assert request.trailer_number is None
 
+    def test_operator_parsed_and_optional(self) -> None:
+        """ФИО оператора (контракт 13.08.2026): принимается, без него — None."""
+        request = WeighV1Request.model_validate(
+            _request_payload(operator="Акимов Нурлан Боронбаевич")
+        )
+        assert request.operator == "Акимов Нурлан Боронбаевич"
+        assert WeighV1Request.model_validate(_request_payload()).operator is None
+
 
 # ---------------------------------------------------------------------------
 # Фейковые линки агента (имитация через хаб, без WebSocket)
@@ -699,6 +707,26 @@ class TestWeighSuccessResponse:
         assert command.vehicle_number == "01KG777AAA"
         assert command.trailer_number == "01KG500AB"
         assert command.operation is Operation.WEIGHING
+
+    def test_operator_passed_to_agent(self, api_env: ApiEnv) -> None:
+        """ФИО оператора из запроса АИС уезжает агенту в команде (контракт
+        13.08.2026): лишние пробелы схлопываются, регистр сохраняется."""
+        link = self._attach(api_env, _make_record())
+        _post(api_env, operator="  Акимов   Нурлан  Боронбаевич ")
+        assert len(link.requests) == 1
+        assert link.requests[0].operator == "Акимов Нурлан Боронбаевич"
+
+    def test_operator_trimmed_to_column_width(self, api_env: ApiEnv) -> None:
+        """Оператор длиннее колонки БД (200) обрезается, а не роняет запись."""
+        link = self._attach(api_env, _make_record())
+        _post(api_env, operator="Ф" * 250)
+        assert link.requests[0].operator == "Ф" * 200
+
+    def test_missing_operator_is_none_in_command(self, api_env: ApiEnv) -> None:
+        """Старый запрос без оператора: в команде None, всё работает как раньше."""
+        link = self._attach(api_env, _make_record())
+        _post(api_env)
+        assert link.requests[0].operator is None
 
     def test_timeout_err_internal_within_deadline(self, apiv1_db_engine: Engine) -> None:
         """Агент молчит: с weigh_timeout_s=0.1 ответ ERR_INTERNAL приходит

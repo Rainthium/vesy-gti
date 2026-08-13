@@ -974,6 +974,106 @@ class TestPanelCard:
         assert response.status_code == 404
 
 
+class TestPrintCardRoute:
+    """Печатная весовая карточка из панели (13.08.2026): та же форма, что
+    печатает агент, — по образцу акта АИС, без банковских реквизитов."""
+
+    def test_requires_login(self, panel_env: PanelEnv) -> None:
+        response = panel_env.client.get(
+            f"/panel/journal/{panel_env.weighing_id}/card", follow_redirects=False
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/panel/login"
+
+    def test_weighing_card_renders(self, panel_env: PanelEnv) -> None:
+        """Номер ВЕС-, объект и весы, обе даты, предупреждение о недосланном
+        снимке (метаданные фото есть, файла на диске нет)."""
+        _login(panel_env)
+        response = panel_env.client.get(f"/panel/journal/{panel_env.weighing_id}/card")
+        assert response.status_code == 200
+        page = response.text
+        assert "ВЕСОВАЯ КАРТОЧКА № ВЕС-" in page
+        assert "СВХ «Кызыл-Кыя»" in page
+        assert "Весы SCS-80" in page
+        assert "01KG777AAA" in page
+        assert "01KG500AB" in page
+        assert "window.print()" in page
+        assert "ГОСУДАРСТВЕННАЯ ТАМОЖЕННАЯ ИНФРАСТРУКТУРА" in page
+        # банковские реквизиты из шапки акта убраны (решение Игоря 13.08.2026)
+        assert "Расчетный счет" not in page
+        assert "ИНН" not in page
+        # файл снимка ещё не дослан с объекта → предупреждение вместо рамки
+        assert "не дослана" in page
+        # дата связанного тарирования
+        from shared.card import fmt_dt as card_fmt_dt
+
+        with panel_env.factory() as session:
+            tared_at = session.get(Weighing, panel_env.taring_id).weighed_at  # type: ignore[union-attr]
+        assert tared_at is not None and card_fmt_dt(tared_at) in page
+
+    def test_taring_card_renders(self, panel_env: PanelEnv) -> None:
+        """Тарная карточка: номер ТАР-, операция «Тарирование»."""
+        _login(panel_env)
+        page = panel_env.client.get(f"/panel/journal/{panel_env.taring_id}/card").text
+        assert "ВЕСОВАЯ КАРТОЧКА № ТАР-" in page
+        assert "Тарирование" in page
+        assert "01KG555TTT" in page
+
+    def test_photo_printed_when_file_present(self, panel_env: PanelEnv) -> None:
+        """Файл снимка на диске → фото в карточке, предупреждения нет."""
+        _login(panel_env)
+        with panel_env.factory() as session:
+            path = session.execute(
+                select(WeighingPhoto.path).where(WeighingPhoto.weighing_id == panel_env.weighing_id)
+            ).scalar_one()
+        file = panel_env.photos_dir / path.lstrip("/")
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_bytes(b"\xff\xd8\xff\xe0 fake jpeg")
+        page = panel_env.client.get(f"/panel/journal/{panel_env.weighing_id}/card").text
+        assert f"/panel/photos{path}" in page
+        assert "не дослана" not in page
+
+    def test_verification_line_from_refs(self, panel_env: PanelEnv) -> None:
+        """Поверка из справочника весов печатается строкой как в акте."""
+        _login(panel_env)
+        with panel_env.factory() as session:
+            scale = session.get(Scale, panel_env.scale_id)
+            assert scale is not None
+            scale.verif_number = "№3961"
+            scale.verif_date = datetime(2026, 2, 26, tzinfo=UTC).date()
+            scale.verif_until = datetime(2027, 2, 26, tzinfo=UTC).date()
+            session.commit()
+        page = panel_env.client.get(f"/panel/journal/{panel_env.weighing_id}/card").text
+        assert "№3961 от 26.02.2026 (срок до 26.02.2027)" in page
+
+    def test_foreign_card_404_for_bound_user(self, panel_env: PanelEnv) -> None:
+        """Ограниченный объектом пользователь не печатает чужие записи."""
+        _login(panel_env)
+        _bind_user_to_site(panel_env, "kyzyl-kyia")
+        with panel_env.factory() as session:
+            foreign_id = session.execute(
+                select(Weighing.id).where(Weighing.vehicle_number == "28BAHE03KG")
+            ).scalar_one()
+        response = panel_env.client.get(f"/panel/journal/{foreign_id}/card")
+        assert response.status_code == 404
+
+    def test_missing_record_404(self, panel_env: PanelEnv) -> None:
+        _login(panel_env)
+        assert panel_env.client.get("/panel/journal/987654/card").status_code == 404
+
+    def test_print_links_on_list_pages_and_record(self, panel_env: PanelEnv) -> None:
+        """Ссылки печати: журнал и реестр тарирований (в строках),
+        страница записи (кнопка «Печать карточки»)."""
+        _login(panel_env)
+        journal = panel_env.client.get("/panel/journal").text
+        assert f'href="/panel/journal/{panel_env.weighing_id}/card"' in journal
+        tares = panel_env.client.get("/panel/tares").text
+        assert f'href="/panel/journal/{panel_env.taring_id}/card"' in tares
+        record = panel_env.client.get(f"/panel/journal/{panel_env.weighing_id}").text
+        assert f'href="/panel/journal/{panel_env.weighing_id}/card"' in record
+        assert "Печать карточки" in record
+
+
 class TestPanelPhotos:
     def test_photo_served_by_session(self, panel_env: PanelEnv) -> None:
         """Файл из photos_dir отдаётся вошедшему пользователю как JPEG."""

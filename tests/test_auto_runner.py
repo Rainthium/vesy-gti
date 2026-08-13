@@ -295,6 +295,25 @@ def test_instant_operation_by_fixation(env: RunnerEnv) -> None:
     assert env.capture.calls == [[CameraRole.FRONT, CameraRole.REAR]]
 
 
+def test_operator_from_request_stamped_into_record(env: RunnerEnv) -> None:
+    """ФИО оператора из команды центра (запрос АИС, контракт 13.08.2026)
+    попадает в запись — печатается на весовой карточке."""
+    env.drive_to_ready()
+    record = run_handle(env, make_request(operator="Акимов Нурлан Боронбаевич")).record
+    assert record.code is ErrorCode.OK
+    assert record.operator == "Акимов Нурлан Боронбаевич"
+    saved = stored_record(env, record)
+    assert saved is not None and saved.operator == "Акимов Нурлан Боронбаевич"
+
+
+def test_operator_absent_or_blank_is_none(env: RunnerEnv) -> None:
+    """Запрос без оператора (или с пустым) — в записи None, как раньше."""
+    env.drive_to_ready()
+    record = run_handle(env, make_request(operator="   ")).record
+    assert record.code is ErrorCode.OK
+    assert record.operator is None
+
+
 def test_weighed_at_taken_from_injected_clock(make_env: Callable[..., RunnerEnv]) -> None:
     """«Время от центра»: weighed_at берётся из now_utc (часы CenterClock),
     а не из локальных часов ПК — и в результате, и в записи журнала."""

@@ -25,7 +25,7 @@
 """
 
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -41,7 +41,7 @@ from agent.web.app import create_app
 from agent.web.services import AgentInfo
 from agent.weighing.manual import ManualFlowError, ManualPreview
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
-from shared.messages import TareRecord, WeighingRecord
+from shared.messages import TareRecord, VerificationInfo, WeighingRecord
 from shared.passwords import hash_password, verify_password
 
 # узкий неразрывный пробел — разделитель тысяч в весе (как в макетах)
@@ -106,6 +106,10 @@ class FakeServices:
         # снимки записей журнала: uuid → роли (пусто = снимков нет)
         self.photo_roles_by_uuid: dict[UUID, list[CameraRole]] = {}
         self.photo_requests: list[tuple[UUID, CameraRole, bool]] = []
+        # печатная карточка: реестр тар по uuid, поверка, недоступные снимки
+        self.tare_by_uuid: dict[UUID, TareRecord] = {}
+        self.verification_info: VerificationInfo | None = None
+        self.unreachable_photos: set[tuple[UUID, CameraRole]] = set()
         self.manual_ready_flag = False
         self.manual_error: str | None = None
         self.manual_preview: ManualPreview | None = None
@@ -162,6 +166,20 @@ class FakeServices:
                 role=role, jpeg=None, captured_at=datetime.now(UTC), error="таймаут камеры"
             )
         return CameraShot(role=role, jpeg=FAKE_JPEG, captured_at=datetime.now(UTC))
+
+    def record_by_uuid(self, weighing_uuid: UUID) -> WeighingRecord | None:
+        return next((r for r in self.journal if r.uuid == weighing_uuid), None)
+
+    def tare_by_weighing_uuid(self, weighing_uuid: UUID) -> TareRecord | None:
+        return self.tare_by_uuid.get(weighing_uuid)
+
+    def verification(self) -> VerificationInfo | None:
+        return self.verification_info
+
+    def photo_available(self, weighing_uuid: UUID, role: CameraRole) -> bool:
+        if role not in self.photo_roles_by_uuid.get(weighing_uuid, []):
+            return False
+        return (weighing_uuid, role) not in self.unreachable_photos
 
     def verify_operator(self, login: str, password: str) -> str | None:
         if (login, password) == (OPERATOR_LOGIN, OPERATOR_PASSWORD):
@@ -526,6 +544,127 @@ class TestJournalPhotos:
         """Без входа снимки недоступны (редирект на форму входа)."""
         response = client.get(f"/photos/{uuid4()}/front.jpg", follow_redirects=False)
         assert response.status_code == 303
+
+
+class TestPrintCard:
+    """Печатная весовая карточка (13.08.2026): по образцу акта АИС «СВХ»,
+    печатается локально — работает и без связи с центром."""
+
+    def test_requires_login(self, client: TestClient) -> None:
+        """Без входа оператора карточка недоступна."""
+        response = client.get(f"/card/{uuid4()}", follow_redirects=False)
+        assert response.status_code == 303
+
+    def test_unknown_uuid_404(self, operator_client: TestClient) -> None:
+        assert operator_client.get(f"/card/{uuid4()}").status_code == 404
+
+    def test_weighing_card_renders(
+        self, operator_client: TestClient, services: FakeServices
+    ) -> None:
+        """Карточка взвешивания: номер ВЕС-, объект и весы, оператор,
+        оба фото, автопечать; банковских реквизитов в шапке нет."""
+        record = make_record(operator="Акимов Нурлан Боронбаевич")
+        services.journal = [record]
+        services.photo_roles_by_uuid[record.uuid] = [CameraRole.FRONT, CameraRole.REAR]
+        page = operator_client.get(f"/card/{record.uuid}").text
+        assert "ВЕСОВАЯ КАРТОЧКА № ВЕС-20260807-" in page
+        assert "СВХ «Тест-Терминал»" in page
+        assert "Весы SCS-80" in page
+        assert "Акимов Нурлан Боронбаевич" in page
+        assert f"/photos/{record.uuid}/front.jpg" in page
+        assert f"/photos/{record.uuid}/rear.jpg" in page
+        assert "window.print()" in page
+        assert "ГОСУДАРСТВЕННАЯ ТАМОЖЕННАЯ ИНФРАСТРУКТУРА" in page
+        # банковские реквизиты из шапки акта убраны (решение Игоря 13.08.2026)
+        assert "Расчетный счет" not in page
+        assert "ИНН" not in page
+
+    def test_taring_card_dashes(self, operator_client: TestClient, services: FakeServices) -> None:
+        """Тарная карточка: номер ТАР-, масса в ТАРЕ, брутто/нетто прочерками."""
+        record = make_record(operation=Operation.TARING, massa=14820.0, tare_value=None, netto=None)
+        services.journal = [record]
+        page = operator_client.get(f"/card/{record.uuid}").text
+        assert "ВЕСОВАЯ КАРТОЧКА № ТАР-" in page
+        assert "Тарирование" in page
+        assert "14 820" in page
+
+    def test_verification_line(self, operator_client: TestClient, services: FakeServices) -> None:
+        """Свидетельство о поверке — из снимка настроек центра."""
+        record = make_record()
+        services.journal = [record]
+        services.verification_info = VerificationInfo(
+            number="№3961", verified_on=date(2026, 2, 26), valid_until=date(2027, 2, 26)
+        )
+        page = operator_client.get(f"/card/{record.uuid}").text
+        assert "№3961 от 26.02.2026 (срок до 26.02.2027)" in page
+
+    def test_no_verification_dash(
+        self, operator_client: TestClient, services: FakeServices
+    ) -> None:
+        """Поверка не заполнена в справочнике — прочерк, а не пустота."""
+        record = make_record()
+        services.journal = [record]
+        page = operator_client.get(f"/card/{record.uuid}").text
+        assert "Свидетельство о поверке:" in page
+
+    def test_tared_at_from_local_journal(
+        self, operator_client: TestClient, services: FakeServices
+    ) -> None:
+        """Дата тарирования — из локальной записи тарирования по uuid."""
+        taring = make_record(
+            operation=Operation.TARING,
+            massa=15300.0,
+            tare_value=None,
+            netto=None,
+            weighed_at=datetime(2026, 7, 8, 2, 25, tzinfo=UTC),
+        )
+        weighing = make_record(tare_weighing_uuid=taring.uuid)
+        services.journal = [weighing, taring]
+        page = operator_client.get(f"/card/{weighing.uuid}").text
+        assert "08.07.2026 08:25:00" in page
+
+    def test_tared_at_from_registry_replica(
+        self, operator_client: TestClient, services: FakeServices
+    ) -> None:
+        """Тарирование прошло на других весах: локальной записи нет,
+        дата берётся из реплики реестра тар."""
+        foreign = uuid4()
+        weighing = make_record(tare_weighing_uuid=foreign)
+        services.journal = [weighing]
+        services.tare_by_uuid[foreign] = TareRecord(
+            vehicle_number="01KG777AAA",
+            tare_value=15300.0,
+            tared_at=datetime(2026, 7, 8, 2, 25, tzinfo=UTC),
+            weighing_uuid=foreign,
+        )
+        page = operator_client.get(f"/card/{weighing.uuid}").text
+        assert "08.07.2026 08:25:00" in page
+
+    def test_unreachable_photo_note(
+        self, operator_client: TestClient, services: FakeServices
+    ) -> None:
+        """Ретеншн убрал файлы, связи с центром нет: вместо пустых рамок —
+        предупреждение, где взять снимки."""
+        record = make_record()
+        services.journal = [record]
+        services.photo_roles_by_uuid[record.uuid] = [CameraRole.FRONT, CameraRole.REAR]
+        services.unreachable_photos = {
+            (record.uuid, CameraRole.FRONT),
+            (record.uuid, CameraRole.REAR),
+        }
+        page = operator_client.get(f"/card/{record.uuid}").text
+        assert "напечатайте карточку из панели центра" in page
+        assert f"/photos/{record.uuid}/front.jpg" not in page
+
+    def test_journal_fragment_has_print_link(
+        self, operator_client: TestClient, services: FakeServices
+    ) -> None:
+        """У каждой строки журнала — ссылка печати карточки."""
+        record = make_record()
+        services.journal = [record]
+        page = operator_client.get("/fragments/journal").text
+        assert f'href="/card/{record.uuid}"' in page
+        assert "Печать" in page
 
 
 class TestDiagnostics:

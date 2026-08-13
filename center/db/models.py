@@ -17,12 +17,13 @@
 
 import enum
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -121,6 +122,11 @@ class Scale(Base):
     legacy_ip: Mapped[str | None] = mapped_column(String(45), default=None)
     legacy_port: Mapped[int | None] = mapped_column(default=None)
     legacy_autoscale: Mapped[int | None] = mapped_column(default=None)
+    # свидетельство о поверке (одно на весы; печатается на весовой карточке
+    # и реплицируется агенту в снимке настроек — офлайн-печать)
+    verif_number: Mapped[str | None] = mapped_column(String(64), default=None)
+    verif_date: Mapped[date | None] = mapped_column(Date, default=None)
+    verif_until: Mapped[date | None] = mapped_column(Date, default=None)
 
     __table_args__ = (
         # уникальность legacy-маршрута только для заполненных маршрутов:

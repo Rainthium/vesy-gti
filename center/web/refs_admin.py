@@ -18,6 +18,7 @@
 import logging
 import re
 import secrets
+from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -260,6 +261,47 @@ def save_scale_settings(
     scale.port_cfg = {"port": port, "baudrate": baudrate or 9600} if port else None
     session.commit()
     logger.info("справочники: настройки весов id=%d сохранены", scale_id)
+    return None
+
+
+def _parse_form_date(raw: str) -> tuple[date | None, bool]:
+    """(дата, ok): пустая строка — None, мусор — ошибка."""
+    raw = raw.strip()
+    if not raw:
+        return None, True
+    try:
+        return date.fromisoformat(raw), True
+    except ValueError:
+        return None, False
+
+
+def save_scale_verification(
+    session: Session, scale_id: int, *, number: str, verified_on: str, valid_until: str
+) -> str | None:
+    """Свидетельство о поверке весов (печатается на весовой карточке).
+
+    Пустой номер — свидетельство не указано: поля очищаются, на карточке
+    будет прочерк. Даты необязательны; заполненные проверяются на порядок.
+    """
+    scale = session.get(Scale, scale_id)
+    if scale is None:
+        return "весы не найдены"
+    number = " ".join(number.split())
+    if len(number) > 64:
+        return "номер свидетельства: не длиннее 64 символов"
+    date_on, ok_on = _parse_form_date(verified_on)
+    date_until, ok_until = _parse_form_date(valid_until)
+    if not ok_on or not ok_until:
+        return "даты поверки — в формате ГГГГ-ММ-ДД"
+    if not number and (date_on or date_until):
+        return "у свидетельства о поверке нет номера — укажите его"
+    if date_on and date_until and date_until < date_on:
+        return "срок действия поверки раньше её даты"
+    scale.verif_number = number or None
+    scale.verif_date = date_on if number else None
+    scale.verif_until = date_until if number else None
+    session.commit()
+    logger.info("справочники: поверка весов id=%d сохранена", scale_id)
     return None
 
 

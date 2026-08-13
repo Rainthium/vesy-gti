@@ -98,6 +98,21 @@ class PhotoLibrary:
             return local
         return self._from_center(weighing_uuid, role, thumb=thumb)
 
+    def photo_available(self, weighing_uuid: UUID, role: CameraRole) -> bool:
+        """Достижим ли снимок сейчас: локальный файл на месте либо есть
+        связь с центром (снимок уже там — ретеншн убирает только досланные).
+
+        Для печатной карточки: офлайн после ретеншна — вместо пустой рамки
+        печатается честное предупреждение, где снимок взять.
+        """
+        photos = {photo.role: photo for photo in self._storage.photos_for(weighing_uuid)}
+        stored = photos.get(role)
+        if stored is None:
+            return False
+        if Path(stored.path).is_file():
+            return True
+        return self._online()
+
     def _local_thumb(self, original: Path) -> bytes | None:
         """Готовая миниатюра рядом с кадром; при отсутствии — строим её."""
         target = thumb_path(original)

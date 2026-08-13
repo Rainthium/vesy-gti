@@ -5,6 +5,7 @@
       "name": "center-panel",
       "runtimeExecutable": "uv",
       "runtimeArgs": ["run", "uvicorn", "center.app:create_app", "--factory", "--port", "8080"],
+      "env": { "DATABASE_URL": "postgresql+psycopg://ves:ves@localhost:5443/ves_panel" },
       "port": 8080
     },
     {

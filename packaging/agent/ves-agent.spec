@@ -21,6 +21,9 @@ a = Analysis(  # noqa: F821
         (str(ROOT / "agent" / "web" / "templates"), "agent/web/templates"),
         (str(ROOT / "agent" / "web" / "static"), "agent/web/static"),
         (str(ROOT / "agent" / "cameras" / "fonts"), "agent/cameras/fonts"),
+        # общая с центром печатная форма весовой карточки и герб для шапки
+        (str(ROOT / "shared" / "templates"), "shared/templates"),
+        (str(ROOT / "shared" / "assets"), "shared/assets"),
     ],
     # uvicorn выбирает реализации динамически (loops/protocols/lifespan) —
     # перечисляем явно, чтобы не зависеть от полноты hook'ов contrib

@@ -14,7 +14,7 @@ import math
 import os
 import tempfile
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -27,7 +27,7 @@ from agent.web.app import create_app
 from agent.web.services import AgentInfo
 from agent.weighing.manual import ManualOperationFlow, ManualPreview
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
-from shared.messages import TareRecord, WeighingRecord
+from shared.messages import TareRecord, VerificationInfo, WeighingRecord
 
 # однотонный серый JPEG 32×24 — заглушка кадра камеры
 _GRAY_JPEG = bytes.fromhex(
@@ -221,6 +221,23 @@ class DemoServices:
         self, weighing_uuid: UUID, role: CameraRole, *, thumb: bool = False
     ) -> bytes | None:
         return _GRAY_JPEG if self.photo_roles(weighing_uuid) else None
+
+    def record_by_uuid(self, weighing_uuid: UUID) -> WeighingRecord | None:
+        for record in self._journal:
+            if record.uuid == weighing_uuid:
+                return record
+        return self._storage.get_weighing(weighing_uuid)
+
+    def tare_by_weighing_uuid(self, weighing_uuid: UUID) -> TareRecord | None:
+        return self._storage.tare_by_weighing_uuid(weighing_uuid)
+
+    def verification(self) -> VerificationInfo | None:
+        return VerificationInfo(
+            number="№3961", verified_on=date(2026, 2, 26), valid_until=date(2027, 2, 26)
+        )
+
+    def photo_available(self, weighing_uuid: UUID, role: CameraRole) -> bool:
+        return bool(self.photo_roles(weighing_uuid))
 
     def camera_snapshot(self, role: CameraRole) -> CameraShot:
         return CameraShot(role=role, jpeg=_GRAY_JPEG, captured_at=datetime.now(UTC))

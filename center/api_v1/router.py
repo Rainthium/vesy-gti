@@ -189,6 +189,8 @@ def create_api_v1_router(
             operation=request.operation,
             vehicle_number=(request.vehicle_number or "").strip().upper() or None,
             trailer_number=(request.trailer_number or "").strip().upper() or None,
+            # ФИО как прислали, без upper; потолок — ширина колонки в БД
+            operator=" ".join((request.operator or "").split())[:200] or None,
         )
         try:
             result = await hub.send_weigh_request(scale.id, command, timeout_s=cfg.weigh_timeout_s)

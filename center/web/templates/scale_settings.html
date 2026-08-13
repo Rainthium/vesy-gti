@@ -55,6 +55,22 @@
       <div class="card-hint">Пустой порт — портом управляет локальный конфиг весового ПК. Защита от ошибки: если после смены порта индикатор молчит, агент откатится на прежний порт и сообщит в центр.</div>
     </section>
 
+    <section class="table-card">
+      <div class="card-title">Свидетельство о поверке</div>
+      <div class="settings-grid">
+        <label>Номер свидетельства
+          <input name="verif_number" maxlength="64" value="{{ verif_number }}" placeholder="№3961">
+        </label>
+        <label>Дата поверки
+          <input name="verif_date" type="date" value="{{ verif_date }}">
+        </label>
+        <label>Действительно до
+          <input name="verif_until" type="date" value="{{ verif_until }}">
+        </label>
+      </div>
+      <div class="card-hint">Печатается на весовой карточке этих весов строкой «№3961 от 26.02.2026 (срок до 26.02.2027)». Агент получает свидетельство вместе с настройками и печатает карточку даже без связи с центром. Пустой номер — на карточке будет прочерк.</div>
+    </section>
+
     <div class="settings-actions">
       <button type="submit" class="btn-primary">Сохранить и отправить агенту</button>
       <a href="/panel/refs" class="btn-muted">Отмена</a>

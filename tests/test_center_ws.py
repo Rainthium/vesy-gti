@@ -42,7 +42,7 @@ import os
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -1389,6 +1389,31 @@ class TestRepoLoadScaleSettings:
         """В центре ничего не задано → None (агент живёт локальным конфигом)."""
         session, scale_id, _ = repo_env
         assert repo.load_scale_settings(session, scale_id) is None
+
+    def test_verification_only_makes_payload(self, repo_env: tuple[Session, int, int]) -> None:
+        """Одна лишь поверка — уже снимок: агенту нужна офлайн-печать карточки."""
+        session, scale_id, _ = repo_env
+        scale = session.get(Scale, scale_id)
+        assert scale is not None
+        scale.verif_number = "№3961"
+        scale.verif_date = date(2026, 2, 26)
+        scale.verif_until = date(2027, 2, 26)
+        session.commit()
+        settings = repo.load_scale_settings(session, scale_id)
+        assert settings is not None
+        assert settings.cycle is None and settings.cameras is None
+        assert settings.verification is not None
+        assert settings.verification.number == "№3961"
+        assert settings.verification.verified_on == date(2026, 2, 26)
+        assert settings.verification.valid_until == date(2027, 2, 26)
+
+    def test_no_verification_field_is_none(self, repo_env: tuple[Session, int, int]) -> None:
+        """Без номера свидетельства verification в снимке — None."""
+        session, scale_id, _ = repo_env
+        _set_scale_settings(session, scale_id, thresholds=dict(CYCLE_THRESHOLDS))
+        settings = repo.load_scale_settings(session, scale_id)
+        assert settings is not None
+        assert settings.verification is None
 
     def test_unknown_scale_returns_none(self, repo_env: tuple[Session, int, int]) -> None:
         """Несуществующие весы → None, а не падение."""

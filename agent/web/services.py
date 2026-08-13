@@ -13,7 +13,7 @@ from agent.cameras.capture import CameraShot
 from agent.drivers.base import ScaleState
 from agent.weighing.manual import ManualPreview
 from shared.enums import CameraRole, Operation
-from shared.messages import TareRecord, WeighingRecord
+from shared.messages import TareRecord, VerificationInfo, WeighingRecord
 
 
 @dataclass(frozen=True)
@@ -67,6 +67,24 @@ class AgentServices(Protocol):
         self, weighing_uuid: UUID, role: CameraRole, *, thumb: bool = False
     ) -> bytes | None:
         """Снимок записи: локальный файл, а после ретеншна — из центра."""
+        ...
+
+    # --- печатная весовая карточка (задача 13.08.2026) ---
+
+    def record_by_uuid(self, weighing_uuid: UUID) -> WeighingRecord | None:
+        """Запись журнала по uuid (для печати карточки любой давности)."""
+        ...
+
+    def tare_by_weighing_uuid(self, weighing_uuid: UUID) -> TareRecord | None:
+        """Строка реплики реестра тар по uuid исходного тарирования."""
+        ...
+
+    def verification(self) -> VerificationInfo | None:
+        """Свидетельство о поверке весов из снимка настроек центра."""
+        ...
+
+    def photo_available(self, weighing_uuid: UUID, role: CameraRole) -> bool:
+        """Достижим ли снимок сейчас (локально либо с центра при связи)."""
         ...
 
     def camera_snapshot(self, role: CameraRole) -> CameraShot:

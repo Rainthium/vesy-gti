@@ -32,6 +32,7 @@ from shared.messages import (
     PhotoMeta,
     ScaleSettingsPayload,
     TareRecord,
+    VerificationInfo,
     WeighingRecord,
 )
 from shared.tare import three_months_before
@@ -280,9 +281,23 @@ def load_scale_settings(session: Session, scale_id: int) -> ScaleSettingsPayload
         for c in camera_rows
         if c.snapshot_url or c.rtsp_url
     ] or None
-    if cycle is None and port is None and cameras is None:
+    # поверка — для офлайн-печати весовой карточки на агенте
+    verification = None
+    if scale.verif_number:
+        verification = VerificationInfo(
+            number=scale.verif_number,
+            verified_on=scale.verif_date,
+            valid_until=scale.verif_until,
+        )
+    if cycle is None and port is None and cameras is None and verification is None:
         return None
-    return ScaleSettingsPayload(cycle=cycle, cameras=cameras, scale_port=port, baudrate=baudrate)
+    return ScaleSettingsPayload(
+        cycle=cycle,
+        cameras=cameras,
+        scale_port=port,
+        baudrate=baudrate,
+        verification=verification,
+    )
 
 
 def find_active_tare(

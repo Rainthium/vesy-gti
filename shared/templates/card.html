@@ -1,0 +1,144 @@
+{# Печатная весовая карточка (по образцу акта АИС «СВХ», без банковских
+   реквизитов в шапке — решение Игоря 13.08.2026). Шаблон общий для агента
+   и центра; контекст собирает shared.card.build_card, логотип — data:URI.
+   Страница самодостаточна: своих статик не подключает и при открытии
+   сразу зовёт диалог печати браузера. #}
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Весовая карточка № {{ card.number }}</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Times New Roman", Georgia, serif; color: #000; background: #ececec; font-size: 13px; line-height: 1.35; }
+  .sheet { max-width: 186mm; margin: 0 auto; background: #fff; padding: 9mm 11mm 8mm; }
+  @media screen { .sheet { margin: 18px auto; box-shadow: 0 3px 16px rgba(0,0,0,.22); } }
+
+  .org { display: flex; align-items: flex-start; gap: 10px; }
+  .org-col { flex: 1; font-size: 8.6px; line-height: 1.35; }
+  .org-col.ru { text-align: right; }
+  .org-col b { display: block; font-size: 9px; margin-bottom: 3px; }
+  .org-logo { width: 21mm; height: auto; flex: none; align-self: center; }
+  .rule { border-bottom: 2px solid #000; margin: 8px 0 12px; }
+
+  h1 { font-size: 16px; text-align: center; margin-bottom: 12px; letter-spacing: .3px; }
+
+  .props { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+  .props td { padding: 2.5px 0; vertical-align: top; }
+  .props td:first-child { width: 46%; }
+  .props td:last-child { font-weight: bold; }
+
+  .results-title { font-weight: bold; margin-bottom: 6px; }
+  .full-massa { margin-bottom: 8px; }
+  .weights { width: 100%; border-collapse: collapse; margin-bottom: 14px; }
+  .weights th, .weights td { border: 1px solid #000; padding: 5px 8px; text-align: center; }
+  .weights th { font-size: 12px; }
+  .weights td { font-size: 15px; font-weight: bold; }
+
+  .sign-row { display: flex; align-items: flex-end; gap: 10px; margin-bottom: 12px; }
+  .sign-row .sign-name { font-weight: bold; }
+  .sign-line { flex: 1; border-bottom: 1px solid #000; min-width: 40mm; }
+  .sign-hint { font-size: 8.5px; color: #444; }
+
+  .photos-note { border: 1px solid #000; padding: 7px 10px; font-size: 12px; margin-bottom: 12px; }
+  .photos { display: flex; gap: 8px; margin-bottom: 10px; }
+  .photos figure { flex: 1; min-width: 0; }
+  .photos img { width: 100%; max-height: 64mm; object-fit: contain; border: 1px solid #999; background: #fff; }
+  .photos figcaption { font-size: 10px; text-align: center; margin-top: 2px; }
+
+  .doc-id { font-size: 8px; color: #555; margin-top: 4px; }
+
+  .toolbar { max-width: 186mm; margin: 0 auto 24px; text-align: center; }
+  .toolbar button { font: inherit; font-size: 14px; padding: 8px 26px; cursor: pointer; }
+
+  @page { size: A4 portrait; margin: 10mm 12mm; }
+  @media print {
+    body { background: #fff; font-size: 12.5px; }
+    .sheet { max-width: none; margin: 0; padding: 0; box-shadow: none; }
+    .no-print { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="sheet">
+  <header class="org">
+    <div class="org-col">
+      <b>«МАМЛЕКЕТТИК БАЖЫ ИНФРАСТРУКТУРАСЫ» АЧЫК АКЦИОНЕРДИК КООМУ</b>
+      720020 Кыргыз Республикасы, Бишкек ш.<br>
+      10 к.р., Т. Саманчина көчөсү, 6;<br>
+      e-mail: info@gti.kg<br>
+      тел: +996 312 96 44 44
+    </div>
+    <img class="org-logo" src="{{ logo }}" alt="ОАО «ГТИ»">
+    <div class="org-col ru">
+      <b>ОТКРЫТОЕ АКЦИОНЕРНОЕ ОБЩЕСТВО «ГОСУДАРСТВЕННАЯ ТАМОЖЕННАЯ ИНФРАСТРУКТУРА»</b>
+      720020 Кыргызская Республика, г. Бишкек<br>
+      10 мкр., ул. Т. Саманчина, 6;<br>
+      e-mail: info@gti.kg<br>
+      тел: +996 312 96 44 44
+    </div>
+  </header>
+  <div class="rule"></div>
+
+  <h1>ВЕСОВАЯ КАРТОЧКА № {{ card.number }}</h1>
+
+  <table class="props">
+    <tr><td>Объект:</td><td>{{ card.site_name }}</td></tr>
+    <tr><td>Весы:</td><td>{{ card.scale_name }}</td></tr>
+    <tr><td>Операция:</td><td>{{ card.operation_label }}</td></tr>
+    {% if card.is_weighing %}
+    <tr><td>Дата (время) взвешивания:</td><td>{{ card.weighed_at_text }}</td></tr>
+    <tr><td>Дата (время) тарирования:</td><td>{{ card.tared_at_text or '—' }}</td></tr>
+    {% else %}
+    <tr><td>Дата (время) тарирования:</td><td>{{ card.weighed_at_text }}</td></tr>
+    {% endif %}
+    <tr><td>НОМЕР транспортного средства:</td><td>{{ card.vehicle_number or '—' }}</td></tr>
+    <tr><td>НОМЕР прицепа:</td><td>{{ card.trailer_number or '—' }}</td></tr>
+    <tr><td>Свидетельство о поверке:</td><td>{{ card.verification_text or '—' }}</td></tr>
+  </table>
+
+  <div class="results-title">Результаты взвешивания:</div>
+  <div class="full-massa">Полная масса, кг: <b>{{ card.massa_text }}</b></div>
+  <table class="weights">
+    <tr><th>БРУТТО</th><th>ТАРА</th><th>НЕТТО</th></tr>
+    <tr><td>{{ card.gross_text }}</td><td>{{ card.tare_text }}</td><td>{{ card.netto_text }}</td></tr>
+  </table>
+
+  <div class="sign-row">
+    <span>Оператор весового контроля</span>
+    {% if card.operator %}<span class="sign-name">{{ card.operator }}</span>{% endif %}
+    <span class="sign-line"></span>
+  </div>
+  <div class="sign-row">
+    <span>Водитель</span>
+    <span class="sign-line"></span>
+  </div>
+
+  {% if card.photos_note %}
+  <div class="photos-note">{{ card.photos_note }}</div>
+  {% endif %}
+  {% if card.photos %}
+  <div class="photos">
+    {% for photo in card.photos %}
+    <figure>
+      <img src="{{ photo.url }}" alt="{{ photo.label }}"
+           onerror="this.closest('figure').style.display='none'">
+      <figcaption>{{ photo.label }}</figcaption>
+    </figure>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <footer class="doc-id">Идентификатор записи: {{ card.record_uuid }}</footer>
+</div>
+
+<div class="toolbar no-print">
+  <button type="button" onclick="window.print()">Печать</button>
+</div>
+<script>
+  // диалог печати — после полной загрузки (фото уже в кадре)
+  window.addEventListener('load', function () { window.print(); });
+</script>
+</body>
+</html>

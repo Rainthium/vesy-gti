@@ -29,6 +29,7 @@ import os
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -1383,6 +1384,86 @@ class TestSaveScaleSettings:
 # ---------------------------------------------------------------------------
 
 
+class TestSaveScaleVerification:
+    """Свидетельство о поверке (весовая карточка, 13.08.2026)."""
+
+    def test_success_saves_all_fields(self, db_session: Session) -> None:
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        error = refs_admin.save_scale_verification(
+            db_session,
+            scale.id,
+            number="  №3961  ",
+            verified_on="2026-02-26",
+            valid_until="2027-02-26",
+        )
+        assert error is None
+        db_session.refresh(scale)
+        assert scale.verif_number == "№3961"
+        assert scale.verif_date == date(2026, 2, 26)
+        assert scale.verif_until == date(2027, 2, 26)
+
+    def test_empty_number_clears_verification(self, db_session: Session) -> None:
+        """Пустой номер очищает поверку целиком (на карточке — прочерк)."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        scale.verif_number = "№1"
+        scale.verif_date = date(2026, 1, 1)
+        scale.verif_until = date(2027, 1, 1)
+        db_session.commit()
+        error = refs_admin.save_scale_verification(
+            db_session, scale.id, number="  ", verified_on="", valid_until=""
+        )
+        assert error is None
+        db_session.refresh(scale)
+        assert scale.verif_number is None
+        assert scale.verif_date is None
+        assert scale.verif_until is None
+
+    def test_dates_without_number_rejected(self, db_session: Session) -> None:
+        """Даты без номера — ошибка, а не молчаливая потеря дат."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        error = refs_admin.save_scale_verification(
+            db_session, scale.id, number="", verified_on="2026-02-26", valid_until=""
+        )
+        assert error is not None and "номер" in error
+
+    def test_deadline_before_date_rejected(self, db_session: Session) -> None:
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        error = refs_admin.save_scale_verification(
+            db_session,
+            scale.id,
+            number="№3961",
+            verified_on="2027-02-26",
+            valid_until="2026-02-26",
+        )
+        assert error is not None and "раньше" in error
+
+    def test_garbage_date_rejected(self, db_session: Session) -> None:
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        error = refs_admin.save_scale_verification(
+            db_session, scale.id, number="№3961", verified_on="26.02.2026", valid_until=""
+        )
+        assert error is not None and "ГГГГ-ММ-ДД" in error
+
+    def test_too_long_number_rejected(self, db_session: Session) -> None:
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        error = refs_admin.save_scale_verification(
+            db_session, scale.id, number="№" * 65, verified_on="", valid_until=""
+        )
+        assert error is not None and "64" in error
+
+    def test_missing_scale(self, db_session: Session) -> None:
+        error = refs_admin.save_scale_verification(
+            db_session, 987654, number="№3961", verified_on="", valid_until=""
+        )
+        assert error == "весы не найдены"
+
+
 def _settings_form(**overrides: str) -> dict[str, str]:
     """Валидные данные формы настроек весов."""
     fields = {
@@ -1530,6 +1611,51 @@ class TestScaleSettingsRoutes:
         )
         assert response.status_code == 303
         assert "весы не найдены" in _settings_note(response, 987654)
+
+    def test_post_saves_verification_and_page_shows_it(self, refs_env: RefsEnv) -> None:
+        """Поверка сохраняется той же формой настроек и видна при GET."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        response = refs_env.client.post(
+            f"/panel/refs/scales/{refs_env.scale_id}/settings",
+            data=_settings_form(
+                verif_number="№3961", verif_date="2026-02-26", verif_until="2027-02-26"
+            ),
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert "настройки сохранены" in _settings_note(response, refs_env.scale_id)
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None
+            assert scale.verif_number == "№3961"
+            assert scale.verif_date == date(2026, 2, 26)
+            assert scale.verif_until == date(2027, 2, 26)
+        page = refs_env.client.get(f"/panel/refs/scales/{refs_env.scale_id}/settings").text
+        assert "№3961" in page
+        assert "2026-02-26" in page
+        assert "2027-02-26" in page
+
+    def test_post_bad_verification_dates_is_note(self, refs_env: RefsEnv) -> None:
+        """Срок раньше даты поверки: note честно разделяет судьбы — цикл и порт
+        сохранены (и уходят агенту), поверка нет (замечание ревью 13.08.2026)."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        response = refs_env.client.post(
+            f"/panel/refs/scales/{refs_env.scale_id}/settings",
+            data=_settings_form(
+                verif_number="№3961", verif_date="2027-02-26", verif_until="2026-02-26"
+            ),
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        note = _settings_note(response, refs_env.scale_id)
+        assert "цикла и порт сохранены" in note
+        assert "НЕ сохранено" in note
+        assert "раньше" in note
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None
+            assert scale.verif_number is None
+            assert scale.thresholds is not None  # цикл в БД, несмотря на ошибку поверки
 
     def test_camera_post_pushes_settings_note(self, refs_env: RefsEnv) -> None:
         """Сохранение камеры с URL — часть настроек: note содержит хвост

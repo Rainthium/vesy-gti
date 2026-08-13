@@ -14,7 +14,7 @@
 но существующие поля не переименовываются без записи в docs/decisions.md.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -187,6 +187,9 @@ class WeighRequest(BaseModel):
     operation: Operation
     vehicle_number: str | None = None  # номер ТС, если известен инициатору
     trailer_number: str | None = None
+    # ФИО оператора весового контроля из запроса АИС: агент штампует его
+    # в запись — печатается на весовой карточке с обеих сторон
+    operator: str | None = None
     timeout_s: float | None = None  # тайм-аут всей операции; None — из конфига агента
 
 
@@ -259,6 +262,20 @@ class CameraSettings(BaseModel):
     rtsp_url: str | None = Field(default=None, repr=False)
 
 
+class VerificationInfo(BaseModel):
+    """Свидетельство о поверке весов (справочник центра).
+
+    На работу агента не влияет — печатается на весовой карточке. Агент
+    хранит копию в снимке настроек, поэтому карточка печатается и без
+    связи с центром. Одно свидетельство на весы: на карточку идёт
+    свидетельство тех весов, где прошла операция.
+    """
+
+    number: str
+    verified_on: date | None = None  # дата поверки
+    valid_until: date | None = None  # срок действия
+
+
 class ScaleSettingsPayload(BaseModel):
     """Снимок настроек весов из центра (решение Игоря 10.08.2026: настраивать
     объекты без AnyDesk — включая камеры и COM-порт).
@@ -271,6 +288,8 @@ class ScaleSettingsPayload(BaseModel):
     cameras: list[CameraSettings] | None = None
     scale_port: str | None = None  # «COM11» либо pyserial-URL
     baudrate: int | None = None
+    # агенты до 0.4.9 поля не знают и молча отбрасывают (extra=ignore)
+    verification: VerificationInfo | None = None
 
 
 class ScaleConfigUpdate(BaseModel):

@@ -15,7 +15,7 @@
         <tr>
           <th>Время</th><th>Номер ТС</th><th>Прицеп</th><th>Фото</th><th>Операция</th>
           <th class="num">Брутто, kg</th><th class="num">Тара, kg</th><th class="num">Нетто, kg</th>
-          <th>Источник</th><th class="cell-sync">Синхр.</th>
+          <th class="cell-print"></th><th>Источник</th><th class="cell-sync">Синхр.</th>
         </tr>
       </thead>
       <tbody>
@@ -39,6 +39,7 @@
           <td class="num cell-gross">{{ row.gross | fmt_kg }}</td>
           <td class="num">{{ row.tare | fmt_kg }}</td>
           <td class="num cell-netto">{{ row.netto | fmt_kg }}</td>
+          <td class="cell-print"><a class="print-link" href="/card/{{ row.record.uuid }}" target="_blank" title="Печать весовой карточки">Печать</a></td>
           <td>
             {% if row.record.source.value == 'ais' %}
             <span class="pill pill-info"><span class="dot"></span>АИС</span>
@@ -49,7 +50,7 @@
           <td class="cell-sync">{% if row.synced %}<span class="sync-ok" title="Синхронизировано">✓</span>{% else %}<span class="sync-wait" title="Ждёт отправки в центр">⧗</span>{% endif %}</td>
         </tr>
         {% else %}
-        <tr class="journal-empty"><td colspan="10">Операций пока нет</td></tr>
+        <tr class="journal-empty"><td colspan="11">Операций пока нет</td></tr>
         {% endfor %}
       </tbody>
     </table>

@@ -78,7 +78,7 @@ ALL_TABLES = (
     "weighing_photos",
 )
 
-HEAD_REVISION = "a1b2c3d4e5f6"  # тара по паре голова+прицеп (09.08.2026)
+HEAD_REVISION = "c9d0e1f2a3b4"  # свидетельство о поверке весов (13.08.2026)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64

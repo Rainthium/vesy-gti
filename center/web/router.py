@@ -45,6 +45,7 @@ from center.db.models import (
 )
 from center.releases import AgentRelease, latest_release
 from center.web import queries, refs_admin, users_admin
+from shared import card as weight_card
 from shared.enums import CameraRole, Operation, WeighingSource
 from shared.messages import (
     CycleSettings,
@@ -52,6 +53,7 @@ from shared.messages import (
     OperatorsRegistryUpdate,
     ScaleConfigUpdate,
     UpdateCommand,
+    VerificationInfo,
     supports_log_tail,
     supports_secure_sync,
 )
@@ -122,7 +124,8 @@ def create_panel_router(
     """Маршруты панели; сессии — общий SessionMiddleware приложения центра."""
     router = APIRouter(prefix="/panel")
 
-    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    # второй каталог — общая с агентом печатная форма весовой карточки
+    templates = Jinja2Templates(directory=[str(TEMPLATES_DIR), str(weight_card.TEMPLATES_DIR)])
     templates.env.filters["fmt_dt"] = _fmt_dt
     templates.env.filters["fmt_time"] = _fmt_time
     templates.env.filters["fmt_kg"] = _fmt_kg
@@ -562,6 +565,78 @@ def create_panel_router(
             raise HTTPException(status_code=404)
         return render("record.html", request, user=user, card=card)
 
+    _PHOTO_LABELS = {CameraRole.FRONT: "Фото 1 (перед)", CameraRole.REAR: "Фото 2 (зад)"}
+
+    def _print_card_context(card: queries.WeighingCard) -> dict[str, object]:
+        """Контекст печатной карточки из карточки записи журнала.
+
+        Снимок, чей файл ещё не долетел с объекта (запись пришла досылкой,
+        PhotoUploader дольёт позже), не печатаем битой рамкой — вместо него
+        предупреждение, что фото появятся после восстановления связи.
+        """
+        w = card.weighing
+        assert w.weighed_at is not None and w.massa is not None  # проверено маршрутом
+        photos: list[dict[str, str]] = []
+        waiting = False
+        for photo in sorted(card.photos, key=lambda p: p.role is not CameraRole.FRONT):
+            if (photos_dir / photo.path.lstrip("/")).is_file():
+                photos.append(
+                    {"label": _PHOTO_LABELS[photo.role], "url": f"/panel/photos{photo.path}"}
+                )
+            else:
+                waiting = True
+        note = None
+        if waiting:
+            note = (
+                "Часть снимков ещё не дослана с объекта — "
+                "они появятся после восстановления связи с ним."
+            )
+        verification = None
+        if card.scale.verif_number:
+            verification = VerificationInfo(
+                number=card.scale.verif_number,
+                verified_on=card.scale.verif_date,
+                valid_until=card.scale.verif_until,
+            )
+        return weight_card.build_card(
+            operation=w.operation,
+            weighed_at=w.weighed_at,
+            site_name=card.site.name,
+            scale_name=card.scale.name,
+            vehicle_number=w.vehicle_number,
+            trailer_number=w.trailer_number,
+            massa=w.massa,
+            tare_value=w.tare_value,
+            netto=w.netto,
+            tared_at=card.tare_weighing.weighed_at if card.tare_weighing else None,
+            operator=w.operator,
+            verification=verification,
+            photos=photos,
+            photos_note=note,
+            record_uuid=str(w.uuid),
+        )
+
+    @router.get("/journal/{weighing_id}/card", response_class=HTMLResponse)
+    async def journal_print_card(
+        request: Request, user: PanelUser, scope: PanelScope, weighing_id: int
+    ) -> HTMLResponse:
+        """Печатная весовая карточка записи (открывается в новой вкладке).
+
+        Видимость — как у самой записи: чужой объект для ограниченного
+        пользователя не существует (PanelScope, 404).
+        """
+        card = await asyncio.to_thread(
+            _db, lambda s: queries.weighing_card(s, weighing_id, site_scope=scope)
+        )
+        if card is None or card.weighing.weighed_at is None or card.weighing.massa is None:
+            raise HTTPException(status_code=404)
+        return render(
+            "card.html",
+            request,
+            card=_print_card_context(card),
+            logo=weight_card.logo_data_uri(),
+        )
+
     @router.get("/tares", response_class=HTMLResponse)
     async def tares(
         request: Request,
@@ -812,6 +887,9 @@ def create_panel_router(
             has_center_cycle=bool(scale.thresholds),
             port=port_cfg.get("port") or "",
             baudrate=port_cfg.get("baudrate") or 9600,
+            verif_number=scale.verif_number or "",
+            verif_date=scale.verif_date.isoformat() if scale.verif_date else "",
+            verif_until=scale.verif_until.isoformat() if scale.verif_until else "",
             note=request.query_params.get("note"),
         )
 
@@ -829,6 +907,9 @@ def create_panel_router(
         no_data_timeout_s: Annotated[float, Form()],
         port: Annotated[str, Form()] = "",
         baudrate: Annotated[str, Form()] = "",
+        verif_number: Annotated[str, Form()] = "",
+        verif_date: Annotated[str, Form()] = "",
+        verif_until: Annotated[str, Form()] = "",
     ) -> RedirectResponse:
         def back(note: str) -> RedirectResponse:
             return RedirectResponse(
@@ -856,8 +937,25 @@ def create_panel_router(
         )
         if error is not None:
             return back(error)
+        verification_error = await asyncio.to_thread(
+            _db,
+            lambda s: refs_admin.save_scale_verification(
+                s,
+                scale_id,
+                number=verif_number,
+                verified_on=verif_date,
+                valid_until=verif_until,
+            ),
+        )
         logger.info("панель (%s): настройки весов id=%d сохранены", admin, scale_id)
+        # цикл и порт уже в БД — доставляем их агенту даже при ошибке в поверке,
+        # а note честно говорит, что сохранилось, а что нет (замечание ревью)
         tail = await _push_scale_config(scale_id)
+        if verification_error is not None:
+            return back(
+                f"параметры цикла и порт сохранены{tail}; "
+                f"свидетельство о поверке НЕ сохранено: {verification_error}"
+            )
         return back(f"настройки сохранены{tail}")
 
     @router.post("/refs/scales/{scale_id}/camera")

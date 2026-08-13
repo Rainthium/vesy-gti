@@ -245,6 +245,9 @@ class AutoOperationRunner:
             tare_weighing_uuid=tare.weighing_uuid if tare else None,
             netto=netto,
             source=WeighingSource.AIS,
+            # ФИО оператора весового контроля из запроса АИС (контракт v1) —
+            # печатается на весовой карточке
+            operator=(request.operator or "").strip() or None,
             message=None,
             photos=[photo_meta(p) for p in photos],
         )
