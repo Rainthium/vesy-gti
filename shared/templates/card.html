@@ -57,7 +57,11 @@
   .toolbar { max-width: 186mm; margin: 0 auto 24px; text-align: center; }
   .toolbar button { font: inherit; font-size: 14px; padding: 8px 26px; cursor: pointer; }
 
-  @page { size: A4 portrait; margin: 10mm 12mm; }
+  /* поля с запасом на НЕпечатаемую зону принтера: лазерник начинает печать
+     от своих аппаратных полей (~5мм), и при полях впритык правый край
+     контента уезжал за печатаемую область — боевой Canon MF3010 требовал
+     масштаб 95% (урок 13.08.2026) */
+  @page { size: A4 portrait; margin: 12mm 15mm; }
   @media print {
     body { background: #fff; font-size: 12.5px; }
     /* НИКАКОЙ фиксированной ширины: печатная область у каждого браузера
