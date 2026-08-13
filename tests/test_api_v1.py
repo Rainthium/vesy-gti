@@ -848,6 +848,27 @@ class TestCreateApp:
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
 
+    def test_panel_cookie_secure_env_switch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """PANEL_COOKIE_SECURE=1 вешает на cookie панели флаг Secure.
+
+        По умолчанию флага нет: на пилоте в панель ходят и по внутреннему
+        http, dev-стенд тоже http (замечание ревью 13.08.2026).
+        """
+        from starlette.middleware.sessions import SessionMiddleware
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://ves:ves@localhost:5443/ves")
+        monkeypatch.setenv("PHOTOS_DIR", str(tmp_path))
+
+        def session_kwargs(app: Any) -> dict[str, Any]:
+            middleware = next(m for m in app.user_middleware if m.cls is SessionMiddleware)
+            return dict(middleware.kwargs)
+
+        assert session_kwargs(create_app())["https_only"] is False
+        monkeypatch.setenv("PANEL_COOKIE_SECURE", "1")
+        assert session_kwargs(create_app())["https_only"] is True
+
     def test_production_refuses_missing_secrets(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """CENTER_ENV=production без секретов — отказ старта с перечнем (правило №7)."""
         monkeypatch.setenv("CENTER_ENV", "production")

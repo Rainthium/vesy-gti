@@ -21,9 +21,12 @@
     <p class="empty">Журнал пуст: агент запущен не службой либо файл ещё не создан.</p>
     {% endif %}
     <div class="log-actions">
-      <a class="btn-outline" href="/panel/scales/{{ scale.id }}/log">Запросить снова</a>
+      {# POST: запрос журнала — действие с побочками, не переход по ссылке #}
+      <form method="post" action="/panel/scales/{{ scale.id }}/log" class="log-form">
+        <button type="submit" class="btn-outline">Запросить снова</button>
+      </form>
       <a class="btn-outline" href="/panel/">К объектам</a>
-      <span class="page-meta">журнал запрашивается у агента в момент открытия страницы</span>
+      <span class="page-meta">журнал запрашивается у агента по кнопке</span>
     </div>
   </div>
 </main>

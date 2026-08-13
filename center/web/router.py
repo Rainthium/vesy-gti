@@ -361,7 +361,7 @@ def create_panel_router(
         )
         session.commit()
 
-    @router.get("/scales/{scale_id}/log", response_class=HTMLResponse)
+    @router.post("/scales/{scale_id}/log", response_class=HTMLResponse)
     async def agent_log_page(
         request: Request, user: PanelUser, admin: PanelAdmin, scale_id: int
     ) -> HTMLResponse:
@@ -370,6 +370,12 @@ def create_panel_router(
         Только админ: в строках лога может оказаться чувствительное
         (адреса камер, диагностика сети объекта). Каждый запрос пишется
         в аудит — кто и когда смотрел журнал объекта.
+
+        POST, не GET: у запроса побочные эффекты (WS-команда агенту +
+        запись в аудит), а SameSite=Lax шлёт cookie при top-level GET
+        по кросс-сайтовой ссылке — чужая страница могла бы дёргать
+        журнал от имени залогиненного админа (закрытие риска, принятого
+        на пилоте 13.08.2026).
         """
         row = await asyncio.to_thread(
             _db,

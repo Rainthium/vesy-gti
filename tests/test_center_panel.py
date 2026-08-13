@@ -1691,7 +1691,7 @@ class TestAgentLogPage:
         panel_env.hub.attach(
             panel_env.scale_id, _LogLink(panel_env.hub, panel_env.scale_id, ["строка журнала"])
         )
-        page = panel_env.client.get(f"/panel/scales/{panel_env.scale_id}/log").text
+        page = panel_env.client.post(f"/panel/scales/{panel_env.scale_id}/log").text
         assert "строка журнала" in page
         assert "agent.log" in page
 
@@ -1704,7 +1704,7 @@ class TestAgentLogPage:
             panel_env.scale_id,
             _LogLink(panel_env.hub, panel_env.scale_id, ["<script>alert(1)</script>"]),
         )
-        page = panel_env.client.get(f"/panel/scales/{panel_env.scale_id}/log").text
+        page = panel_env.client.post(f"/panel/scales/{panel_env.scale_id}/log").text
         assert "<script>alert(1)</script>" not in page
         assert "&lt;script&gt;" in page
 
@@ -1716,7 +1716,7 @@ class TestAgentLogPage:
         panel_env.hub.attach(
             panel_env.scale_id, _LogLink(panel_env.hub, panel_env.scale_id, ["строка"])
         )
-        panel_env.client.get(f"/panel/scales/{panel_env.scale_id}/log")
+        panel_env.client.post(f"/panel/scales/{panel_env.scale_id}/log")
         with panel_env.factory() as session:
             entry = session.execute(
                 select(AuditLog).where(AuditLog.action == "agent_log_view")
@@ -1727,7 +1727,7 @@ class TestAgentLogPage:
     def test_dispatcher_forbidden(self, panel_env: PanelEnv) -> None:
         """Диспетчеру журнал агента недоступен (403)."""
         _login(panel_env)
-        response = panel_env.client.get(f"/panel/scales/{panel_env.scale_id}/log")
+        response = panel_env.client.post(f"/panel/scales/{panel_env.scale_id}/log")
         assert response.status_code == 403
 
     def test_old_agent_explained(self, panel_env: PanelEnv) -> None:
@@ -1737,7 +1737,7 @@ class TestAgentLogPage:
         _set_agent_version(panel_env, "0.4.4")
         link = _LogLink(panel_env.hub, panel_env.scale_id, ["не должно уехать"])
         panel_env.hub.attach(panel_env.scale_id, link)
-        page = panel_env.client.get(f"/panel/scales/{panel_env.scale_id}/log").text
+        page = panel_env.client.post(f"/panel/scales/{panel_env.scale_id}/log").text
         assert "0.4.5" in page and "обновите" in page.lower()
         assert link.sent == [], "старому агенту ушёл запрос журнала"
 
@@ -1746,14 +1746,28 @@ class TestAgentLogPage:
         _login(panel_env)
         _make_admin(panel_env)
         _set_agent_version(panel_env, "0.4.5")
-        page = panel_env.client.get(f"/panel/scales/{panel_env.scale_id}/log").text
+        page = panel_env.client.post(f"/panel/scales/{panel_env.scale_id}/log").text
         assert "не в сети" in page
 
     def test_unknown_scale_404(self, panel_env: PanelEnv) -> None:
         """Несуществующие весы — 404."""
         _login(panel_env)
         _make_admin(panel_env)
-        assert panel_env.client.get("/panel/scales/9999/log").status_code == 404
+        assert panel_env.client.post("/panel/scales/9999/log").status_code == 404
+
+    def test_get_not_allowed(self, panel_env: PanelEnv) -> None:
+        """GET журнала не существует: у запроса побочки (WS-команда + аудит),
+        а SameSite=Lax шлёт cookie при top-level GET по кросс-сайтовой
+        ссылке — риск, принятый на пилоте 13.08.2026, закрыт переводом
+        на POST."""
+        _login(panel_env)
+        _make_admin(panel_env)
+        _set_agent_version(panel_env, "0.4.5")
+        link = _LogLink(panel_env.hub, panel_env.scale_id, ["не должно уехать"])
+        panel_env.hub.attach(panel_env.scale_id, link)
+        response = panel_env.client.get(f"/panel/scales/{panel_env.scale_id}/log")
+        assert response.status_code == 405
+        assert link.sent == [], "GET не должен слать команду агенту"
 
 
 class TestUpdateAgentPermissions:

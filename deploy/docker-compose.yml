@@ -44,6 +44,9 @@ services:
       CENTER_ENV: production  # отказ старта с dev-дефолтами (center/app.py)
       DATABASE_URL: postgresql+psycopg://ves:${POSTGRES_PASSWORD}@postgres:5432/ves
       PANEL_SECRET: ${PANEL_SECRET:?задайте в deploy/.env}
+      # Secure-cookie панели: включать только при доступе исключительно
+      # по https (на пилоте в панель ходят и по внутреннему http)
+      PANEL_COOKIE_SECURE: ${PANEL_COOKIE_SECURE:-0}
       AIS_PHOTO_TOKEN: ${AIS_PHOTO_TOKEN:?задайте в deploy/.env}
       V1_USERNAME: ${V1_USERNAME:-admin}
       V1_PASSWORD: ${V1_PASSWORD:?задайте в deploy/.env (admin — осознанная совместимость с АИС)}

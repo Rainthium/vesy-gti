@@ -29,9 +29,13 @@
           </button>
         </form>
         {% endif %}
-        {# удалённая диагностика: журнал агента без захода в сеть объекта #}
+        {# удалённая диагностика: журнал агента без захода в сеть объекта.
+           POST: у запроса побочки (WS-команда + аудит) — кросс-сайтовая
+           GET-ссылка при SameSite=Lax дёргала бы его от имени админа #}
         {% if request.session.get('panel_role') == 'admin' and online %}
-        <a class="btn-log" href="/panel/scales/{{ item.scale.id }}/log">Журнал агента</a>
+        <form method="post" action="/panel/scales/{{ item.scale.id }}/log" class="log-form">
+          <button type="submit" class="btn-log">Журнал агента</button>
+        </form>
         {% endif %}
       </div>
       <div class="stat"><span class="dot {{ 'ok' if online else 'warn' }}"></span><span>Связь: {{ item.agent.last_seen_at | fmt_dt }}</span></div>

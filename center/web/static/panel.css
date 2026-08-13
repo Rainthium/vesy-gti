@@ -845,18 +845,21 @@ table.users .cell-input.narrow { max-width: 76px; }
 /* фильтры экрана пользователей: поиск по логину/ФИО — без капса номеров */
 .users-filters input[name="search"] { text-transform: none; }
 
-/* Журнал агента: кнопка на карточке и хвост лога */
+/* Журнал агента: кнопка на карточке (POST-форма) и хвост лога */
+.log-form { display: inline; margin-left: auto; }
+.log-actions .log-form { margin-left: 0; }
 .btn-log {
-  margin-left: auto;
   padding: 4px 10px;
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--surface);
   color: var(--text);
+  font-family: inherit;
   font-size: 12.5px;
   font-weight: 600;
   text-decoration: none;
   white-space: nowrap;
+  cursor: pointer;
 }
 .btn-log:hover { border-color: var(--green-border); color: var(--primary); }
 .log-tail {
@@ -900,6 +903,7 @@ table.users .cell-input.narrow { max-width: 76px; }
   border-radius: var(--r-sm);
   background: var(--surface);
   color: var(--text);
+  font-family: inherit; /* классом пользуются и <a>, и <button> */
   font-size: 14px;
   font-weight: 700;
   text-decoration: none;
