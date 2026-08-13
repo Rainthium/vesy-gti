@@ -998,11 +998,12 @@ class TestPrintCardRoute:
         assert "01KG777AAA" in page
         assert "01KG500AB" in page
         assert "window.print()" in page
-        assert "ГОСУДАРСТВЕННАЯ ТАМОЖЕННАЯ ИНФРАСТРУКТУРА" in page
+        # название разбито жёсткими переносами на 3 строки — проверяем кусок строки
+        assert "ГОСУДАРСТВЕННАЯ ТАМОЖЕННАЯ" in page
         # банковские реквизиты из шапки акта убраны (решение Игоря 13.08.2026)
         assert "Расчетный счет" not in page
         assert "ИНН" not in page
-        # файл снимка ещё не дослан с объекта → предупреждение вместо рамки
+        # файл снимка ещё не дослан: рамка пустая, рядом предупреждение
         assert "не дослана" in page
         # дата связанного тарирования
         from shared.card import fmt_dt as card_fmt_dt

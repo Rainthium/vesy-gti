@@ -565,24 +565,21 @@ def create_panel_router(
             raise HTTPException(status_code=404)
         return render("record.html", request, user=user, card=card)
 
-    _PHOTO_LABELS = {CameraRole.FRONT: "Фото 1 (перед)", CameraRole.REAR: "Фото 2 (зад)"}
-
     def _print_card_context(card: queries.WeighingCard) -> dict[str, object]:
         """Контекст печатной карточки из карточки записи журнала.
 
-        Снимок, чей файл ещё не долетел с объекта (запись пришла досылкой,
-        PhotoUploader дольёт позже), не печатаем битой рамкой — вместо него
-        предупреждение, что фото появятся после восстановления связи.
+        Рамки фото ПЕРЕД/ЗАД печатаются всегда; снимок, чей файл ещё не
+        долетел с объекта (запись пришла досылкой, PhotoUploader дольёт
+        позже), оставляет рамку пустой с предупреждением, что фото появятся
+        после восстановления связи.
         """
         w = card.weighing
         assert w.weighed_at is not None and w.massa is not None  # проверено маршрутом
-        photos: list[dict[str, str]] = []
+        urls: dict[CameraRole, str] = {}
         waiting = False
-        for photo in sorted(card.photos, key=lambda p: p.role is not CameraRole.FRONT):
+        for photo in card.photos:
             if (photos_dir / photo.path.lstrip("/")).is_file():
-                photos.append(
-                    {"label": _PHOTO_LABELS[photo.role], "url": f"/panel/photos{photo.path}"}
-                )
+                urls[photo.role] = f"/panel/photos{photo.path}"
             else:
                 waiting = True
         note = None
@@ -611,7 +608,8 @@ def create_panel_router(
             tared_at=card.tare_weighing.weighed_at if card.tare_weighing else None,
             operator=w.operator,
             verification=verification,
-            photos=photos,
+            photo_front_url=urls.get(CameraRole.FRONT),
+            photo_rear_url=urls.get(CameraRole.REAR),
             photos_note=note,
             record_uuid=str(w.uuid),
         )

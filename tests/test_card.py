@@ -97,7 +97,8 @@ def _weighing_card(**overrides: object) -> dict[str, object]:
         "tared_at": datetime(2026, 7, 8, 2, 25, tzinfo=UTC),
         "operator": "Акимов Нурлан Боронбаевич",
         "verification": VerificationInfo(number="№3961"),
-        "photos": [],
+        "photo_front_url": None,
+        "photo_rear_url": None,
         "photos_note": None,
         "record_uuid": "0" * 32,
     }
@@ -143,3 +144,17 @@ class TestBuildCard:
         assert card["tare_text"] == "—"
         assert card["netto_text"] == "—"
         assert card["tared_at_text"] is None
+
+    def test_photo_frames_always_two(self) -> None:
+        """Рамки ПЕРЕД/ЗАД в карточке всегда, даже без доступных снимков
+        (просьба Игоря 13.08.2026) — недоступный снимок = пустая рамка."""
+        card = _weighing_card()
+        photos = card["photos"]
+        assert isinstance(photos, list) and len(photos) == 2
+        assert [p["label"] for p in photos] == ["Фото 1 (перед)", "Фото 2 (зад)"]
+        assert [p["url"] for p in photos] == [None, None]
+        with_front = _weighing_card(photo_front_url="/photos/x/front.jpg")
+        photos = with_front["photos"]
+        assert isinstance(photos, list)
+        assert photos[0]["url"] == "/photos/x/front.jpg"
+        assert photos[1]["url"] is None

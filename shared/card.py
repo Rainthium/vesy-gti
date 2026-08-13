@@ -96,7 +96,8 @@ def build_card(
     tared_at: datetime | None,
     operator: str | None,
     verification: VerificationInfo | None,
-    photos: list[dict[str, str]],
+    photo_front_url: str | None,
+    photo_rear_url: str | None,
     photos_note: str | None,
     record_uuid: str,
 ) -> dict[str, object]:
@@ -104,8 +105,9 @@ def build_card(
 
     Для взвешивания ``massa`` — брутто, ``tared_at`` — дата использованного
     тарирования; для тарирования ``massa`` — масса тары, брутто и нетто
-    печатаются прочерками. ``photos`` — [{"label": ..., "url": ...}];
-    ``photos_note`` — предупреждение вместо недоступных снимков.
+    печатаются прочерками. Фото ПЕРЕД/ЗАД печатаются всегда (просьба Игоря
+    13.08.2026): недоступный снимок — пустая рамка, ``photos_note`` —
+    предупреждение, почему снимка нет и где его взять.
     """
     is_weighing = operation is Operation.WEIGHING
     return {
@@ -124,7 +126,10 @@ def build_card(
         "tare_text": fmt_kg(tare_value) if is_weighing else fmt_kg(massa),
         "netto_text": fmt_kg(netto) if is_weighing else "—",
         "operator": operator,
-        "photos": photos,
+        "photos": [
+            {"label": "Фото 1 (перед)", "url": photo_front_url},
+            {"label": "Фото 2 (зад)", "url": photo_rear_url},
+        ],
         "photos_note": photos_note,
         "record_uuid": record_uuid,
     }

@@ -252,8 +252,6 @@ def create_app(
 
     # --- печатная весовая карточка ---
 
-    _PHOTO_LABELS = {CameraRole.FRONT: "Фото 1 (перед)", CameraRole.REAR: "Фото 2 (зад)"}
-
     @app.get("/card/{weighing_uuid}", response_class=HTMLResponse)
     def print_card(weighing_uuid: UUID, request: Request, operator: Operator) -> HTMLResponse:
         """Печатная весовая карточка записи журнала (задача 13.08.2026).
@@ -261,7 +259,7 @@ def create_app(
         Открывается в новой вкладке и сразу зовёт диалог печати. Работает
         и без связи с центром: запись, поверка и свежие снимки — локальные.
         Снимок, уже убранный ретеншном (он в центре), при офлайне не
-        печатать нечем — вместо рамки честное предупреждение.
+        печатать нечем — рамка остаётся пустой, рядом честное предупреждение.
         """
         record = services.record_by_uuid(weighing_uuid)
         if record is None or record.weighed_at is None or record.massa is None:
@@ -277,15 +275,12 @@ def create_app(
                 registry_row = services.tare_by_weighing_uuid(record.tare_weighing_uuid)
                 if registry_row is not None:
                     tared_at = registry_row.tared_at
-        photos: list[dict[str, str]] = []
+        # рамки ПЕРЕД/ЗАД печатаются всегда; недоступный снимок — пустая рамка
+        urls: dict[CameraRole, str] = {}
         unreachable = False
-        for role in (CameraRole.FRONT, CameraRole.REAR):
-            if role not in services.photo_roles(record.uuid):
-                continue
+        for role in services.photo_roles(record.uuid):
             if services.photo_available(record.uuid, role):
-                photos.append(
-                    {"label": _PHOTO_LABELS[role], "url": f"/photos/{record.uuid}/{role.value}.jpg"}
-                )
+                urls[role] = f"/photos/{record.uuid}/{role.value}.jpg"
             else:
                 unreachable = True
         note = None
@@ -307,7 +302,8 @@ def create_app(
             tared_at=tared_at,
             operator=record.operator,
             verification=services.verification(),
-            photos=photos,
+            photo_front_url=urls.get(CameraRole.FRONT),
+            photo_rear_url=urls.get(CameraRole.REAR),
             photos_note=note,
             record_uuid=str(record.uuid),
         )

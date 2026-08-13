@@ -574,7 +574,8 @@ class TestPrintCard:
         assert f"/photos/{record.uuid}/front.jpg" in page
         assert f"/photos/{record.uuid}/rear.jpg" in page
         assert "window.print()" in page
-        assert "ГОСУДАРСТВЕННАЯ ТАМОЖЕННАЯ ИНФРАСТРУКТУРА" in page
+        # название разбито жёсткими переносами на 3 строки — проверяем кусок строки
+        assert "ГОСУДАРСТВЕННАЯ ТАМОЖЕННАЯ" in page
         # банковские реквизиты из шапки акта убраны (решение Игоря 13.08.2026)
         assert "Расчетный счет" not in page
         assert "ИНН" not in page
@@ -643,8 +644,8 @@ class TestPrintCard:
     def test_unreachable_photo_note(
         self, operator_client: TestClient, services: FakeServices
     ) -> None:
-        """Ретеншн убрал файлы, связи с центром нет: вместо пустых рамок —
-        предупреждение, где взять снимки."""
+        """Ретеншн убрал файлы, связи с центром нет: рамки остаются пустыми,
+        рядом предупреждение, где взять снимки."""
         record = make_record()
         services.journal = [record]
         services.photo_roles_by_uuid[record.uuid] = [CameraRole.FRONT, CameraRole.REAR]
