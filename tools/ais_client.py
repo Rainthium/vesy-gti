@@ -26,6 +26,9 @@ def main() -> None:
     parser.add_argument("--operation", choices=["weighing", "taring"], default="weighing")
     parser.add_argument("--vehicle", default=None, help="номер ТС (для тары/нетто)")
     parser.add_argument("--trailer", default=None, help="номер прицепа")
+    # контракт 13.08.2026: ФИО оператора весового контроля — пишется
+    # в запись и печатается на весовой карточке
+    parser.add_argument("--operator", default=None, help="ФИО оператора весового контроля")
     # legacy-поля маршрутизации — значения Кызыл-Кыи по умолчанию.
     # autoscale — номер весов НА объекте (подтверждено Игорем 12.08.2026:
     # для одиночных весов АИС шлёт 1; «2» из ранней справки был ошибкой)
@@ -49,6 +52,8 @@ def main() -> None:
         payload["vehicle_number"] = args.vehicle
     if args.trailer:
         payload["trailer_number"] = args.trailer
+    if args.operator:
+        payload["operator"] = args.operator
 
     shown = dict(payload)
     shown["password"] = "***"  # пароль в консоль не печатаем
