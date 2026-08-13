@@ -90,12 +90,15 @@ def create_app() -> FastAPI:
         """Корень домена ведёт в панель (человек, набравший vesy.gti.kg)."""
         return RedirectResponse("/panel/", status_code=307)
 
-    # сессии панели (подписанная cookie); секрет — из env, dev-дефолт для стенда
+    # сессии панели (подписанная cookie); секрет — из env, dev-дефолт для стенда.
+    # lax, не strict: strict не отдаёт cookie при переходе по ссылке с другого
+    # сайта (закладки/чаты/письма) — «выбивало на вход» (боевой урок 13.08.2026,
+    # особенно Safari); POST-мутации lax по-прежнему не шлёт кросс-сайтово
     app.add_middleware(
         SessionMiddleware,
         secret_key=os.environ.get("PANEL_SECRET", "dev-only-panel-secret"),
         session_cookie="ves_center_session",
-        same_site="strict",
+        same_site="lax",
     )
     static_dir = Path(__file__).parent / "web" / "static"
     app.mount("/panel/static", StaticFiles(directory=str(static_dir)), name="panel-static")

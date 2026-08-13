@@ -159,6 +159,11 @@ def create_panel_router(
         """303 на вход; запрошенный путь уезжает в ?next= — после входа
         пользователь попадает туда, куда шёл (например, на печать
         карточки из новой вкладки), а не на дашборд."""
+        if request.headers.get("hx-request"):
+            # HTMX-опрос (дашборд каждые N секунд) с протухшей сессией:
+            # 303 браузер разворачивает прозрачно, и htmx вставил бы форму
+            # входа ВНУТРЬ фрагмента; HX-Redirect уводит на вход целиком
+            return HTTPException(status_code=200, headers={"HX-Redirect": "/panel/login"})
         location = "/panel/login"
         path = request.url.path
         if path not in ("/panel/", "/panel") and not path.startswith(_NO_NEXT_PREFIXES):

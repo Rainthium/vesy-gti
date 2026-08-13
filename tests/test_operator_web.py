@@ -277,6 +277,25 @@ class TestAuth:
         else:
             assert location == f"/login?next={path}"
 
+    def test_htmx_poll_with_dead_session_gets_hx_redirect(self, client: TestClient) -> None:
+        """HTMX-опрос с протухшей сессией: 200 + HX-Redirect на вход —
+        иначе браузер развернул бы 303 и htmx вставил бы форму входа
+        внутрь фрагмента журнала (боевой урок 13.08.2026)."""
+        response = client.get("/fragments/journal", headers={"HX-Request": "true"})
+        assert response.status_code == 200
+        assert response.headers["HX-Redirect"] == "/login"
+
+    def test_session_cookie_is_lax(self, client: TestClient) -> None:
+        """Сессия — SameSite=Lax: strict не отдавал cookie при переходе
+        по ссылке с другого сайта и «выбивал» оператора на вход."""
+        response = client.post(
+            "/login",
+            data={"login": OPERATOR_LOGIN, "password": OPERATOR_PASSWORD},
+            follow_redirects=False,
+        )
+        cookie = response.headers.get("set-cookie", "")
+        assert "samesite=lax" in cookie.lower()
+
     def test_login_next_roundtrip(self, client: TestClient, services: FakeServices) -> None:
         """Вход возвращает на запрошенную страницу: печать карточки из
         новой вкладки не теряется на форме входа (боевой урок 13.08.2026)."""

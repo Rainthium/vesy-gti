@@ -92,7 +92,11 @@ def create_app(
         SessionMiddleware,
         secret_key=session_secret,
         session_cookie=cookie_name,
-        same_site="strict",  # доступ только из сети объекта, межсайтовых переходов нет
+        # lax, не strict: strict не отдаёт cookie при переходе по ссылке
+        # с другого сайта (закладка/панель центра/чат) — оператора «выбивало
+        # на вход» (боевой урок 13.08.2026, особенно Safari); POST-мутации
+        # lax по-прежнему не шлёт кросс-сайтово
+        same_site="lax",
     )
     # статика локальная (htmx, стили): весовой ПК может быть без интернета
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -117,6 +121,11 @@ def create_app(
         """
         operator = request.session.get("operator")
         if not operator:
+            if request.headers.get("hx-request"):
+                # HTMX-опрос (журнал/пилюли каждые 5 с) с протухшей сессией:
+                # 303 браузер разворачивает прозрачно, и htmx вставил бы форму
+                # входа ВНУТРЬ фрагмента; HX-Redirect уводит на вход целиком
+                raise HTTPException(status_code=200, headers={"HX-Redirect": "/login"})
             location = "/login"
             path = request.url.path
             if path != "/" and not path.startswith(_NO_NEXT_PREFIXES):

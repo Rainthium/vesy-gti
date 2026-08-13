@@ -804,6 +804,19 @@ class TestPanelAuthRedirects:
         assert response.headers["location"].startswith("/panel/login")
 
 
+class TestPanelHtmxAuth:
+    """HTMX-опрос дашборда с протухшей сессией (боевой урок 13.08.2026)."""
+
+    def test_htmx_poll_with_dead_session_gets_hx_redirect(self, panel_env: PanelEnv) -> None:
+        """200 + HX-Redirect вместо 303: браузер разворачивает 303 прозрачно,
+        и htmx вставил бы форму входа внутрь фрагмента дашборда."""
+        response = panel_env.client.get(
+            "/panel/fragments/dashboard", headers={"HX-Request": "true"}
+        )
+        assert response.status_code == 200
+        assert response.headers["HX-Redirect"] == "/panel/login"
+
+
 class TestPanelLoginNext:
     """Возврат после входа на запрошенную страницу (боевой урок 13.08.2026:
     печать карточки из новой вкладки выбивала на вход и теряла цель)."""
@@ -847,6 +860,16 @@ class TestPanelLoginNext:
 
 
 class TestPanelLogin:
+    def test_session_cookie_is_lax(self, panel_env: PanelEnv) -> None:
+        """Сессия — SameSite=Lax: strict не отдавал cookie при переходе
+        по ссылке с другого сайта и «выбивал» на вход (урок 13.08.2026)."""
+        response = panel_env.client.post(
+            "/panel/login",
+            data={"login": PANEL_LOGIN, "password": PANEL_PASSWORD},
+            follow_redirects=False,
+        )
+        assert "samesite=lax" in response.headers.get("set-cookie", "").lower()
+
     def test_login_page_renders(self, panel_env: PanelEnv) -> None:
         """Форма входа доступна без сессии и содержит поля login/password."""
         response = panel_env.client.get("/panel/login")
