@@ -848,6 +848,23 @@ class TestCreateApp:
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
 
+    def test_lifespan_runs_monitoring(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Lifespan поднимает фоновый мониторинг и гасит его на выходе.
+
+        Ошибки детекторов (недоступная БД и т.п.) цикл ловит сам — контекст
+        не падает; Telegram без токена не запускается вовсе.
+        """
+        monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://ves:ves@localhost:5443/ves")
+        monkeypatch.setenv("PHOTOS_DIR", str(tmp_path))
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        app = create_app()
+        with TestClient(app) as client:  # with: запускает lifespan
+            assert client.get("/healthz").status_code == 200
+            assert app.state.monitor is not None
+        # выход из with отменил фоновые задачи без исключений
+
     def test_panel_cookie_secure_env_switch(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

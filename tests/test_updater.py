@@ -11,13 +11,20 @@
 - скачивание идёт с токеном агента (сервер без Bearer отвечает 401 —
   успешный сценарий это доказывает);
 - неверный sha256/размер/zip-slip → архив отвергнут, ничего не появляется;
-- распаковку делает self-update.bat доверенными инструментами (урок 360,
-  12.08.2026): агент лишь проверяет оглавление и оставляет update.zip;
-  на ПК без tar и Expand-Archive — прежняя распаковка агентом (fallback);
+- распаковка (с 0.4.13) — доверенным инструментом (tar/Expand-Archive)
+  дочерним процессом агента ДО ожидания весов: писатель файлов подписан
+  (урок 360), окно busy→stop секундное; не вышло — фолбэк на распаковку
+  bat'ом планировщика (боевой путь 0.4.8+), update.zip остаётся лежать;
+  на ПК совсем без инструментов — прежняя распаковка агентом;
 - self-update.bat пишется с CRLF и содержит остановку/запуск службы;
 - занятые весы (busy) откладывают и в итоге отменяют обновление;
 - сторожок: живой процесс спустя UPDATE_WATCHDOG_S после запуска bat
   пишет ошибку в лог (bat не рапортует центру о своих провалах).
+
+Пути распаковки в сценарных тестах фиксируются monkeypatch'ем
+(_extract_via_tools), иначе исход зависел бы от платформы: bsdtar мака
+читает zip, GNU tar на CI — нет. Сам _extract_via_tools проверяется
+юнитами TestExtractViaTools (реальный tar — со skipif по bsdtar).
 """
 
 import asyncio
@@ -200,19 +207,72 @@ class TestUpdaterPreconditions:
 
 
 class TestUpdaterSuccess:
+    def test_tool_unpack_flow(
+        self,
+        install_dir: Path,
+        release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
+        spawn_calls: list[tuple[Path, Path, str]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Обычный путь 0.4.13: распаковка инструментом из агента ДО ожидания
+        весов — app_new готова заранее, update.zip не остаётся, bat только
+        подменяет папку (без блока распаковки).
+
+        Успех инструмента эмулируется фейком с той же раскладкой (реальный
+        tar платформозависим — см. TestExtractViaTools).
+        """
+
+        def fake_tools(archive: Path, base: Path) -> bool:
+            app_new = base / "app_new"
+            with zipfile.ZipFile(archive) as bundle:
+                for member in bundle.namelist():
+                    if not member.startswith("app/") or member.endswith("/"):
+                        continue
+                    target = app_new / Path(member).relative_to("app")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(bundle.read(member))
+            return True
+
+        monkeypatch.setattr(AgentUpdater, "_extract_via_tools", staticmethod(fake_tools))
+        payload = _make_release_zip()
+        base_url, _requests = release_server(payload)
+        updater = _make_updater(base_url, install_dir)
+
+        status = _handle(updater, _make_command(payload))
+        assert status.ok is True, f"обновление не прошло: {status.error}"
+
+        # app_new разложена заранее, архива не осталось
+        app_new = install_dir / "app_new"
+        assert (app_new / "ves-agent.exe").read_bytes() == NEW_EXE
+        assert not (install_dir / "update.zip").exists()
+        assert not (install_dir / "update-download.zip").exists()
+
+        # bat — только подмена папки, распаковки в нём нет
+        text = (install_dir / "self-update.bat").read_bytes().decode("utf-8")
+        assert "tar -xf" not in text and "Expand-Archive" not in text
+        assert 'nssm.exe" stop ves-agent' in text
+        assert 'nssm.exe" start ves-agent' in text
+        assert spawn_calls != []
+
     def test_full_update_flow(
         self,
         install_dir: Path,
         release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
         spawn_calls: list[tuple[Path, Path, str]],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Скачивание с токеном → проверки → update.zip → self-update.bat → запуск.
+        """Фолбэк-путь: инструмент из агента не сработал (антивирус) →
+        скачивание с токеном → проверки → update.zip → self-update.bat
+        с распаковкой → запуск.
 
         Сервер отвечает 401 без Bearer-токена, так что ok=True заодно
         доказывает, что агент шлёт Authorization. Распаковку агент НЕ
         делает — проверенный архив остаётся лежать update.zip, раскладку
         app_new выполнит bat доверенными инструментами (урок 360).
         """
+        monkeypatch.setattr(
+            AgentUpdater, "_extract_via_tools", staticmethod(lambda archive, base: False)
+        )
         payload = _make_release_zip()
         base_url, requests = release_server(payload)
         updater = _make_updater(base_url, install_dir)
@@ -402,6 +462,9 @@ class TestUpdaterBusy:
         проверкой busy и рестартом службы должно быть минимальным).
         Окно ожидания ужато monkeypatch'ем, чтобы не ждать 10 минут.
         """
+        monkeypatch.setattr(
+            AgentUpdater, "_extract_via_tools", staticmethod(lambda archive, base: False)
+        )
         monkeypatch.setattr(updater_module, "BUSY_WAIT_S", 0.2)
         monkeypatch.setattr(updater_module, "BUSY_POLL_S", 0.05)
         polls = 0
@@ -418,10 +481,12 @@ class TestUpdaterBusy:
         assert status.ok is False
         assert status.error is not None and "заняты" in status.error
         assert polls > 1, "busy опрашивался меньше двух раз — ожидания не было"
-        # подготовка прошла, но рестарт службы не запускался; подготовленный
-        # для bat update.zip тоже убран — отменённое обновление не оставляет следов
+        # подготовка прошла, но рестарт службы не запускался; подготовленные
+        # для bat update.zip и app_new тоже убраны — отменённое обновление
+        # не оставляет следов
         assert not (install_dir / "update-download.zip").exists()
         assert not (install_dir / "update.zip").exists()
+        assert not (install_dir / "app_new").exists()
         assert not (install_dir / "self-update.bat").exists()
         assert spawn_calls == []
 
@@ -442,6 +507,9 @@ class TestUnpackFallback:
     ) -> None:
         """Нет ни tar, ни Expand-Archive → агент раскладывает app_new сам,
         bat без блока распаковки, update.zip не остаётся."""
+        monkeypatch.setattr(
+            AgentUpdater, "_extract_via_tools", staticmethod(lambda archive, base: False)
+        )
         monkeypatch.setattr(updater_module, "unpack_via_bat_available", lambda: False)
         payload = _make_release_zip()
         base_url, _ = release_server(payload)
@@ -498,6 +566,91 @@ class TestUnpackFallback:
                 )
             depth += stripped.count("(") - stripped.count(")")
         assert depth == 0, "непарные скобки в bat"
+
+
+def _tar_reads_zip() -> bool:
+    """Читает ли системный tar zip-архивы (bsdtar мака/Windows — да, GNU — нет)."""
+    try:
+        probe = subprocess.run(["tar", "--version"], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return b"bsdtar" in probe.stdout
+
+
+class TestExtractViaTools:
+    """_extract_via_tools: распаковка доверенным инструментом из агента (0.4.13)."""
+
+    @pytest.mark.skipif(not _tar_reads_zip(), reason="системный tar не читает zip (GNU tar)")
+    def test_real_tar_unpacks(self, tmp_path: Path) -> None:
+        """Настоящий tar раскладывает app_new; app_unpack и архив не остаются."""
+        archive = tmp_path / "update-download.zip"
+        archive.write_bytes(_make_release_zip())
+        assert AgentUpdater._extract_via_tools(archive, tmp_path) is True
+        assert (tmp_path / "app_new" / "ves-agent.exe").read_bytes() == NEW_EXE
+        assert (tmp_path / "app_new" / "_internal" / "x").read_bytes() == INTERNAL_FILE
+        assert not (tmp_path / "app_unpack").exists()
+
+    @pytest.mark.skipif(not _tar_reads_zip(), reason="системный tar не читает zip (GNU tar)")
+    def test_archive_without_exe_is_refused(self, tmp_path: Path) -> None:
+        """Распаковалось, но exe в app нет → False и никакой app_new."""
+        archive = tmp_path / "update-download.zip"
+        archive.write_bytes(_make_release_zip(with_exe=False))
+        assert AgentUpdater._extract_via_tools(archive, tmp_path) is False
+        assert not (tmp_path / "app_new").exists()
+        assert not (tmp_path / "app_unpack").exists()
+
+    def test_tool_failure_returns_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Инструмент вернул ненулевой код (антивирус, битый tar) → False,
+        временные каталоги убраны, исключение не летит."""
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, returncode=1, stdout=b"", stderr=b"boom")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        archive = tmp_path / "update-download.zip"
+        archive.write_bytes(_make_release_zip())
+        assert AgentUpdater._extract_via_tools(archive, tmp_path) is False
+        assert calls, "инструмент распаковки даже не запускался"
+        assert not (tmp_path / "app_unpack").exists()
+        assert not (tmp_path / "app_new").exists()
+
+    def test_tool_missing_returns_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """tar в системе нет (OSError при запуске) → False без исключения."""
+
+        def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            raise FileNotFoundError("tar not found")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        archive = tmp_path / "update-download.zip"
+        archive.write_bytes(_make_release_zip())
+        assert AgentUpdater._extract_via_tools(archive, tmp_path) is False
+
+    def test_stale_dirs_removed_before_unpack(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Хвосты прежней попытки (app_unpack/app_new со старьём) убираются
+        до распаковки — версии не смешиваются даже при неудаче."""
+        stale_unpack = tmp_path / "app_unpack" / "old"
+        stale_unpack.mkdir(parents=True)
+        stale_new = tmp_path / "app_new"
+        stale_new.mkdir()
+        (stale_new / "ves-agent.exe").write_bytes(b"MZ stale")
+
+        def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.CompletedProcess(command, returncode=1, stdout=b"", stderr=b"")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        archive = tmp_path / "update-download.zip"
+        archive.write_bytes(_make_release_zip())
+        assert AgentUpdater._extract_via_tools(archive, tmp_path) is False
+        assert not (tmp_path / "app_new").exists(), "старая app_new не убрана"
+        assert not (tmp_path / "app_unpack").exists()
 
 
 class TestUnpackDetection:

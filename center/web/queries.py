@@ -6,6 +6,7 @@
 import calendar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Select, desc, func, or_, select
 from sqlalchemy.orm import Session
@@ -13,6 +14,7 @@ from sqlalchemy.orm import Session
 from center.db.models import (
     Agent,
     Camera,
+    MonitoringEvent,
     Scale,
     Site,
     TareRegistry,
@@ -20,7 +22,7 @@ from center.db.models import (
     Weighing,
     WeighingPhoto,
 )
-from shared.enums import ErrorCode, WeighingSource
+from shared.enums import ErrorCode, Operation, WeighingSource
 from shared.passwords import verify_password
 from shared.tare import three_months_before
 
@@ -71,6 +73,63 @@ def dashboard_scales(session: Session, site_scope: int | None = None) -> list[Da
         ).scalar_one_or_none()
         result.append(DashboardScale(site=site, scale=scale, agent=agent, last_weighing=last))
     return result
+
+
+_BISHKEK = ZoneInfo("Asia/Bishkek")
+
+
+def weighings_today(session: Session, site_scope: int | None = None) -> tuple[int, int]:
+    """Операций с начала бишкекских суток: (всего, из них тарирований).
+
+    Счётчик дашборда (макет center-dashboard). Считаются успешные записи
+    (иных в БД и нет) по моменту взвешивания.
+    """
+    day_start = (
+        datetime.now(_BISHKEK).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+    )
+    query = (
+        select(
+            func.count(Weighing.id),
+            func.count(Weighing.id).filter(Weighing.operation == Operation.TARING),
+        )
+        .select_from(Weighing)
+        .where(Weighing.weighed_at >= day_start)
+    )
+    if site_scope is not None:
+        query = query.join(Scale, Scale.id == Weighing.scale_id).where(Scale.site_id == site_scope)
+    total, tarings = session.execute(query).one()
+    return int(total), int(tarings)
+
+
+def monitoring_events_page(
+    session: Session,
+    *,
+    site_id: int | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[list[tuple[MonitoringEvent, Scale, Site]], int]:
+    """Страница журнала событий мониторинга, новые первыми.
+
+    ``site_id`` здесь — уже РАЗРЕШЁННЫЙ фильтр: маршрут сводит выбор
+    пользователя с PanelScope до вызова (как в журнале взвешиваний).
+    """
+    query = (
+        select(MonitoringEvent, Scale, Site)
+        .join(Scale, Scale.id == MonitoringEvent.scale_id)
+        .join(Site, Site.id == Scale.site_id)
+        .order_by(desc(MonitoringEvent.id))
+    )
+    count_query = select(func.count(MonitoringEvent.id))
+    if site_id is not None:
+        query = query.where(Scale.site_id == site_id)
+        count_query = (
+            count_query.select_from(MonitoringEvent)
+            .join(Scale, Scale.id == MonitoringEvent.scale_id)
+            .where(Scale.site_id == site_id)
+        )
+    total = int(session.execute(count_query).scalar_one())
+    rows = session.execute(query.offset((page - 1) * page_size).limit(page_size)).all()
+    return [tuple(row) for row in rows], total
 
 
 @dataclass(frozen=True)

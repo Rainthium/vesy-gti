@@ -60,6 +60,7 @@ from center.db.models import (
     WeighingPhoto,
 )
 from center.db.session import database_url, make_session_factory
+from center.monitoring import MonitoringService, MonitoringThresholds
 from center.web import queries
 from center.web.router import create_panel_router
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
@@ -74,6 +75,7 @@ from shared.messages import (
 )
 from shared.passwords import verify_password
 from tests.test_center_db import ALL_TABLES, _upgrade_head
+from tests.test_center_monitoring import FakeClock
 
 BISHKEK = ZoneInfo("Asia/Bishkek")
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -726,6 +728,8 @@ class PanelEnv:
     weighing_id: int  # запись 01KG777AAA с тарой и фото
     taring_id: int
     hub: AgentHub
+    monitor: MonitoringService
+    clock: FakeClock  # часы монитора (прокрутка порогов в тестах)
 
 
 @pytest.fixture
@@ -768,9 +772,11 @@ def panel_env(db: sessionmaker[Session], tmp_path: Path) -> Iterator[PanelEnv]:
     app = FastAPI()
     app.add_middleware(SessionMiddleware, secret_key="test-secret", session_cookie="ves_test")
     hub = AgentHub()
-    app.include_router(create_panel_router(db, hub, photos_dir=photos_dir))
+    clock = FakeClock()
+    monitor = MonitoringService(db, hub, now=clock.now)
+    app.include_router(create_panel_router(db, hub, photos_dir=photos_dir, monitor=monitor))
     client = TestClient(app)
-    yield PanelEnv(client, db, photos_dir, scale_id, weighing_id, taring_id, hub)
+    yield PanelEnv(client, db, photos_dir, scale_id, weighing_id, taring_id, hub, monitor, clock)
     client.close()
 
 
@@ -1834,3 +1840,114 @@ class TestPanelPhotoScope:
         _bind_user_to_site(panel_env, "kant")  # объект, которому снимок не принадлежит
         assert panel_env.client.get(f"/panel/photos{path}").status_code == 404
         assert panel_env.client.get(f"/panel/photos{thumb}").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Мониторинг на дашборде и экран «События» (этап 2, 13.08.2026)
+# ---------------------------------------------------------------------------
+
+_MT = MonitoringThresholds()
+
+
+def _make_offline_alert(env: PanelEnv) -> None:
+    """Прогнать детекторы до активного алерта «офлайн» по весам объекта А."""
+    with env.factory() as session:
+        agent = session.execute(select(Agent).where(Agent.scale_id == env.scale_id)).scalar_one()
+        agent.status = AgentStatus.OFFLINE
+        agent.last_seen_at = env.clock.current
+        session.commit()
+    env.monitor.tick()
+    env.clock.advance(_MT.offline_after_s + 1)
+    env.monitor.tick()
+
+
+class TestDashboardMonitoring:
+    def test_counters_rendered(self, panel_env: PanelEnv) -> None:
+        """Дашборд несёт четыре счётчика по макету center-dashboard."""
+        _login(panel_env)
+        page = panel_env.client.get("/panel/").text
+        for caption in (
+            "Весов на связи",
+            "Взвешиваний сегодня",
+            "Активных алертов",
+            "Очередь досылки",
+        ):
+            assert caption in page, f"нет счётчика «{caption}»"
+
+    def test_alert_block_appears(self, panel_env: PanelEnv) -> None:
+        """Активный алерт виден в блоке над сеткой (пилюля типа + сообщение)."""
+        _login(panel_env)
+        _make_offline_alert(panel_env)
+        page = panel_env.client.get("/panel/").text
+        assert "Активные алерты · 1" in page
+        assert "агент не выходит на связь" in page
+        assert "Офлайн" in page
+
+    def test_alerts_respect_scope(self, panel_env: PanelEnv) -> None:
+        """Пользователь чужого объекта алертов объекта А не видит."""
+        _login(panel_env)
+        _make_offline_alert(panel_env)
+        _bind_user_to_site(panel_env, "kant")
+        page = panel_env.client.get("/panel/").text
+        assert "Активные алерты" not in page
+        assert "агент не выходит на связь" not in page
+
+    def test_stale_heartbeat_counts_as_offline(self, panel_env: PanelEnv) -> None:
+        """Полуживой агент (статус online, heartbeat молчит) в счётчике —
+        офлайн: одно определение с детектором, витрины не спорят."""
+        _login(panel_env)
+        with panel_env.factory() as session:
+            agent = session.execute(
+                select(Agent).where(Agent.scale_id == panel_env.scale_id)
+            ).scalar_one()
+            agent.status = AgentStatus.ONLINE
+            agent.last_seen_at = datetime.now(UTC) - timedelta(minutes=10)
+            session.commit()
+        page = panel_env.client.get("/panel/").text
+        assert "0 / 1" in page, "молчащий 10 минут агент не должен считаться «на связи»"
+
+    def test_fragment_carries_counters_and_alerts(self, panel_env: PanelEnv) -> None:
+        """HTMX-фрагмент обновляет и счётчики, и алерты, и сетку разом."""
+        _login(panel_env)
+        _make_offline_alert(panel_env)
+        page = panel_env.client.get("/panel/fragments/dashboard").text
+        assert "Весов на связи" in page
+        assert "Активные алерты · 1" in page
+        assert "dashboard-grid" in page
+
+
+class TestEventsPage:
+    def _add_event(self, env: PanelEnv, message: str, scale_id: int | None = None) -> None:
+        from center.db.models import MonitoringEvent, MonitoringSeverity
+
+        with env.factory() as session:
+            session.add(
+                MonitoringEvent(
+                    scale_id=scale_id or env.scale_id,
+                    kind="offline",
+                    severity=MonitoringSeverity.DANGER,
+                    message=message,
+                )
+            )
+            session.commit()
+
+    def test_events_listed(self, panel_env: PanelEnv) -> None:
+        _login(panel_env)
+        self._add_event(panel_env, "СВХ «Кызыл-Кыя»: агент пропал")
+        page = panel_env.client.get("/panel/events").text
+        assert "События мониторинга" in page
+        assert "агент пропал" in page
+        assert "Офлайн" in page  # пилюля типа
+
+    def test_scope_hides_foreign_events(self, panel_env: PanelEnv) -> None:
+        """Разграничение по объекту действует и на журнал событий."""
+        _login(panel_env)
+        self._add_event(panel_env, "событие объекта А")
+        _bind_user_to_site(panel_env, "kant")
+        page = panel_env.client.get("/panel/events").text
+        assert "событие объекта А" not in page
+
+    def test_events_tab_in_header(self, panel_env: PanelEnv) -> None:
+        _login(panel_env)
+        page = panel_env.client.get("/panel/").text
+        assert 'href="/panel/events"' in page

@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import getpass
 import logging
+import shutil
 import sys
 import threading
 import time
@@ -407,12 +408,20 @@ def build_runtime(
 
     def equipment_status() -> EquipmentStatus:
         state = driver.state
+        # свободное место на диске с фото (0.4.13): фото — самое прожорливое,
+        # что пишет агент; недоступность диска не должна ронять heartbeat
+        try:
+            disk_free_mb = shutil.disk_usage(config.storage.photos_dir).free // (1024 * 1024)
+        except OSError:
+            disk_free_mb = None
         return EquipmentStatus(
             scale_status=state.status,
             current_weight=state.weight_kg,
             stable=state.stable,
             cameras=camera_health.statuses,
             pending_sync_count=storage.pending_count(),
+            pending_photos_count=storage.pending_photos_count(),
+            disk_free_mb=disk_free_mb,
         )
 
     updater = AgentUpdater(

@@ -52,6 +52,9 @@ services:
       V1_PASSWORD: ${V1_PASSWORD:?задайте в deploy/.env (admin — осознанная совместимость с АИС)}
       V1_WEIGH_TIMEOUT_S: ${V1_WEIGH_TIMEOUT_S:-120}
       AIS_ALLOWED_IPS: ${AIS_ALLOWED_IPS:-}
+      # Telegram-уведомления мониторинга; пусто — выключены
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       PHOTOS_DIR: /data/photos
       AGENT_RELEASES_DIR: /data/releases
     volumes:

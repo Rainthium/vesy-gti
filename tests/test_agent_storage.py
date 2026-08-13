@@ -229,6 +229,35 @@ class TestPendingQueue:
         storage.close()
         assert storage.mark_synced([]) == 0
 
+    def test_pending_photos_count(self, storage: AgentStorage) -> None:
+        """Метрика heartbeat (0.4.13): незагруженные снимки, включая фото
+        несинхронизированных записей — «сколько снимков ещё не в центре»."""
+        first, second = make_record(), make_record()
+        storage.save_weighing(
+            first,
+            photos=[
+                StoredPhoto(
+                    role=CameraRole.FRONT, path="photos/f.jpg", sha256="a" * 64, size_bytes=1
+                ),
+                StoredPhoto(
+                    role=CameraRole.REAR, path="photos/r.jpg", sha256="b" * 64, size_bytes=1
+                ),
+            ],
+        )
+        storage.save_weighing(
+            second,
+            photos=[
+                StoredPhoto(
+                    role=CameraRole.FRONT, path="photos/g.jpg", sha256="c" * 64, size_bytes=1
+                ),
+            ],
+        )
+        # запись second НЕ синхронизирована, но её снимок тоже в счётчике
+        storage.mark_synced([first.uuid])
+        assert storage.pending_photos_count() == 3
+        storage.mark_photo_uploaded(first.uuid, CameraRole.FRONT)
+        assert storage.pending_photos_count() == 2
+
 
 class TestRecentWeighings:
     """Журнал локального интерфейса: новые записи первыми."""

@@ -1,7 +1,42 @@
-{# Сетка карточек весов (макет center-dashboard.dc.html); обновляется HTMX-опросом #}
-<div id="dashboard-grid" hx-get="/panel/fragments/dashboard" hx-trigger="every 10s" hx-swap="outerHTML">
+{# Живая часть дашборда (макет center-dashboard.dc.html): счётчики, активные
+   алерты и сетка карточек весов — всё обновляется одним HTMX-опросом #}
+<div id="dashboard-live" hx-get="/panel/fragments/dashboard" hx-trigger="every 10s" hx-swap="outerHTML">
+  <div class="kpi-row">
+    {% for c in counters %}
+    <div class="kpi-card">
+      <div class="kpi-k">{{ c.k }}</div>
+      <div class="kpi-v {{ 'kpi-' ~ c.cls if c.cls }}">{{ c.v }}</div>
+      <div class="kpi-sub">{{ c.sub }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  {% if alerts %}
+  <div class="alerts-card">
+    <div class="alerts-head">Активные алерты · {{ alerts | length }}</div>
+    {% for a in alerts %}
+    <div class="alert-row">
+      <span class="pill {{ 'pill-err' if a.severity.value == 'danger' else 'pill-warn' }}"><span class="dot"></span>{{ a.kind_label }}</span>
+      <span class="alert-msg">{{ a.message }}</span>
+      <span class="alert-time" title="начало">{{ a.started_at | fmt_time }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% elif all_good %}
+  <div class="allgood-card">
+    <span class="allgood-check">✓</span>
+    <div>
+      <div class="allgood-title">Все объекты на связи, алертов нет</div>
+      <div class="allgood-sub">агенты онлайн · оборудование в норме</div>
+    </div>
+  </div>
+  {% endif %}
+
+  <div id="dashboard-grid">
   {% for item in scales %}
-  {% set online = item.agent and item.agent.status.value == 'online' %}
+  {# «на связи» = статус + свежий heartbeat: одно определение со счётчиком
+     и детектором офлайна (иначе карточка спорила бы с алертом) #}
+  {% set online = online_map.get(item.scale.id) %}
   <article class="obj-card">
     <div class="obj-head">
       <div>
@@ -73,4 +108,5 @@
   {% else %}
   <p class="empty">Объекты ещё не заведены — используйте tools/center_admin.py</p>
   {% endfor %}
+  </div>
 </div>

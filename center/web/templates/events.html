@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% from "_pagination.html" import pagination %}
+{% from "_filters.html" import site_scale_cell %}
+{% block title %}События — Весовая система{% endblock %}
+{% block body %}
+{% set active_tab = 'events' %}
+{% include "_header.html" %}
+<main class="content">
+  <div class="page-head">
+    <h1>События мониторинга</h1>
+    <span class="page-meta">{{ total }} всего · переходы детекторов: проблема появилась / закрылась</span>
+  </div>
+
+  {# фильтр по объекту; привязанному к объекту пользователю селектор не нужен #}
+  {% if refs.sites | length > 1 %}
+  <form method="get" action="/panel/events" class="filters">
+    <label>Объект
+      <select name="site_id" onchange="this.form.submit()">
+        <option value="">Все объекты</option>
+        {% for site in refs.sites %}
+        <option value="{{ site.id }}" {{ 'selected' if filters.site_id == site.id }}>{{ site.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </form>
+  {% endif %}
+
+  <div class="table-card">
+    <table class="journal">
+      <thead>
+        <tr><th>Дата / время</th><th>Объект / весы</th><th>Тип</th><th>Событие</th></tr>
+      </thead>
+      <tbody>
+        {% for event, scale, site in rows %}
+        <tr>
+          <td class="cell-muted">{{ event.created_at | fmt_dt }}</td>
+          {{ site_scale_cell(site, scale) }}
+          <td>
+            {% set pill_cls = 'pill-ok' if event.severity.value == 'ok' else ('pill-err' if event.severity.value == 'danger' else 'pill-warn') %}
+            <span class="pill {{ pill_cls }}"><span class="dot"></span>{{ event.kind | kind_label }}</span>
+          </td>
+          <td>{{ event.message }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="empty">Событий пока нет — детекторы молчат, значит всё работает</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ pagination(page, pages, '/panel/events?site_id=' ~ (filters.site_id or '')) }}
+</main>
+{% endblock %}

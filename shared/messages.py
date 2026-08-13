@@ -78,6 +78,11 @@ class EquipmentStatus(BaseModel):
     stable: bool | None = None  # флаг стабильности (None — нет данных)
     cameras: list[CameraStatus] = Field(default_factory=list)
     pending_sync_count: int = 0  # накоплено недосланных офлайн-записей
+    # метрики мониторинга (13.08.2026, агент 0.4.13). None — агент старой
+    # версии их не шлёт: центр отличает «нет данных» от нуля и детекторы
+    # по таким весам просто молчат
+    pending_photos_count: int | None = None  # снимки, ещё не загруженные на центр
+    disk_free_mb: int | None = None  # свободно на диске с фото весового ПК, МБ
 
 
 class PhotoMeta(BaseModel):

@@ -8,7 +8,11 @@
 и применённые миграции: uv run alembic upgrade head)
 """
 
+import asyncio
+import contextlib
+import logging
 import os
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -20,9 +24,12 @@ from center.agents_ws.hub import AgentHub
 from center.agents_ws.router import create_agents_router
 from center.api_v1.router import ApiV1Config, create_api_v1_router
 from center.db.session import make_engine, make_session_factory
+from center.monitoring import MonitoringService, TelegramNotifier
 from center.photos.router import PhotosConfig, create_photos_router
 from center.releases_router import create_releases_router
 from center.web.router import create_panel_router
+
+logger = logging.getLogger(__name__)
 
 # dev-значения, с которыми боевой центр стартовать отказывается (правило №7)
 _DEV_DEFAULTS = {
@@ -78,7 +85,31 @@ def create_app() -> FastAPI:
         allowed_ips=frozenset(ip.strip() for ip in allowed.split(",") if ip.strip()) or None,
     )
 
-    app = FastAPI(title="Весовая система — центр", docs_url=None, redoc_url=None)
+    # мониторинг объектов (этап 2): детекторы — фоновая задача процесса
+    # центра (uvicorn с одним воркером); Telegram-уведомления включаются
+    # только при заданных секретах бота (правило №7 — значения из env)
+    monitor = MonitoringService(session_factory, hub)
+    notifier = TelegramNotifier(
+        session_factory,
+        token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+        chat_id=os.environ.get("TELEGRAM_CHAT_ID", ""),
+    )
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        tasks = [asyncio.create_task(monitor.run(), name="monitoring")]
+        if notifier.enabled:
+            tasks.append(asyncio.create_task(notifier.run(), name="telegram-notifier"))
+        else:
+            logger.info(
+                "Telegram-уведомления выключены: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID не заданы"
+            )
+        yield
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    app = FastAPI(title="Весовая система — центр", docs_url=None, redoc_url=None, lifespan=lifespan)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -114,10 +145,15 @@ def create_app() -> FastAPI:
     app.include_router(create_releases_router(session_factory, releases_dir))
     app.include_router(
         create_panel_router(
-            session_factory, hub, photos_dir=photos_config.photos_dir, releases_dir=releases_dir
+            session_factory,
+            hub,
+            photos_dir=photos_config.photos_dir,
+            releases_dir=releases_dir,
+            monitor=monitor,
         )
     )
     # хаб доступен другим слоям (панель, сквозные тесты)
     app.state.hub = hub
     app.state.session_factory = session_factory
+    app.state.monitor = monitor
     return app

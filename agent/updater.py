@@ -33,9 +33,15 @@
 
 Занятые весы уважаем: пока идёт операция (runner busy), обновление
 откладывается коротким ожиданием — перезапуск службы посреди
-взвешивания недопустим. Распаковка в bat удлиняет окно между этой
-проверкой и остановкой службы на время распаковки (десятки секунд на
-HDD) — кнопку обновления жмёт человек в свободное от машин окно.
+взвешивания недопустим. С 0.4.13 распаковка происходит ДО этого
+ожидания: агент запускает системный tar (фолбэк Expand-Archive)
+ДОЧЕРНИМ процессом — писатель файлов доверенный, урок 360 соблюдён, —
+и bat остаётся только подмена папки, так что окно между проверкой busy
+и остановкой службы снова секундное (идея ревью 12.08.2026). Если
+антивирус не даст инструменту работать из-под неподписанного родителя,
+агент уходит на прежний путь: проверенный архив остаётся лежать, и
+распаковку делает сам bat задачи планировщика (боевой путь 0.4.8+) —
+окно шире на время распаковки, кнопку жмёт человек в свободное окно.
 
 Если bat не смог распаковать или подменить папку, службу он не трогает —
 агент продолжает работать на прежней версии. Такой исход центру никто
@@ -72,6 +78,7 @@ from shared.messages import UpdateCommand, UpdateStatus
 logger = logging.getLogger(__name__)
 
 DOWNLOAD_TIMEOUT_S = 300.0
+UNPACK_TIMEOUT_S = 300.0  # tar/Expand-Archive на HDD весового ПК — минуты
 BUSY_WAIT_S = 600.0  # ждём окончания операции не дольше 10 минут
 BUSY_POLL_S = 2.0
 SPAWN_DELAY_S = 2.0  # пауза перед запуском self-update.bat: успеть отправить статус
@@ -306,21 +313,29 @@ class AgentUpdater:
         service = read_service_name(base)
         (base / "logs").mkdir(exist_ok=True)
 
-        # сначала вся подготовка (скачивание длится минуты), и только потом
-        # ожидание свободных весов — окно между проверкой busy и рестартом
-        # службы должно быть минимальным (замечание ревью 10.08.2026)
+        # сначала вся подготовка (скачивание и распаковка длятся минуты), и
+        # только потом ожидание свободных весов — окно между проверкой busy
+        # и рестартом службы должно быть минимальным (замечание ревью
+        # 10.08.2026, возвращено к секундам 13.08.2026)
         archive = base / "update-download.zip"
         staged = base / UPDATE_ARCHIVE_NAME
-        # в поток: проба PowerShell (subprocess) заблокировала бы event loop
-        unpack_in_bat = await asyncio.to_thread(unpack_via_bat_available)
         try:
             await asyncio.to_thread(self._download, command, archive)
             await asyncio.to_thread(self._verify, command, archive)
             await asyncio.to_thread(self._validate_archive, archive)
-            if unpack_in_bat:
-                # проверенный архив остаётся лежать под bat: раскладку app_new
-                # делает доверенный процесс, а не неподписанный агент (урок 360)
+            unpack_in_bat = False
+            if await asyncio.to_thread(self._extract_via_tools, archive, base):
+                # app_new готова заранее — bat сделает только подмену папки
+                logger.info("релиз распакован доверенным инструментом до остановки службы")
+            elif await asyncio.to_thread(unpack_via_bat_available):
+                # инструмент из-под агента не сработал (антивирус?) —
+                # проверенный архив остаётся лежать под bat: распакует
+                # задача планировщика, как в 0.4.8 (окно шире, но путь боевой)
+                unpack_in_bat = True
                 await asyncio.to_thread(archive.replace, staged)
+                logger.warning(
+                    "распаковка инструментом из агента не удалась — распакует bat планировщика"
+                )
             else:
                 logger.warning(
                     "на ПК нет ни tar, ни Expand-Archive — распаковка процессом агента; "
@@ -355,9 +370,11 @@ class AgentUpdater:
                 UPDATE_WATCHDOG_S, self._watchdog, command.version
             )
         except BaseException:
-            # не захламлять весовой ПК: отменённое обновление убирает и архив,
-            # подготовленный для bat (следующая команда скачает свой заново)
+            # не захламлять весовой ПК: отменённое обновление убирает архив,
+            # подготовленный для bat, и заранее распакованную app_new
+            # (следующая команда скачает и распакует заново)
             staged.unlink(missing_ok=True)
+            shutil.rmtree(base / "app_new", ignore_errors=True)
             raise
         finally:
             archive.unlink(missing_ok=True)
@@ -423,6 +440,80 @@ class AgentUpdater:
             version,
             int(UPDATE_WATCHDOG_S // 60),
         )
+
+    @staticmethod
+    def _extract_via_tools(archive: Path, base: Path) -> bool:
+        """Распаковать релиз в app_new доверенным инструментом ИЗ агента.
+
+        Писатель файлов — системный tar (подписан Microsoft; фолбэк
+        Expand-Archive), запущенный дочерним процессом: урок 360 соблюдён
+        (антивирус решает по процессу-писателю), а распаковка происходит
+        ДО остановки службы — окно busy→stop снова секундное (идея ревью
+        12.08.2026). Любая неудача — False без исключения: вызывающий код
+        уходит на распаковку bat'ом планировщика (боевой путь 0.4.8+),
+        который антивирусу знаком по другому дереву процессов.
+        """
+        app_unpack = base / "app_unpack"
+        app_new = base / "app_new"
+        try:
+            if app_unpack.exists():
+                shutil.rmtree(app_unpack)
+            if app_new.exists():
+                shutil.rmtree(app_new)
+            app_unpack.mkdir()
+        except OSError as exc:
+            logger.warning("распаковка инструментом: хвосты прежней попытки не убрать: %s", exc)
+            return False
+        commands: list[list[str]] = [["tar", "-xf", str(archive), "-C", str(app_unpack)]]
+        if sys.platform == "win32":
+            # одинарная кавычка в literal-строке PowerShell экранируется удвоением
+            ps_archive = str(archive).replace("'", "''")
+            ps_target = str(app_unpack).replace("'", "''")
+            commands.append(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    f"Expand-Archive -LiteralPath '{ps_archive}' "
+                    f"-DestinationPath '{ps_target}' -Force",
+                ]
+            )
+        encoding = "cp866" if sys.platform == "win32" else "utf-8"
+        unpacked = False
+        for command in commands:
+            try:
+                result = subprocess.run(command, capture_output=True, timeout=UNPACK_TIMEOUT_S)
+            except (OSError, subprocess.SubprocessError) as exc:
+                logger.warning("распаковка инструментом: %s не запустился: %s", command[0], exc)
+                continue
+            if result.returncode == 0:
+                unpacked = True
+                break
+            logger.warning(
+                "распаковка инструментом: %s вернул %d: %.200s",
+                command[0],
+                result.returncode,
+                result.stderr.decode(encoding, errors="replace").strip(),
+            )
+        if not unpacked:
+            shutil.rmtree(app_unpack, ignore_errors=True)
+            return False
+        try:
+            # в корне архива кроме app/ лежат батники и инструкция —
+            # в app_new забирается только app/ (как в bat-распаковке)
+            (app_unpack / "app").replace(app_new)
+        except OSError as exc:
+            logger.warning("распаковка инструментом: app из архива не переносится: %s", exc)
+            shutil.rmtree(app_unpack, ignore_errors=True)
+            return False
+        shutil.rmtree(app_unpack, ignore_errors=True)
+        if not (app_new / "ves-agent.exe").exists():
+            logger.warning("распаковка инструментом: в app_new нет ves-agent.exe")
+            shutil.rmtree(app_new, ignore_errors=True)
+            return False
+        return True
 
     @staticmethod
     def _extract(archive: Path, base: Path) -> None:

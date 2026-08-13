@@ -521,6 +521,19 @@ class AgentStorage:
             ).fetchone()
         return int(row["n"])
 
+    def pending_photos_count(self) -> int:
+        """Снимки, ещё не загруженные на центр (метрика heartbeat, 0.4.13).
+
+        Считаются все незагруженные, включая фото несинхронизированных
+        записей: для мониторинга важно «сколько снимков ещё не в центре»,
+        а не размер очереди загрузчика.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM weighing_photos_local WHERE uploaded = 0"
+            ).fetchone()
+        return int(row["n"])
+
     def get_weighing(self, uuid: UUID) -> WeighingRecord | None:
         with self._lock:
             row = self._conn.execute(

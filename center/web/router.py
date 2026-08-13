@@ -36,6 +36,7 @@ from center.db import repo
 from center.db.models import (
     Agent,
     AuditLog,
+    MonitoringSeverity,
     ReleaseChannel,
     Scale,
     ScaleKind,
@@ -43,6 +44,7 @@ from center.db.models import (
     UserRole,
     Weighing,
 )
+from center.monitoring import KIND_LABELS, ActiveAlert, MonitoringService, MonitoringThresholds
 from center.releases import AgentRelease, latest_release
 from center.web import queries, refs_admin, users_admin
 from shared import card as weight_card
@@ -114,14 +116,28 @@ def _fmt_kg(value: float | None) -> str:
     return f"{value:,.0f}".replace(",", " ")
 
 
+def _plural_ru(n: int, one: str, few: str, many: str) -> str:
+    """Русское склонение при числительном: 1 запись, 2 записи, 5 записей."""
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return few
+    return many
+
+
 def create_panel_router(
     session_factory: SessionFactory,
     hub: AgentHub,
     *,
     photos_dir: Path,
     releases_dir: Path | None = None,
+    monitor: MonitoringService | None = None,
 ) -> APIRouter:
-    """Маршруты панели; сессии — общий SessionMiddleware приложения центра."""
+    """Маршруты панели; сессии — общий SessionMiddleware приложения центра.
+
+    ``monitor`` — сервис мониторинга (активные алерты и счётчики дашборда);
+    None допустим в тестах отдельных экранов — блок алертов тогда пуст.
+    """
     router = APIRouter(prefix="/panel")
 
     # второй каталог — общая с агентом печатная форма весовой карточки
@@ -129,6 +145,8 @@ def create_panel_router(
     templates.env.filters["fmt_dt"] = _fmt_dt
     templates.env.filters["fmt_time"] = _fmt_time
     templates.env.filters["fmt_kg"] = _fmt_kg
+    # подписи типов событий мониторинга (экран «События», блок алертов)
+    templates.env.filters["kind_label"] = lambda kind: KIND_LABELS.get(kind, kind)
     templates.env.globals["expires"] = queries.tare_expires_at
     # метка старта процесса — сброс браузерного кэша статики при деплое
     templates.env.globals["static_v"] = str(int(datetime.now(UTC).timestamp()))
@@ -268,32 +286,118 @@ def create_panel_router(
             return None
         return await asyncio.to_thread(latest_release, releases_dir)
 
+    def _dashboard_counters(
+        scales: list[queries.DashboardScale],
+        online_map: dict[int, bool],
+        equipment: dict[int, EquipmentStatus],
+        alerts: list[ActiveAlert],
+        today: tuple[int, int],
+    ) -> list[dict[str, str]]:
+        """Четыре счётчика дашборда (по макету center-dashboard)."""
+        with_agent = [item for item in scales if item.agent]
+        offline = [item for item in with_agent if not online_map.get(item.scale.id)]
+        if not offline:
+            online_sub = "все агенты онлайн" if with_agent else "агенты не заведены"
+        else:
+            online_sub = f"{offline[0].site.name} офлайн"
+            if len(offline) > 1:
+                online_sub += f" и ещё {len(offline) - 1}"
+        total_today, tarings_today = today
+        danger_count = sum(1 for alert in alerts if alert.severity is MonitoringSeverity.DANGER)
+        backlog_records = sum(eq.pending_sync_count for eq in equipment.values())
+        backlog_photos = sum(eq.pending_photos_count or 0 for eq in equipment.values())
+        backlog = backlog_records + backlog_photos
+        return [
+            {
+                "k": "Весов на связи",
+                "v": f"{len(with_agent) - len(offline)} / {len(with_agent)}",
+                "cls": "warn" if offline else "ok",
+                "sub": online_sub,
+            },
+            {
+                "k": "Взвешиваний сегодня",
+                "v": str(total_today),
+                "cls": "",
+                "sub": (
+                    f"из них {tarings_today} "
+                    + _plural_ru(tarings_today, "тарирование", "тарирования", "тарирований")
+                ),
+            },
+            {
+                "k": "Активных алертов",
+                "v": str(len(alerts)),
+                "cls": "danger" if danger_count else ("warn" if alerts else "ok"),
+                "sub": (
+                    f"{danger_count} "
+                    + _plural_ru(danger_count, "критичный", "критичных", "критичных")
+                    if danger_count
+                    else "всё спокойно"
+                ),
+            },
+            {
+                "k": "Очередь досылки",
+                "v": str(backlog),
+                "cls": "warn" if backlog else "ok",
+                # очереди видны только по агентам на связи (heartbeat)
+                "sub": (
+                    f"записей: {backlog_records} · снимков: {backlog_photos}"
+                    if backlog
+                    else "всё синхронизировано"
+                ),
+            },
+        ]
+
+    async def _dashboard_context(scope: int | None) -> dict[str, Any]:
+        """Общий контекст дашборда и его HTMX-фрагмента (счётчики + алерты
+        обновляются тем же опросом, что и сетка объектов)."""
+        scales = await asyncio.to_thread(_db, lambda s: queries.dashboard_scales(s, scope))
+        today = await asyncio.to_thread(_db, lambda s: queries.weighings_today(s, scope))
+        equipment = _equipment_map(scales)
+        alerts = monitor.active_alerts(scope) if monitor is not None else []
+        # «на связи» — как у детектора офлайна: статус online И свежий
+        # heartbeat; иначе счётчик показывал бы «все агенты онлайн» рядом
+        # с danger-алертом о молчащем агенте (замечание ревью 13.08.2026)
+        now = datetime.now(UTC)
+        stale_s = MonitoringThresholds().stale_heartbeat_s
+        online_map: dict[int, bool] = {}
+        for item in scales:
+            last_seen = item.agent.last_seen_at if item.agent else None
+            if last_seen is not None and last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=UTC)
+            online_map[item.scale.id] = bool(
+                item.agent
+                and item.agent.status.value == "online"
+                and last_seen is not None
+                and (now - last_seen).total_seconds() <= stale_s
+            )
+        return {
+            "scales": scales,
+            "equipment": equipment,
+            "alerts": alerts,
+            "online_map": online_map,
+            "counters": _dashboard_counters(scales, online_map, equipment, alerts, today),
+            "all_good": not alerts
+            and all(item.agent is None or online_map.get(item.scale.id) for item in scales),
+            "release": await _latest_release(),
+        }
+
     @router.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request, user: PanelUser, scope: PanelScope) -> HTMLResponse:
-        scales = await asyncio.to_thread(_db, lambda s: queries.dashboard_scales(s, scope))
+        context = await _dashboard_context(scope)
         return render(
             "dashboard.html",
             request,
             user=user,
-            scales=scales,
-            equipment=_equipment_map(scales),
-            release=await _latest_release(),
             update_note=request.query_params.get("update_note"),
+            **context,
         )
 
     @router.get("/fragments/dashboard", response_class=HTMLResponse)
     async def dashboard_fragment(
         request: Request, user: PanelUser, scope: PanelScope
     ) -> HTMLResponse:
-        scales = await asyncio.to_thread(_db, lambda s: queries.dashboard_scales(s, scope))
-        return render(
-            "fragments/dashboard_grid.html",
-            request,
-            user=user,
-            scales=scales,
-            equipment=_equipment_map(scales),
-            release=await _latest_release(),
-        )
+        context = await _dashboard_context(scope)
+        return render("fragments/dashboard_grid.html", request, user=user, **context)
 
     @router.post("/scales/{scale_id}/update-agent")
     async def update_agent(request: Request, admin: PanelAdmin, scale_id: int) -> RedirectResponse:
@@ -721,6 +825,39 @@ def create_panel_router(
             search=search or "",
             refs=refs,
             filters={"site_id": site, "scale_id": scale},
+        )
+
+    @router.get("/events", response_class=HTMLResponse)
+    async def events_page(
+        request: Request,
+        user: PanelUser,
+        scope: PanelScope,
+        site_id: str = "",
+        page: int = 1,
+    ) -> HTMLResponse:
+        """Журнал событий мониторинга (переходы детекторов, этап 2)."""
+        refs = await asyncio.to_thread(_db, lambda s: queries.filter_options(s, scope))
+        site = _parse_id(site_id)
+        if scope is not None:
+            # разграничение по объекту сильнее фильтра экрана (как везде)
+            site = scope
+        page = max(1, page)
+        rows, total = await asyncio.to_thread(
+            _db,
+            lambda s: queries.monitoring_events_page(
+                s, site_id=site, page=page, page_size=PAGE_SIZE
+            ),
+        )
+        return render(
+            "events.html",
+            request,
+            user=user,
+            rows=rows,
+            total=total,
+            page=page,
+            pages=max(1, -(-total // PAGE_SIZE)),
+            refs=refs,
+            filters={"site_id": site},
         )
 
     @router.get("/refs", response_class=HTMLResponse)

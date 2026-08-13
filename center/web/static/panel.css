@@ -137,6 +137,70 @@ a:hover { color: #1f7fbb; }
 
 /* ---------- Дашборд «Состояние объектов» ---------- */
 
+/* живая часть: счётчики + алерты + сетка обновляются одним HTMX-опросом */
+#dashboard-live { display: flex; flex-direction: column; gap: 20px; }
+
+/* счётчики (макет center-dashboard: 4 KPI-карточки) */
+.kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+.kpi-card {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 18px 20px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .05);
+}
+.kpi-k { font-size: 12px; font-weight: 700; color: var(--muted); }
+.kpi-v {
+  font-size: 30px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  margin-top: 6px;
+  line-height: 1;
+}
+.kpi-v.kpi-ok { color: #16855a; }
+.kpi-v.kpi-warn { color: #b5780f; }
+.kpi-v.kpi-danger { color: #c2333e; }
+.kpi-sub { font-size: 12px; color: var(--faint); margin-top: 6px; }
+
+/* активные алерты (блок над сеткой объектов) */
+.alerts-card {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .05);
+  overflow: hidden;
+}
+.alerts-head { padding: 14px 20px; border-bottom: 1px solid var(--border); font-size: 15px; font-weight: 800; }
+.alert-row { display: flex; align-items: center; gap: 14px; padding: 12px 20px; border-bottom: 1px solid var(--surface-2); }
+.alert-row:last-child { border-bottom: none; }
+.alert-msg { font-size: 14px; font-weight: 600; flex: 1; min-width: 0; }
+.alert-time { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* всё в порядке: зелёная плашка вместо блока алертов */
+.allgood-card {
+  background: #EAF3EF;
+  border: 1px solid #CFE6DB;
+  border-radius: var(--r-md);
+  padding: 16px 22px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.allgood-check {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #1FA36F;
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  font-weight: 800;
+  flex: none;
+}
+.allgood-title { font-size: 15px; font-weight: 800; color: #0B5E43; }
+.allgood-sub { font-size: 13px; color: var(--muted); }
+
 #dashboard-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -684,6 +748,7 @@ a.photo-frame.js-lightbox { cursor: zoom-in; }
 
 @media (max-width: 1100px) {
   #dashboard-grid { grid-template-columns: repeat(2, 1fr); }
+  .kpi-row { grid-template-columns: repeat(2, 1fr); }
   .refs-layout { grid-template-columns: 1fr; }
   .refs-menu { position: static; flex-direction: row; flex-wrap: wrap; }
   .values-row { grid-template-columns: 1fr; }

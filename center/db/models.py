@@ -280,6 +280,50 @@ class AuditLog(Base):
     details: Mapped[dict[str, object] | None] = mapped_column(JSONB, default=None)
 
 
+class MonitoringSeverity(enum.StrEnum):
+    """Важность события мониторинга; OK — восстановление после проблемы."""
+
+    DANGER = "danger"  # объект не работает (агент офлайн, индикатор молчит)
+    WARNING = "warning"  # работает, но требует внимания (камера, очереди, диск)
+    OK = "ok"  # проблема закрылась
+
+
+class MonitoringEvent(Base):
+    """Журнал переходов мониторинга: проблема появилась / закрылась.
+
+    Пишется детекторами MonitoringService на ПЕРЕХОДАХ состояния (не
+    каждый тик), читается экраном «События» панели и рассылается в
+    Telegram (notified_at — отметка доставки; NULL у события старше
+    окна доставки означает «уже не шлём»).
+    """
+
+    __tablename__ = "monitoring_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    scale_id: Mapped[int] = mapped_column(ForeignKey("scales.id"))
+    kind: Mapped[str] = mapped_column(String(32))  # offline/no_data/camera/...
+    severity: Mapped[MonitoringSeverity] = mapped_column(
+        _str_enum(MonitoringSeverity, "monitoring_severity")
+    )
+    # полный текст с именами объекта и весов: событие самодостаточно
+    # и в Telegram, и в журнале (имена на момент события, не сегодняшние)
+    message: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, server_default=func.now()
+    )
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+    __table_args__ = (
+        Index("ix_monitoring_events_created", "created_at"),
+        # выборка недоставленных уведомлений (нотификатор опрашивает часто)
+        Index(
+            "ix_monitoring_events_unnotified",
+            "id",
+            postgresql_where=text("notified_at IS NULL"),
+        ),
+    )
+
+
 class AgentRelease(Base):
     """Релизы агентов для автообновления (architecture §7а, этап 2)."""
 

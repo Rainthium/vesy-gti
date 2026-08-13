@@ -12,6 +12,7 @@
       <a href="/panel/" class="{{ 'active' if active_tab == 'dashboard' else '' }}">Объекты</a>
       <a href="/panel/journal" class="{{ 'active' if active_tab == 'journal' else '' }}">Взвешивания</a>
       <a href="/panel/tares" class="{{ 'active' if active_tab == 'tares' else '' }}">Тарирования</a>
+      <a href="/panel/events" class="{{ 'active' if active_tab == 'events' else '' }}">События</a>
       <a href="/panel/refs" class="{{ 'active' if active_tab == 'refs' else '' }}">Справочники</a>
       {% if role == 'admin' %}<a href="/panel/users" class="{{ 'active' if active_tab == 'users' else '' }}">Пользователи</a>{% endif %}
     </nav>
