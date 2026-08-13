@@ -137,10 +137,38 @@ def create_panel_router(
         with session_factory() as session:
             return fn(session)
 
+    def _safe_next_path(raw: str) -> str | None:
+        """Внутренний путь панели для возврата после входа либо None.
+
+        Только пути под /panel/ без обратных слэшей (браузеры нормализуют
+        «\\» в «/») и без сегментов «..» (нормализация вывела бы путь
+        из-под панели) — форма входа не должна уметь уводить на чужой
+        адрес (open redirect); замечания ревью 13.08.2026.
+        """
+        if not raw.startswith("/panel/") or "\\" in raw:
+            return None
+        if ".." in raw.split("/"):
+            return None
+        return raw
+
+    # служебные пути не годятся в next: после входа человек увидел бы
+    # голый HTMX-фрагмент или JPEG вместо страницы (замечание ревью)
+    _NO_NEXT_PREFIXES = ("/panel/fragments/", "/panel/photos/")
+
+    def _login_redirect(request: Request) -> HTTPException:
+        """303 на вход; запрошенный путь уезжает в ?next= — после входа
+        пользователь попадает туда, куда шёл (например, на печать
+        карточки из новой вкладки), а не на дашборд."""
+        location = "/panel/login"
+        path = request.url.path
+        if path not in ("/panel/", "/panel") and not path.startswith(_NO_NEXT_PREFIXES):
+            location += f"?next={quote(path, safe='/')}"
+        return HTTPException(status_code=303, headers={"Location": location})
+
     def current_user(request: Request) -> str:
         user = request.session.get("panel_user")
         if not user:
-            raise HTTPException(status_code=303, headers={"Location": "/panel/login"})
+            raise _login_redirect(request)
         return str(user)
 
     PanelUser = Annotated[str, Depends(current_user)]
@@ -155,13 +183,13 @@ def create_panel_router(
         """
         login = request.session.get("panel_login")
         if not login:
-            raise HTTPException(status_code=303, headers={"Location": "/panel/login"})
+            raise _login_redirect(request)
         active, site_id = await asyncio.to_thread(
             _db, lambda s: users_admin.visible_site_id(s, str(login))
         )
         if not active:
             # учётку отключили при живой сессии — на вход, а не «видно всё»
-            raise HTTPException(status_code=303, headers={"Location": "/panel/login"})
+            raise _login_redirect(request)
         return site_id
 
     PanelScope = Annotated[int | None, Depends(current_scope)]
@@ -173,26 +201,32 @@ def create_panel_router(
     # --- вход/выход ---
 
     @router.get("/login", response_class=HTMLResponse)
-    def login_page(request: Request) -> HTMLResponse:
-        return render("login.html", request, error=None)
+    def login_page(request: Request, next: str = "") -> HTMLResponse:
+        return render("login.html", request, error=None, next=_safe_next_path(next) or "")
 
     @router.post("/login", response_class=HTMLResponse)
     async def login_submit(
         request: Request,
         login: Annotated[str, Form()],
         password: Annotated[str, Form()],
+        next: Annotated[str, Form()] = "",
     ) -> Response:
         user = await asyncio.to_thread(
             _db, lambda s: queries.verify_user(s, login.strip(), password)
         )
         if user is None:
             logger.warning("панель: неудачный вход %s", login.strip())
-            return render("login.html", request, error="Неверный логин или пароль")
+            return render(
+                "login.html",
+                request,
+                error="Неверный логин или пароль",
+                next=_safe_next_path(next) or "",
+            )
         request.session["panel_user"] = user.full_name or user.login
         request.session["panel_login"] = user.login
         request.session["panel_role"] = user.role.value
         logger.info("панель: вход %s (%s)", user.login, user.role.value)
-        return RedirectResponse("/panel/", status_code=303)
+        return RedirectResponse(_safe_next_path(next) or "/panel/", status_code=303)
 
     @router.post("/logout")
     def logout(request: Request) -> RedirectResponse:
@@ -206,7 +240,7 @@ def create_panel_router(
         разжалованный или отключённый админ теряет экран сразу."""
         login = request.session.get("panel_login")
         if not login:
-            raise HTTPException(status_code=303, headers={"Location": "/panel/login"})
+            raise _login_redirect(request)
         ok = await asyncio.to_thread(_db, lambda s: users_admin.is_active_admin(s, str(login)))
         if not ok:
             raise HTTPException(status_code=403, detail="Доступ только администраторам")

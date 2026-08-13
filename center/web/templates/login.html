@@ -22,6 +22,8 @@
       </div>
       {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
       <form method="post" action="/panel/login">
+        {# после входа вернуться на запрошенную страницу (например, печать карточки) #}
+        <input type="hidden" name="next" value="{{ next }}">
         <label>Логин <input name="login" autocomplete="username" required autofocus></label>
         <label>Пароль <input name="password" type="password" autocomplete="current-password" required></label>
         <button type="submit" class="login-submit">Войти</button>

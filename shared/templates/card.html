@@ -60,7 +60,9 @@
   @page { size: A4 portrait; margin: 10mm 12mm; }
   @media print {
     body { background: #fff; font-size: 12.5px; }
-    .sheet { max-width: none; margin: 0; padding: 0; box-shadow: none; }
+    /* уже печатной области (186мм) с запасом: впритык браузер резал правый
+       край, пока масштаб не снижали до 98% (боевой урок 13.08.2026) */
+    .sheet { max-width: 178mm; margin: 0 auto; padding: 0; box-shadow: none; }
     .no-print { display: none; }
   }
 </style>

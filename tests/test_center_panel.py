@@ -801,7 +801,49 @@ class TestPanelAuthRedirects:
         """Любой экран без сессии → 303 на /panel/login."""
         response = panel_env.client.get(path, follow_redirects=False)
         assert response.status_code == 303
-        assert response.headers["location"] == "/panel/login"
+        assert response.headers["location"].startswith("/panel/login")
+
+
+class TestPanelLoginNext:
+    """Возврат после входа на запрошенную страницу (боевой урок 13.08.2026:
+    печать карточки из новой вкладки выбивала на вход и теряла цель)."""
+
+    def test_login_next_roundtrip(self, panel_env: PanelEnv) -> None:
+        target = f"/panel/journal/{panel_env.weighing_id}/card"
+        redirect = panel_env.client.get(target, follow_redirects=False)
+        assert redirect.headers["location"] == f"/panel/login?next={target}"
+        page = panel_env.client.get(f"/panel/login?next={target}").text
+        assert f'name="next" value="{target}"' in page
+        response = panel_env.client.post(
+            "/panel/login",
+            data={"login": PANEL_LOGIN, "password": PANEL_PASSWORD, "next": target},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == target
+        assert panel_env.client.get(target).status_code == 200
+
+    @pytest.mark.parametrize(
+        "evil",
+        [
+            "//evil.example",
+            "http://evil.example/x",
+            "/journal",
+            "/\\panel/x",
+            "/panel/../admin",
+            "",
+        ],
+    )
+    def test_login_next_rejects_external_and_foreign(self, panel_env: PanelEnv, evil: str) -> None:
+        """Кривой или внепанельный next не уводит со входа (open redirect) —
+        после входа открывается дашборд."""
+        response = panel_env.client.post(
+            "/panel/login",
+            data={"login": PANEL_LOGIN, "password": PANEL_PASSWORD, "next": evil},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/panel/"
 
 
 class TestPanelLogin:
@@ -983,7 +1025,7 @@ class TestPrintCardRoute:
             f"/panel/journal/{panel_env.weighing_id}/card", follow_redirects=False
         )
         assert response.status_code == 303
-        assert response.headers["location"] == "/panel/login"
+        assert response.headers["location"].startswith("/panel/login")
 
     def test_weighing_card_renders(self, panel_env: PanelEnv) -> None:
         """Номер ВЕС-, объект и весы, обе даты, предупреждение о недосланном
@@ -1110,7 +1152,7 @@ class TestPanelLogout:
         assert panel_env.client.get("/panel/").status_code == 200
         response = panel_env.client.post("/panel/logout", follow_redirects=False)
         assert response.status_code == 303
-        assert response.headers["location"] == "/panel/login"
+        assert response.headers["location"].startswith("/panel/login")
         after = panel_env.client.get("/panel/journal", follow_redirects=False)
         assert after.status_code == 303
 

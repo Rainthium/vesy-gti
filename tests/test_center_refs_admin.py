@@ -944,7 +944,7 @@ class TestRefsRoutesAccess:
         """GET /panel/refs без сессии → 303 на форму входа."""
         response = refs_env.client.get("/panel/refs", follow_redirects=False)
         assert response.status_code == 303
-        assert response.headers["location"] == "/panel/login"
+        assert response.headers["location"].startswith("/panel/login")
 
     @pytest.mark.parametrize(("path", "data"), REFS_MUTATIONS)
     def test_post_without_session_redirects(
@@ -953,7 +953,7 @@ class TestRefsRoutesAccess:
         """POST-мутации без сессии → 303 на форму входа, не 500."""
         response = refs_env.client.post(path, data=data, follow_redirects=False)
         assert response.status_code == 303
-        assert response.headers["location"] == "/panel/login"
+        assert response.headers["location"].startswith("/panel/login")
 
     def test_dispatcher_reads_page_without_forms(self, refs_env: RefsEnv) -> None:
         """Диспетчеру экран доступен на чтение (200), но форм редактирования
@@ -1526,7 +1526,7 @@ class TestScaleSettingsRoutes:
             f"/panel/refs/scales/{refs_env.scale_id}/settings", follow_redirects=False
         )
         assert response.status_code == 303
-        assert response.headers["location"] == "/panel/login"
+        assert response.headers["location"].startswith("/panel/login")
 
     def test_dispatcher_gets_403_on_get_and_post(self, refs_env: RefsEnv) -> None:
         """Страница настроек — только админам: диспетчеру 403 и на GET, и на POST."""

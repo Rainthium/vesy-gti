@@ -265,10 +265,50 @@ class TestAuth:
         ["/", "/equipment", "/fragments/status", "/fragments/journal", "/cameras/front.jpg"],
     )
     def test_protected_paths_redirect_to_login(self, client: TestClient, path: str) -> None:
-        """Без входа все экраны, фрагменты и камеры отправляют на /login."""
+        """Без входа все экраны, фрагменты и камеры отправляют на /login;
+        запрошенный путь уезжает в ?next= (кроме главной)."""
         response = client.get(path, follow_redirects=False)
         assert response.status_code == 303
-        assert response.headers["Location"] == "/login"
+        location = response.headers["Location"]
+        if path == "/" or path.startswith(("/fragments/", "/cameras/")):
+            # главной next не нужен, а служебные пути в него не годятся:
+            # после входа человек увидел бы голый фрагмент или JPEG
+            assert location == "/login"
+        else:
+            assert location == f"/login?next={path}"
+
+    def test_login_next_roundtrip(self, client: TestClient, services: FakeServices) -> None:
+        """Вход возвращает на запрошенную страницу: печать карточки из
+        новой вкладки не теряется на форме входа (боевой урок 13.08.2026)."""
+        record = make_record()
+        services.journal = [record]
+        target = f"/card/{record.uuid}"
+        redirect = client.get(target, follow_redirects=False)
+        assert redirect.headers["Location"] == f"/login?next={target}"
+        page = client.get(f"/login?next={target}").text
+        assert f'name="next" value="{target}"' in page
+        response = client.post(
+            "/login",
+            data={"login": OPERATOR_LOGIN, "password": OPERATOR_PASSWORD, "next": target},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["Location"] == target
+        assert client.get(target).status_code == 200
+
+    @pytest.mark.parametrize(
+        "evil",
+        ["//evil.example", "http://evil.example/x", "/\\evil.example", "/card/../etc", "..", ""],
+    )
+    def test_login_next_rejects_external(self, client: TestClient, evil: str) -> None:
+        """Кривой next не уводит с сайта (open redirect): вход ведёт на главную."""
+        response = client.post(
+            "/login",
+            data={"login": OPERATOR_LOGIN, "password": OPERATOR_PASSWORD, "next": evil},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["Location"] == "/"
 
     def test_login_page_open_without_session(self, client: TestClient) -> None:
         """Страница входа доступна анониму и рендерится по реальному шаблону."""

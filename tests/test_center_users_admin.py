@@ -606,7 +606,7 @@ class TestUsersRoutesAccess:
         """GET /panel/users без сессии → 303 на форму входа."""
         response = users_env.client.get("/panel/users", follow_redirects=False)
         assert response.status_code == 303
-        assert response.headers["location"] == "/panel/login"
+        assert response.headers["location"].startswith("/panel/login")
 
     @pytest.mark.parametrize(("path", "data"), USERS_MUTATIONS)
     def test_post_without_session_redirects(
@@ -615,7 +615,7 @@ class TestUsersRoutesAccess:
         """POST-мутации без сессии → 303 на форму входа, не 500."""
         response = users_env.client.post(path, data=data, follow_redirects=False)
         assert response.status_code == 303
-        assert response.headers["location"] == "/panel/login"
+        assert response.headers["location"].startswith("/panel/login")
 
     def test_dispatcher_gets_403_on_page(self, users_env: UsersEnv) -> None:
         """Диспетчер с живой сессией получает 403 на экран пользователей."""

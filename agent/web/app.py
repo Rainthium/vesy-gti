@@ -17,6 +17,7 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, WebSocket
@@ -56,6 +57,27 @@ def _fmt_kg(value: float | None) -> str:
     return f"{value:,.0f}".replace(",", "\u202f")
 
 
+def safe_next_path(raw: str) -> str | None:
+    """Внутренний путь для возврата после входа либо None.
+
+    Только абсолютный путь этого же сайта: «//host» (schema-relative) и
+    обратные слэши (браузеры нормализуют их в «/») отсекаются — форма
+    входа не должна уметь уводить оператора на чужой адрес (open
+    redirect); сегменты «..» тоже (браузер нормализует их до перехода,
+    и путь ушёл бы не туда, куда его проверяли) — замечание ревью.
+    """
+    if not raw.startswith("/") or raw.startswith("//") or "\\" in raw:
+        return None
+    if ".." in raw.split("/"):
+        return None
+    return raw
+
+
+# служебные пути не годятся в next: после входа оператор увидел бы голый
+# HTMX-фрагмент или JPEG вместо страницы (замечание ревью)
+_NO_NEXT_PREFIXES = ("/fragments/", "/manual-fragments/", "/cameras/", "/photos/")
+
+
 def create_app(
     services: AgentServices, *, session_secret: str, cookie_name: str = "ves_session"
 ) -> FastAPI:
@@ -87,10 +109,19 @@ def create_app(
     # --- общие помощники ---
 
     def current_operator(request: Request) -> str:
-        """Имя вошедшего оператора; без входа — редирект на /login."""
+        """Имя вошедшего оператора; без входа — редирект на /login.
+
+        Запрошенный путь уезжает в ?next=: после входа оператор попадает
+        туда, куда шёл (например, на печать карточки из новой вкладки),
+        а не на главную (боевой урок 13.08.2026).
+        """
         operator = request.session.get("operator")
         if not operator:
-            raise HTTPException(status_code=303, headers={"Location": "/login"})
+            location = "/login"
+            path = request.url.path
+            if path != "/" and not path.startswith(_NO_NEXT_PREFIXES):
+                location += f"?next={quote(path, safe='/')}"
+            raise HTTPException(status_code=303, headers={"Location": location})
         return str(operator)
 
     Operator = Annotated[str, Depends(current_operator)]
@@ -135,22 +166,28 @@ def create_app(
     # --- вход/выход ---
 
     @app.get("/login", response_class=HTMLResponse)
-    def login_page(request: Request) -> HTMLResponse:
-        return render("login.html", request, error=None)
+    def login_page(request: Request, next: str = "") -> HTMLResponse:
+        return render("login.html", request, error=None, next=safe_next_path(next) or "")
 
     @app.post("/login", response_class=HTMLResponse)
     def login_submit(
         request: Request,
         login: Annotated[str, Form()],
         password: Annotated[str, Form()],
+        next: Annotated[str, Form()] = "",
     ) -> Response:
         display_name = services.verify_operator(login.strip(), password)
         if display_name is None:
             logger.warning("неудачный вход оператора: %s", login.strip())
-            return render("login.html", request, error="Неверный логин или пароль")
+            return render(
+                "login.html",
+                request,
+                error="Неверный логин или пароль",
+                next=safe_next_path(next) or "",
+            )
         request.session["operator"] = display_name
         logger.info("вход оператора: %s", display_name)
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse(safe_next_path(next) or "/", status_code=303)
 
     @app.post("/logout")
     def logout(request: Request) -> RedirectResponse:
