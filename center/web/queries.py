@@ -223,7 +223,15 @@ def journal_export_rows(
 
 @dataclass(frozen=True)
 class WeighingCard:
-    """Карточка записи журнала: запись, весы, объект, фото, связанная тара."""
+    """Карточка записи журнала: запись, весы, объект, фото, связанная тара.
+
+    ``expired_tare`` — запись УСТАРЕВШЕГО тарирования сцепки, когда нетто не
+    рассчитано (просьба Игоря 14.08.2026): страница записи и печатная карта
+    показывают его дату и массу. Ищется по реестру тарирований при показе,
+    сама запись взвешивания не меняется (правило №2); заполняется только
+    тарированием, истёкшим к моменту взвешивания, — тарирования позже записи
+    не меняют старую карту задним числом (граница — в weighing_card).
+    """
 
     weighing: Weighing
     scale: Scale
@@ -231,6 +239,7 @@ class WeighingCard:
     photos: list[WeighingPhoto]
     tare_weighing: Weighing | None
     storno_of: Weighing | None
+    expired_tare: Weighing | None
 
 
 def weighing_card(
@@ -259,6 +268,22 @@ def weighing_card(
     )
     tare = session.get(Weighing, weighing.tare_weighing_id) if weighing.tare_weighing_id else None
     storno = session.get(Weighing, weighing.storno_of) if weighing.storno_of else None
+    expired_tare = None
+    if (
+        weighing.operation is Operation.WEIGHING
+        and weighing.netto is None
+        and weighing.code is ErrorCode.OK
+        and weighing.vehicle_number
+        and weighing.weighed_at is not None
+    ):
+        registry = session.get(
+            TareRegistry, (weighing.vehicle_number, weighing.trailer_number or "")
+        )
+        # «устарело» — только истёкшее К МОМЕНТУ ВЗВЕШИВАНИЯ (граница правила
+        # №4, как в shared.card.netto_note): не истёкшее сюда не попадает,
+        # а тарирование ПОЗЖЕ записи не меняет старую карту задним числом
+        if registry is not None and registry.tared_at < three_months_before(weighing.weighed_at):
+            expired_tare = session.get(Weighing, registry.weighing_id)
     return WeighingCard(
         weighing=weighing,
         scale=scale,
@@ -266,6 +291,7 @@ def weighing_card(
         photos=photos,
         tare_weighing=tare,
         storno_of=storno,
+        expired_tare=expired_tare,
     )
 
 

@@ -292,6 +292,7 @@ class TestPrepareSuccess:
         assert record.weighed_at is not None and record.weighed_at.tzinfo == UTC
         assert preview.tare == tare
         assert preview.no_valid_tare is False
+        assert preview.expired_tare is None  # действующая тара — устаревшую не ищем
         assert preview.photos == []  # камер нет — снимков нет, но это не ошибка
         assert flow.pending() is preview
 
@@ -356,15 +357,20 @@ class TestPrepareSuccess:
         assert record.netto is None
         assert preview.tare is None
         assert preview.no_valid_tare is True
+        assert preview.expired_tare is None  # сцепка не тарировалась вовсе
 
     def test_weighing_with_stale_tare(self, env: FlowEnv) -> None:
-        """Тара старше 3 месяцев не действует: как будто тары нет (правило №4)."""
-        put_tare(env.storage, tared_at=datetime.now(UTC) - timedelta(days=120))
+        """Тара старше 3 месяцев не действует: как будто тары нет (правило №4),
+        но устаревшее тарирование попадает в превью — карточка результата
+        покажет его дату и массу (просьба Игоря 14.08.2026)."""
+        stale_at = datetime.now(UTC) - timedelta(days=120)
+        stale = put_tare(env.storage, tared_at=stale_at)
         preview = prepare_weighing(env.make_flow())
         assert preview.record.tare_value is None
         assert preview.record.netto is None
         assert preview.tare is None
         assert preview.no_valid_tare is True
+        assert preview.expired_tare == stale
 
     def test_taring_does_not_lookup_tare(self, env: FlowEnv) -> None:
         """При тарировании тара не ищется: massa и есть тара этого ТС."""

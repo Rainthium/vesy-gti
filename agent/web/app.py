@@ -31,7 +31,7 @@ import agent
 from agent.web.services import AgentServices
 from agent.weighing.manual import ManualFlowError
 from shared import card as weight_card
-from shared.enums import CameraRole, Operation, ScaleStatus
+from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,19 @@ def _fmt_time(value: datetime | None) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
     return value.astimezone().strftime("%H:%M")
+
+
+def _fmt_date(value: datetime | None) -> str:
+    """ДД.ММ.ГГГГ в местном времени весового ПК (даты тарирований).
+
+    Сырой strftime по UTC-дате показывал бы вечерние тарирования
+    вчерашним днём (замечание ревью 14.08.2026).
+    """
+    if value is None:
+        return "—"
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone().strftime("%d.%m.%Y")
 
 
 def _fmt_kg(value: float | None) -> str:
@@ -104,6 +117,7 @@ def create_app(
     # второй каталог — общая с центром печатная форма весовой карточки
     templates = Jinja2Templates(directory=[str(TEMPLATES_DIR), str(weight_card.TEMPLATES_DIR)])
     templates.env.filters["fmt_time"] = _fmt_time
+    templates.env.filters["fmt_date"] = _fmt_date
     templates.env.filters["fmt_kg"] = _fmt_kg
     # версия в адресе статики: без неё браузер оператора продолжал бы
     # показывать старые стили после обновления агента (так и вышло с
@@ -326,6 +340,16 @@ def create_app(
                 registry_row = services.tare_by_weighing_uuid(record.tare_weighing_uuid)
                 if registry_row is not None:
                     tared_at = registry_row.tared_at
+        # взвешивание без нетто: примечанию «почему» нужна строка реестра
+        # сцепки — там лежит и устаревшая тара (просьба Игоря 14.08.2026)
+        latest_tare = None
+        if (
+            record.operation is Operation.WEIGHING
+            and record.netto is None
+            and record.code is ErrorCode.OK
+            and record.vehicle_number
+        ):
+            latest_tare = services.latest_tare(record.vehicle_number, record.trailer_number)
         # рамки ПЕРЕД/ЗАД печатаются всегда; недоступный снимок — пустая рамка
         urls: dict[CameraRole, str] = {}
         unreachable = False
@@ -357,6 +381,9 @@ def create_app(
             photo_rear_url=urls.get(CameraRole.REAR),
             photos_note=note,
             record_uuid=str(record.uuid),
+            code_ok=record.code is ErrorCode.OK,
+            latest_tared_at=latest_tare.tared_at if latest_tare else None,
+            latest_tare_value=latest_tare.tare_value if latest_tare else None,
         )
         # без render(): печатной странице не нужны пилюли шапки и опрос весов
         return templates.TemplateResponse(
@@ -446,13 +473,23 @@ def create_app(
         """Подсказка «по сцепке найдена тара …» (HTMX по вводу номеров).
 
         Тара ищется по ПАРЕ голова+прицеп (решение 09.08.2026) — смена
-        прицепа в форме сразу убирает подсказку чужой тары.
+        прицепа в форме сразу убирает подсказку чужой тары. Если действующей
+        тары нет, но сцепка тарировалась раньше, оператор ещё ДО фиксации
+        видит устаревшее тарирование и что нетто не рассчитается (просьба
+        Игоря 14.08.2026).
         """
         tare = None
+        expired = None
         number = vehicle_number.strip().upper()
         if number:
-            tare = services.find_active_tare(number, trailer_number.strip().upper() or None)
-        return render("fragments/tare_hint.html", request, operator=operator, tare=tare)
+            trailer = trailer_number.strip().upper() or None
+            tare = services.find_active_tare(number, trailer)
+            if tare is None:
+                # строка реестра при отсутствии действующей тары — устаревшая
+                expired = services.latest_tare(number, trailer)
+        return render(
+            "fragments/tare_hint.html", request, operator=operator, tare=tare, expired=expired
+        )
 
     # --- живой вес ---
 

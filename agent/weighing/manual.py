@@ -57,6 +57,10 @@ class ManualPreview:
     record: WeighingRecord
     photos: list[StoredPhoto]
     tare: TareRecord | None  # найденная тара (для карточки результата)
+    # последнее (устаревшее) тарирование сцепки, когда действующего нет:
+    # оператор видит дату и массу на карточке результата (просьба Игоря
+    # 14.08.2026); в расчёт нетто оно не подставляется (правило №4)
+    expired_tare: TareRecord | None = None
 
     @property
     def no_valid_tare(self) -> bool:
@@ -166,11 +170,15 @@ class ManualOperationFlow:
 
         tare: TareRecord | None = None
         netto: float | None = None
+        expired_tare: TareRecord | None = None
         if operation is Operation.WEIGHING:
             # правило №4 (ред. 09.08.2026): тара — только совпавшей СЦЕПКИ
             tare = self._storage.find_active_tare(vehicle_number, weighed_at, trailer_number)
             if tare is not None:
                 netto = weight - tare.tare_value
+            else:
+                # строка реестра без действующей тары — устаревшее тарирование
+                expired_tare = self._storage.latest_tare(vehicle_number, trailer_number)
 
         record = WeighingRecord(
             uuid=record_uuid,
@@ -192,6 +200,7 @@ class ManualOperationFlow:
             record=record,
             photos=photos,
             tare=tare,
+            expired_tare=expired_tare,
         )
         with self._lock:
             old = self._pending

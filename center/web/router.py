@@ -49,7 +49,7 @@ from center.monitoring import KIND_LABELS, ActiveAlert, MonitoringService, Monit
 from center.releases import AgentRelease, latest_release
 from center.web import queries, refs_admin, users_admin
 from shared import card as weight_card
-from shared.enums import CameraRole, Operation, WeighingSource
+from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 from shared.messages import (
     CycleSettings,
     EquipmentStatus,
@@ -777,6 +777,9 @@ def create_panel_router(
             photo_rear_url=urls.get(CameraRole.REAR),
             photos_note=note,
             record_uuid=str(w.uuid),
+            code_ok=w.code is ErrorCode.OK,
+            latest_tared_at=card.expired_tare.weighed_at if card.expired_tare else None,
+            latest_tare_value=card.expired_tare.massa if card.expired_tare else None,
         )
 
     @router.get("/journal/{weighing_id}/card", response_class=HTMLResponse)

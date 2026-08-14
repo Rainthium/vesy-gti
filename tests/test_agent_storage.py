@@ -578,6 +578,23 @@ class TestTareRegistry:
         assert found.tared_at == tared_at
         assert found.tared_at.tzinfo is not None
 
+    def test_latest_tare_returns_expired(self, storage: AgentStorage) -> None:
+        """latest_tare отдаёт и устаревшую строку — для примечаний «почему
+        нет нетто» (14.08.2026); find_active_tare её же не отдаёт (правило №4)."""
+        expired = make_tare("01KG777DDD", datetime(2026, 2, 1, 10, 0, tzinfo=UTC))
+        storage.replace_tare_registry([expired])
+        assert storage.find_active_tare("01KG777DDD", self.NOW) is None
+        assert storage.latest_tare("01KG777DDD") == expired
+
+    def test_latest_tare_matches_pair_only(self, storage: AgentStorage) -> None:
+        """Сцепка и для примечания та же: пара голова+прицеп, не голова отдельно."""
+        pair = make_tare("01KG111AAA", self.NOW - timedelta(days=200), trailer_number="BD123AB")
+        storage.replace_tare_registry([pair])
+        assert storage.latest_tare("01KG111AAA", "BD123AB") == pair
+        assert storage.latest_tare("01KG111AAA") is None
+        assert storage.latest_tare("01KG111AAA", "XX999YY") is None
+        assert storage.latest_tare("09KG999ZZZ", "BD123AB") is None
+
 
 class TestThreeMonthsBefore:
     """Календарная арифметика: 3 месяца назад с поджатием дня месяца."""

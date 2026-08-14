@@ -54,8 +54,10 @@
           <b>{{ w.tare_value | fmt_kg }}</b> <span class="unit">kg</span>
           {% if card.tare_weighing %}
           <small><a href="/panel/journal/{{ card.tare_weighing.id }}">тарирование от {{ card.tare_weighing.weighed_at | fmt_dt }}</a></small>
+          {% elif card.expired_tare %}
+          <small><a href="/panel/journal/{{ card.expired_tare.id }}">тарирование от {{ card.expired_tare.weighed_at | fmt_dt }}</a>, тара {{ card.expired_tare.massa | fmt_kg }} kg — устарело, нетто не рассчитано</small>
           {% elif w.tare_value is none %}
-          <small>действующей тары нет</small>
+          <small>действующего тарирования сцепки не было</small>
           {% endif %}
         </div>
         <div class="value-box netto">

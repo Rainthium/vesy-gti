@@ -519,6 +519,60 @@ class TestWeighingCard:
         assert card.tare_weighing is not None
         assert card.tare_weighing.uuid == taring.uuid
         assert card.storno_of is None
+        assert card.expired_tare is None  # тара подставлена — примечание не нужно
+
+    def test_expired_tare_linked(self, db_session: Session) -> None:
+        """Брутто без нетто: карточка находит УСТАРЕВШЕЕ тарирование сцепки
+        по реестру — страница и печать покажут его дату и массу (14.08.2026)."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        taring = _make_taring(
+            vehicle_number="01KG777AAA",
+            trailer_number="01KG500AB",
+            weighed_at=datetime.now(UTC) - timedelta(days=200),
+        )
+        repo.save_weighing_record(db_session, scale.id, taring)
+        brutto = _make_record(trailer_number="01KG500AB")  # без tare_value/netto
+        repo.save_weighing_record(db_session, scale.id, brutto)
+
+        row = db_session.execute(select(Weighing).where(Weighing.uuid == brutto.uuid)).scalar_one()
+        card = queries.weighing_card(db_session, row.id)
+        assert card is not None
+        assert card.tare_weighing is None
+        assert card.expired_tare is not None
+        assert card.expired_tare.uuid == taring.uuid
+
+    def test_expired_tare_ignores_other_coupling(self, db_session: Session) -> None:
+        """Тарирование другой сцепки (иной прицеп) примечанию не годится."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        taring = _make_taring(
+            vehicle_number="01KG777AAA",
+            trailer_number="OLD01AB",
+            weighed_at=datetime.now(UTC) - timedelta(days=200),
+        )
+        repo.save_weighing_record(db_session, scale.id, taring)
+        brutto = _make_record(trailer_number="NEW02CD")
+        repo.save_weighing_record(db_session, scale.id, brutto)
+
+        row = db_session.execute(select(Weighing).where(Weighing.uuid == brutto.uuid)).scalar_one()
+        card = queries.weighing_card(db_session, row.id)
+        assert card is not None
+        assert card.expired_tare is None
+
+    def test_taring_after_weighing_not_shown(self, db_session: Session) -> None:
+        """Сцепку перетарировали ПОСЛЕ взвешивания: старая запись не меняет
+        содержание задним числом — примечания нет (правило №2 по духу)."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        brutto = _make_record(weighed_at=datetime.now(UTC) - timedelta(days=10))
+        repo.save_weighing_record(db_session, scale.id, brutto)
+        taring = _make_taring(
+            vehicle_number="01KG777AAA", weighed_at=datetime.now(UTC) - timedelta(days=2)
+        )
+        repo.save_weighing_record(db_session, scale.id, taring)
+
+        row = db_session.execute(select(Weighing).where(Weighing.uuid == brutto.uuid)).scalar_one()
+        card = queries.weighing_card(db_session, row.id)
+        assert card is not None
+        assert card.expired_tare is None
 
     def test_storno_of_linked(self, db_session: Session) -> None:
         """Сторно-запись ссылается на исходную (storno_of)."""
@@ -1272,6 +1326,43 @@ class TestPrintCardRoute:
             session.commit()
         page = panel_env.client.get(f"/panel/journal/{panel_env.weighing_id}/card").text
         assert "№3961 от 26.02.2026 (срок до 26.02.2027)" in page
+
+    def test_expired_tare_note_on_card_and_record(self, panel_env: PanelEnv) -> None:
+        """Брутто без нетто: печать и страница записи показывают дату, время
+        и МАССУ устаревшего тарирования (просьба Игоря 14.08.2026); строки
+        «Полная масса, кг:» на карте больше нет — она дублировала таблицу."""
+        _login(panel_env)
+        with panel_env.factory() as session:
+            taring = _make_taring(
+                vehicle_number="55KG111XXX",
+                massa=15300.0,
+                weighed_at=datetime(2026, 3, 5, 8, 31, tzinfo=UTC),
+            )
+            repo.save_weighing_record(session, panel_env.scale_id, taring)
+            brutto = _make_record(vehicle_number="55KG111XXX", massa=42850.0)
+            repo.save_weighing_record(session, panel_env.scale_id, brutto)
+            brutto_id = session.execute(
+                select(Weighing.id).where(Weighing.uuid == brutto.uuid)
+            ).scalar_one()
+            taring_id = session.execute(
+                select(Weighing.id).where(Weighing.uuid == taring.uuid)
+            ).scalar_one()
+        page = panel_env.client.get(f"/panel/journal/{brutto_id}/card").text
+        assert "Полная масса" not in page
+        assert (
+            "Нетто не рассчитано: тарирование сцепки от 05.03.2026 14:31:00, "
+            "тара 15 300 кг — устарело (тара действует 3 календарных месяца)." in page
+        )
+        record = panel_env.client.get(f"/panel/journal/{brutto_id}").text
+        assert f'href="/panel/journal/{taring_id}"' in record
+        assert "устарело, нетто не рассчитано" in record
+
+    def test_card_with_netto_has_no_note(self, panel_env: PanelEnv) -> None:
+        """Тара подставлена: ни строки «Полная масса», ни примечания."""
+        _login(panel_env)
+        page = panel_env.client.get(f"/panel/journal/{panel_env.weighing_id}/card").text
+        assert "Полная масса" not in page
+        assert "Нетто не рассчитано" not in page
 
     def test_foreign_card_404_for_bound_user(self, panel_env: PanelEnv) -> None:
         """Ограниченный объектом пользователь не печатает чужие записи."""

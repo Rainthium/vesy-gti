@@ -1,6 +1,8 @@
 {# Подсказка о найденной таре под полем «Номер головы» #}
 <div id="tare-hint">
   {% if tare %}
-  <p class="tare-found">По номеру головы найдена тара: <b>{{ tare.tare_value | fmt_kg }} kg</b> · тарирование от {{ tare.tared_at.strftime('%d.%m.%Y') }}</p>
+  <p class="tare-found">По номеру головы найдена тара: <b>{{ tare.tare_value | fmt_kg }} kg</b> · тарирование от {{ tare.tared_at | fmt_date }}</p>
+  {% elif expired %}
+  <p class="tare-expired">Тарирование сцепки от {{ expired.tared_at | fmt_date }}, тара {{ expired.tare_value | fmt_kg }} kg — устарело, нетто не будет рассчитано</p>
   {% endif %}
 </div>

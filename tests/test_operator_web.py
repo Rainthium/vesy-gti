@@ -115,6 +115,9 @@ class FakeServices:
         self.manual_preview: ManualPreview | None = None
         self.manual_capture_args: tuple[Operation, str, str | None, str] | None = None
         self.tare_hint: TareRecord | None = None
+        # строка реестра сцепки без фильтра срока (устаревшая тара)
+        self.latest_tare_result: TareRecord | None = None
+        self.latest_tare_args: list[tuple[str, str | None]] = []
         self.reopen_called = False
         self.photo_queue_stats = (0, 0)
         self.clock_offset: float | None = 0.4
@@ -227,6 +230,12 @@ class FakeServices:
         self, vehicle_number: str, trailer_number: str | None = None
     ) -> TareRecord | None:
         return self.tare_hint
+
+    def latest_tare(
+        self, vehicle_number: str, trailer_number: str | None = None
+    ) -> TareRecord | None:
+        self.latest_tare_args.append((vehicle_number, trailer_number))
+        return self.latest_tare_result
 
 
 @pytest.fixture
@@ -700,6 +709,48 @@ class TestPrintCard:
         page = operator_client.get(f"/card/{weighing.uuid}").text
         assert "08.07.2026 08:25:00" in page
 
+    def test_expired_tare_note_with_date_and_mass(
+        self, operator_client: TestClient, services: FakeServices
+    ) -> None:
+        """Взвешивание без нетто: вместо снятой строки «Полная масса» — дата,
+        время и масса устаревшего тарирования (просьба Игоря 14.08.2026)."""
+        record = make_record(tare_value=None, netto=None, trailer_number="01KG555BB")
+        services.journal = [record]
+        services.latest_tare_result = TareRecord(
+            vehicle_number="01KG777AAA",
+            trailer_number="01KG555BB",
+            tare_value=15300.0,
+            tared_at=datetime(2026, 3, 5, 8, 31, tzinfo=UTC),
+            weighing_uuid=uuid4(),
+        )
+        page = operator_client.get(f"/card/{record.uuid}").text
+        assert "Полная масса" not in page
+        assert (
+            "Нетто не рассчитано: тарирование сцепки от 05.03.2026 14:31:00, "
+            "тара 15 300 кг — устарело" in page
+        )
+        # реплика спрошена именно по сцепке записи (голова + прицеп)
+        assert services.latest_tare_args == [("01KG777AAA", "01KG555BB")]
+
+    def test_never_tared_note(self, operator_client: TestClient, services: FakeServices) -> None:
+        """Строки реестра по сцепке нет — честное «тарирования не было»."""
+        record = make_record(tare_value=None, netto=None)
+        services.journal = [record]
+        page = operator_client.get(f"/card/{record.uuid}").text
+        assert "Нетто не рассчитано: действующего тарирования сцепки не было." in page
+
+    def test_card_with_netto_has_no_note(
+        self, operator_client: TestClient, services: FakeServices
+    ) -> None:
+        """Действующая тара подставлена: ни строки «Полная масса», ни примечания;
+        реплику реестра даже не спрашиваем."""
+        record = make_record()
+        services.journal = [record]
+        page = operator_client.get(f"/card/{record.uuid}").text
+        assert "Полная масса" not in page
+        assert "Нетто не рассчитано" not in page
+        assert services.latest_tare_args == []
+
     def test_unreachable_photo_note(
         self, operator_client: TestClient, services: FakeServices
     ) -> None:
@@ -995,6 +1046,80 @@ class TestManualRoutes:
         assert response.status_code == 200
         assert 'id="tare-hint"' in response.text
         assert "найдена тара" not in response.text
+
+    def test_tare_hint_expired(self, services: FakeServices, operator_client: TestClient) -> None:
+        """Действующей тары нет, но сцепка тарировалась: оператор ещё до
+        фиксации видит дату, массу и что нетто не рассчитается (14.08.2026)."""
+        services.tare_hint = None
+        services.latest_tare_result = TareRecord(
+            vehicle_number="01KG777AAA",
+            tare_value=15300.0,
+            tared_at=datetime(2026, 3, 5, 8, 31, tzinfo=UTC),
+            weighing_uuid=uuid4(),
+        )
+        response = operator_client.get(
+            "/manual-fragments/tare-hint",
+            params={"vehicle_number": "01kg777aaa", "trailer_number": " 01kg555bb "},
+        )
+        assert response.status_code == 200
+        assert "Тарирование сцепки от 05.03.2026" in response.text
+        assert f"15{NNBSP}300" in response.text
+        assert "устарело, нетто не будет рассчитано" in response.text
+        # номера нормализованы так же, как при поиске действующей тары
+        assert services.latest_tare_args == [("01KG777AAA", "01KG555BB")]
+
+    def test_tare_hint_active_hides_expired(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Действующая тара найдена — про устаревшую ни слова и ни запроса."""
+        services.tare_hint = TareRecord(
+            vehicle_number="01KG777AAA",
+            tare_value=15300.0,
+            tared_at=datetime(2026, 7, 1, tzinfo=UTC),
+            weighing_uuid=uuid4(),
+        )
+        services.latest_tare_result = services.tare_hint
+        response = operator_client.get(
+            "/manual-fragments/tare-hint", params={"vehicle_number": "01KG777AAA"}
+        )
+        assert "устарело" not in response.text
+        assert services.latest_tare_args == []
+
+    def test_tare_hint_never_tared_is_empty(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Сцепки нет в реестре вовсе — фрагмент пустой, как раньше."""
+        response = operator_client.get(
+            "/manual-fragments/tare-hint", params={"vehicle_number": "01KG777AAA"}
+        )
+        assert "найдена тара" not in response.text
+        assert "устарело" not in response.text
+
+    def test_manual_result_shows_expired_tare(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Карточка результата без нетто называет последнее тарирование
+        сцепки с датой и массой (просьба Игоря 14.08.2026)."""
+        services.online = False
+        record = make_record(
+            tare_value=None, netto=None, source=WeighingSource.LOCAL_OFFLINE, operator=OPERATOR_NAME
+        )
+        services.manual_preview = ManualPreview(
+            preview_id="pv-test-2",
+            record=record,
+            photos=[],
+            tare=None,
+            expired_tare=TareRecord(
+                vehicle_number="01KG777AAA",
+                tare_value=15300.0,
+                tared_at=datetime(2026, 3, 5, 8, 31, tzinfo=UTC),
+                weighing_uuid=uuid4(),
+            ),
+        )
+        response = operator_client.post("/manual/weighing", data={"vehicle_number": "01KG777AAA"})
+        assert "Нет тарирования за последние 3 месяца" in response.text
+        assert "Последнее тарирование сцепки — 05.03.2026" in response.text
+        assert f"15{NNBSP}300" in response.text
 
     def test_tare_hint_requires_login(self, client: TestClient) -> None:
         """Без сессии фрагмент недоступен — 303 на /login."""

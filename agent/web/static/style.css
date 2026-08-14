@@ -692,6 +692,7 @@ table.journal .cell-print { text-align: center; }
 /* подсказка «найдена тара» — пустой контейнер не должен занимать слот в flex-колонке */
 #tare-hint { display: contents; }
 .tare-found { font-size: 12.5px; color: var(--muted); margin: -8px 0 0; }
+.tare-expired { font-size: 12.5px; color: #b5780f; margin: -8px 0 0; }
 
 /* нижняя полоса действий (общая для формы и результата) */
 .manual .actions,

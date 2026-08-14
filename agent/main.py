@@ -368,6 +368,14 @@ class AgentRuntime:
             (trailer_number or "").strip().upper() or None,
         )
 
+    def latest_tare(
+        self, vehicle_number: str, trailer_number: str | None = None
+    ) -> TareRecord | None:
+        return self._storage.latest_tare(
+            vehicle_number.strip().upper(),
+            (trailer_number or "").strip().upper() or None,
+        )
+
 
 def build_runtime(
     config: AgentConfig,

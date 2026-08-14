@@ -192,17 +192,18 @@ def _upsert_tare(session: Session, row: Weighing, record: WeighingRecord) -> Non
     session.execute(statement)
 
 
-def load_tare_registry(session: Session, *, now: datetime | None = None) -> list[TareRecord]:
-    """Снимок реестра действующих тар для репликации агентам (правило №4).
+def load_tare_registry(session: Session) -> list[TareRecord]:
+    """Снимок реестра тар для репликации агентам — ЦЕЛИКОМ, без фильтра срока.
 
-    Просроченные записи (старше 3 календарных месяцев) не реплицируются.
+    Правило №4 держит читающая сторона (find_active_tare агента проверяет
+    границу на каждой подстановке), а устаревшие строки нужны агенту для
+    примечаний «почему нет нетто» на карте и подсказок оператору (14.08.2026):
+    с фильтром агентская печать теряла дату устаревшего тарирования после
+    первого же обновления реплики. Реестр — одна строка на сцепку, размер
+    ограничен парком машин.
     """
-    moment = now or datetime.now(UTC)
-    threshold = three_months_before(moment)
     rows = session.execute(
-        select(TareRegistry, Weighing.uuid)
-        .join(Weighing, Weighing.id == TareRegistry.weighing_id)
-        .where(TareRegistry.tared_at >= threshold)
+        select(TareRegistry, Weighing.uuid).join(Weighing, Weighing.id == TareRegistry.weighing_id)
     ).all()
     return [
         TareRecord(

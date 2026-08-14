@@ -19,6 +19,7 @@ from pathlib import Path
 
 from shared.enums import Operation
 from shared.messages import VerificationInfo
+from shared.tare import TARE_VALIDITY_MONTHS, three_months_before
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 _LOGO_PATH = Path(__file__).parent / "assets" / "gti-logo.jpg"
@@ -35,6 +36,12 @@ def _to_bishkek(moment: datetime) -> datetime:
         # naive-время в системе означает UTC (как в БД)
         moment = moment.replace(tzinfo=UTC)
     return moment.astimezone(BISHKEK_TZ)
+
+
+def _as_utc(moment: datetime) -> datetime:
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
 
 
 def card_number(operation: Operation, weighed_at: datetime) -> str:
@@ -82,6 +89,44 @@ def logo_data_uri() -> str:
     return "data:image/jpeg;base64," + base64.b64encode(_LOGO_PATH.read_bytes()).decode()
 
 
+def netto_note(
+    *,
+    operation: Operation,
+    code_ok: bool,
+    weighed_at: datetime,
+    vehicle_number: str | None,
+    netto: float | None,
+    latest_tared_at: datetime | None,
+    latest_tare_value: float | None,
+) -> str | None:
+    """Примечание «почему нет нетто» для карты и экранов (просьба Игоря 14.08.2026).
+
+    Только для успешных взвешиваний без нетто; расчёт и записи не трогаются —
+    примечание вычисляется при показе из реестра тарирований (``latest_*`` —
+    его строка по сцепке, там лежит и устаревшая тара). «Устарело» пишется,
+    лишь когда тарирование действительно истекло К МОМЕНТУ ВЗВЕШИВАНИЯ
+    (правило №4 той же границей, что и подстановка): это заодно отсекает
+    тарирования ПОЗЖЕ записи — сцепку перетарировали после, и чужая свежая
+    дата на старой карте появиться не должна: карта печатается одинаково
+    в любой момент и с обеих сторон.
+    """
+    if operation is not Operation.WEIGHING or netto is not None or not code_ok:
+        return None
+    if not vehicle_number:
+        return "Нетто не рассчитано: номер транспортного средства не передан."
+    # граница в UTC — ровно как у подстановки (agent storage / center repo);
+    # от бишкекского времени поджатие дня (31-е число) даёт иной результат
+    if latest_tared_at is not None and _as_utc(latest_tared_at) < three_months_before(
+        _as_utc(weighed_at)
+    ):
+        return (
+            f"Нетто не рассчитано: тарирование сцепки от {fmt_dt(latest_tared_at)}, "
+            f"тара {fmt_kg(latest_tare_value)} кг — устарело "
+            f"(тара действует {TARE_VALIDITY_MONTHS} календарных месяца)."
+        )
+    return "Нетто не рассчитано: действующего тарирования сцепки не было."
+
+
 def build_card(
     *,
     operation: Operation,
@@ -100,6 +145,9 @@ def build_card(
     photo_rear_url: str | None,
     photos_note: str | None,
     record_uuid: str,
+    code_ok: bool = True,
+    latest_tared_at: datetime | None = None,
+    latest_tare_value: float | None = None,
 ) -> dict[str, object]:
     """Контекст печатной формы card.html (вся логика прочерков — здесь).
 
@@ -107,7 +155,10 @@ def build_card(
     тарирования; для тарирования ``massa`` — масса тары, брутто и нетто
     печатаются прочерками. Фото ПЕРЕД/ЗАД печатаются всегда (просьба Игоря
     13.08.2026): недоступный снимок — пустая рамка, ``photos_note`` —
-    предупреждение, почему снимка нет и где его взять.
+    предупреждение, почему снимка нет и где его взять. ``latest_*`` —
+    строка реестра тарирований по сцепке (включая устаревшую тару) для
+    примечания «почему нет нетто»; в таблице масс тара остаётся прочерком —
+    печатная таблица совпадает с записью и ответом АИС.
     """
     is_weighing = operation is Operation.WEIGHING
     return {
@@ -121,7 +172,15 @@ def build_card(
         "vehicle_number": vehicle_number,
         "trailer_number": trailer_number,
         "verification_text": verification_text(verification),
-        "massa_text": fmt_kg(massa),
+        "netto_note": netto_note(
+            operation=operation,
+            code_ok=code_ok,
+            weighed_at=weighed_at,
+            vehicle_number=vehicle_number,
+            netto=netto,
+            latest_tared_at=latest_tared_at,
+            latest_tare_value=latest_tare_value,
+        ),
         "gross_text": fmt_kg(massa) if is_weighing else "—",
         "tare_text": fmt_kg(tare_value) if is_weighing else fmt_kg(massa),
         "netto_text": fmt_kg(netto) if is_weighing else "—",

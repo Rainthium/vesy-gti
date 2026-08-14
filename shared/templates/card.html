@@ -32,7 +32,7 @@
   .props td:last-child { font-weight: bold; }
 
   .results-title { font-weight: bold; margin-bottom: 6px; }
-  .full-massa { margin-bottom: 8px; }
+  .netto-note { margin-bottom: 8px; font-style: italic; }
   .weights { width: 100%; border-collapse: collapse; margin-bottom: 14px; }
   .weights th, .weights td { border: 1px solid #000; padding: 5px 8px; text-align: center; }
   .weights th { font-size: 12px; }
@@ -112,7 +112,7 @@
   </table>
 
   <div class="results-title">Результаты взвешивания:</div>
-  <div class="full-massa">Полная масса, кг: <b>{{ card.massa_text }}</b></div>
+  {% if card.netto_note %}<div class="netto-note">{{ card.netto_note }}</div>{% endif %}
   <table class="weights">
     <tr><th>БРУТТО, кг</th><th>ТАРА, кг</th><th>НЕТТО, кг</th></tr>
     <tr><td>{{ card.gross_text }}</td><td>{{ card.tare_text }}</td><td>{{ card.netto_text }}</td></tr>

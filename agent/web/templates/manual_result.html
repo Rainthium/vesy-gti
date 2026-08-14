@@ -21,7 +21,7 @@
           <div class="value-box"><span>Брутто</span><b>{{ preview.record.massa | fmt_kg }}</b> kg</div>
           {% if preview.tare %}
           <div class="value-box"><span>Тара</span><b>{{ preview.record.tare_value | fmt_kg }}</b> kg
-            <small>тарирование от {{ preview.tare.tared_at.strftime('%d.%m.%Y') }}</small></div>
+            <small>тарирование от {{ preview.tare.tared_at | fmt_date }}</small></div>
           {% endif %}
         </div>
         {% if preview.tare %}
@@ -29,7 +29,8 @@
         {% endif %}
         {% if preview.no_valid_tare %}
         <div class="warn"><b>Нет тарирования за последние 3 месяца</b>
-          <p>Нетто не рассчитано; запись сохранена с признаком «нет тары»;
+          <p>{% if preview.expired_tare %}Последнее тарирование сцепки — {{ preview.expired_tare.tared_at | fmt_date }}, тара {{ preview.expired_tare.tare_value | fmt_kg }} kg — устарело.
+            {% endif %}Нетто не рассчитано; запись сохранена с признаком «нет тары»;
             тара подставится, если ТС пройдёт тарирование позже.</p></div>
         {% endif %}
       {% else %}

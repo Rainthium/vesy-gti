@@ -208,6 +208,11 @@ class DemoServices:
     ) -> TareRecord | None:
         return self._storage.find_active_tare(vehicle_number, datetime.now(UTC), trailer_number)
 
+    def latest_tare(
+        self, vehicle_number: str, trailer_number: str | None = None
+    ) -> TareRecord | None:
+        return self._storage.latest_tare(vehicle_number, trailer_number)
+
     def camera_roles(self) -> list[CameraRole]:
         return [CameraRole.FRONT, CameraRole.REAR]
 

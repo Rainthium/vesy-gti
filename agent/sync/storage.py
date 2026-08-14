@@ -604,6 +604,28 @@ class AgentStorage:
             )
         return len(rows)
 
+    def latest_tare(
+        self, vehicle_number: str, trailer_number: str | None = None
+    ) -> TareRecord | None:
+        """Последнее тарирование СЦЕПКИ без проверки срока действия.
+
+        Реестр хранит одну строку на сцепку, и с 14.08.2026 центр реплицирует
+        его целиком, включая просроченные строки, — они нужны примечаниям
+        «почему нет нетто» (просьба Игоря; от центра старого выката реплика
+        приезжает без просроченных — примечание честно откатывается к
+        «тарирования не было»). В расчёт нетто устаревшую тару подставлять
+        нельзя — для расчёта только find_active_tare (правило №4).
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM tare_registry_replica"
+                " WHERE vehicle_number = ? AND trailer_number = ?",
+                (vehicle_number, trailer_number or ""),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._tare_from_row(row)
+
     def find_active_tare(
         self, vehicle_number: str, at: datetime, trailer_number: str | None = None
     ) -> TareRecord | None:
@@ -615,16 +637,8 @@ class AgentStorage:
         """
         if at.tzinfo is None:
             at = at.replace(tzinfo=UTC)
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM tare_registry_replica"
-                " WHERE vehicle_number = ? AND trailer_number = ?",
-                (vehicle_number, trailer_number or ""),
-            ).fetchone()
-        if row is None:
-            return None
-        record = self._tare_from_row(row)
-        if record.tared_at < three_months_before(at):
+        record = self.latest_tare(vehicle_number, trailer_number)
+        if record is None or record.tared_at < three_months_before(at):
             return None
         return record
 

@@ -704,8 +704,10 @@ class TestRepoTareRegistry:
         assert tare.tare_value == 8000.0, "старое тарирование затёрло актуальную тару"
         assert tare.weighing_id == _weighing_by_uuid(session, newer.uuid).id
 
-    def test_load_tare_registry_filters_expired(self, repo_env: tuple[Session, int, int]) -> None:
-        """Реплицируются только действующие тары (моложе 3 календарных месяцев)."""
+    def test_load_tare_registry_includes_expired(self, repo_env: tuple[Session, int, int]) -> None:
+        """Реплика — весь реестр, включая просроченные строки (14.08.2026):
+        агенту они нужны для примечаний «почему нет нетто» и подсказок;
+        правило №4 держит find_active_tare на читающей стороне."""
         session, scale_id, _ = repo_env
         now = datetime.now(UTC)
         fresh = _make_taring(vehicle_number="01KG111AAA", weighed_at=now - timedelta(days=5))
@@ -716,9 +718,11 @@ class TestRepoTareRegistry:
         repo.save_weighing_record(session, scale_id, expired)
 
         records = repo.load_tare_registry(session)
-        assert [r.vehicle_number for r in records] == ["01KG111AAA"]
-        assert records[0].tare_value == 7500.0
-        assert records[0].weighing_uuid == fresh.uuid
+        assert {r.vehicle_number for r in records} == {"01KG111AAA", "01KG222BBB"}
+        by_vehicle = {r.vehicle_number: r for r in records}
+        assert by_vehicle["01KG111AAA"].tare_value == 7500.0
+        assert by_vehicle["01KG111AAA"].weighing_uuid == fresh.uuid
+        assert by_vehicle["01KG222BBB"].tare_value == 9000.0  # устаревшая — тоже в реплике
 
     def test_find_active_tare(self, repo_env: tuple[Session, int, int]) -> None:
         """find_active_tare: действующая → запись; просроченная/неизвестная → None."""
