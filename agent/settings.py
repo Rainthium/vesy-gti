@@ -47,6 +47,18 @@ class CameraStreamsLike(Protocol):
     def set_cameras(self, cameras: list[CameraConfig]) -> None: ...
 
 
+class CameraPreviewLike(Protocol):
+    """Минимум от превью веб-интерфейса (реализация — main.AgentRuntime).
+
+    Боевой урок Кызыл-Кыи 14.08.2026: свап ролей камер из центра доехал
+    до съёмки операций, но превью оператора продолжало снимать по
+    локальному config.toml до рестарта службы — оператор видел старые
+    камеры и считал, что настройка не сработала.
+    """
+
+    def set_cameras(self, cameras: list[CameraConfig]) -> None: ...
+
+
 # ожидание живого индикатора после смены порта: живой cas22 шлёт поток
 # непрерывно, статус OK появляется за ~1-2 с после открытия порта; запас
 # покрывает пару циклов переоткрытия драйвера (rx_error_timeout_s=3 +
@@ -113,11 +125,18 @@ class SettingsManager:
         self._camera_health = camera_health
         # потоки RTSP-камер: смена URL из центра пересоздаёт их на лету
         self._camera_streams = camera_streams
+        # превью веб-интерфейса подписывается отдельным шагом сборки:
+        # AgentRuntime создаётся ПОЗЖЕ менеджера (см. build_runtime)
+        self._preview: CameraPreviewLike | None = None
         self._storage = storage
         # таймауты съёмки локального конфига по ролям: камеры из центра
         # наследуют их (см. merge_center_settings — та же логика при старте)
         self._local_camera_timeouts = local_camera_timeouts or {}
         self._lock = asyncio.Lock()  # настройки применяются по одной
+
+    def set_preview(self, preview: CameraPreviewLike) -> None:
+        """Подписать превью веб-интерфейса на смену камер из центра."""
+        self._preview = preview
 
     async def handle(self, update: ScaleConfigUpdate) -> ConfigStatus:
         """Обработчик для CenterClient: применить и сохранить снимок."""
@@ -151,6 +170,8 @@ class SettingsManager:
             self._camera_health.set_cameras(cameras)
             if self._camera_streams is not None:
                 self._camera_streams.set_cameras(cameras)
+            if self._preview is not None:
+                self._preview.set_cameras(cameras)
             logger.info("настройки центра: камеры применены (%d)", len(cameras))
 
         status = ConfigStatus(ok=True)

@@ -23,7 +23,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from agent.cameras.capture import CameraConfig
+from agent.cameras.capture import CameraConfig, CameraShot
 from agent.config import AgentConfig, load_config
 from agent.main import (
     CameraHealth,
@@ -351,6 +351,49 @@ class TestBuildRuntime:
             assert alive, "агент остановился сам: выключенный ретеншн снял остальные задачи"
 
         asyncio.run(asyncio.wait_for(scenario(), timeout=30))
+
+    def test_center_cameras_reach_preview_live(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Смена камер из центра доезжает до превью БЕЗ рестарта службы.
+
+        Боевой урок Кызыл-Кыи 14.08.2026: свап ролей камер из панели доехал
+        до съёмки операций, а превью оператора продолжало снимать по
+        локальному config.toml — оператор видел прежние камеры и считал,
+        что настройка не сработала.
+        """
+        config = AgentConfig.model_validate(
+            config_data(
+                storage={
+                    "db_path": str(tmp_path / "agent.sqlite3"),
+                    "photos_dir": str(tmp_path / "photos"),
+                }
+            )
+        )
+        runtime, _, storage, _, _, _, _, _, streams = build_runtime(config)
+        streams.stop_all()
+        try:
+            captured: list[str] = []
+
+            def fake_capture(camera: CameraConfig, *, ffmpeg_path: str) -> CameraShot:
+                captured.append(camera.snapshot_url or "")
+                return CameraShot(role=camera.role, jpeg=b"\xff\xd8", captured_at=datetime.now(UTC))
+
+            monkeypatch.setattr("agent.main.capture", fake_capture)
+            runtime.camera_snapshot(CameraRole.FRONT)  # кадр лёг в кэш превью
+            runtime.set_cameras(
+                [
+                    CameraConfig(role=CameraRole.FRONT, snapshot_url="http://u:p@10.9.9.9/new"),
+                    CameraConfig(role=CameraRole.REAR, snapshot_url="http://u:p@10.9.9.8/new"),
+                ]
+            )
+            # кэш сброшен: следующий кадр идёт сразу с НОВОЙ камеры
+            runtime.camera_snapshot(CameraRole.FRONT)
+            assert captured[-1] == "http://u:p@10.9.9.9/new"
+            # роль, которой не было в локальном конфиге, появилась в превью
+            assert runtime.camera_roles() == [CameraRole.FRONT, CameraRole.REAR]
+        finally:
+            storage.close()
 
     def test_camera_snapshot_unknown_role_raises(self, tmp_path: Path) -> None:
         config = AgentConfig.model_validate(

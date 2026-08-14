@@ -205,6 +205,12 @@ class AgentRuntime:
         self._preview_locks: dict[CameraRole, threading.Lock] = {
             camera.role: threading.Lock() for camera in config.cameras
         }
+        # камеры превью изменяемы: применение scale_config на лету заменяет
+        # их через set_cameras (боевой урок Кызыл-Кыи 14.08.2026 — свап ролей
+        # из центра доезжал до съёмки операций, но не до превью оператора)
+        self._preview_cameras: dict[CameraRole, CameraConfig] = {
+            camera.role: camera for camera in config.camera_configs()
+        }
         self._info = AgentInfo(
             site_name=config.site_name,
             scale_name=config.scale_name,
@@ -235,7 +241,16 @@ class AgentRuntime:
         return self._storage.recent_weighings_synced(limit)
 
     def camera_roles(self) -> list[CameraRole]:
-        return [camera.role for camera in self._config.cameras]
+        return list(self._preview_cameras)
+
+    def set_cameras(self, cameras: list[CameraConfig]) -> None:
+        """Заменить камеры превью на лету (scale_config из центра).
+
+        Кэш сбрасывается: последний кадр прежней камеры не должен
+        отдаваться как «свежий» после смены URL или ролей.
+        """
+        self._preview_cameras = {camera.role: camera for camera in cameras}
+        self._preview_cache.clear()
 
     def camera_snapshot(self, role: CameraRole) -> CameraShot:
         """Кадр для превью оператора: из кэша, съёмка — не чаще одной за раз.
@@ -245,10 +260,8 @@ class AgentRuntime:
         даже подустаревший: превью живёт с темпом, который тянет камера,
         а каскад параллельных ffmpeg не возникает.
         """
-        for camera in self._config.cameras:
-            if camera.role is role:
-                break
-        else:
+        camera = self._preview_cameras.get(role)
+        if camera is None:
             raise ValueError(f"камера {role} не настроена")
         if self._streams is not None:
             # потоковая камера: буфер обновляется раз в секунду — превью
@@ -269,7 +282,7 @@ class AgentRuntime:
                 role=role, jpeg=None, captured_at=datetime.now(UTC), error="съёмка уже идёт"
             )
         try:
-            shot = capture(camera.to_camera_config(), ffmpeg_path=self._config.ffmpeg_path)
+            shot = capture(camera, ffmpeg_path=self._config.ffmpeg_path)
             # ошибку тоже кэшируем: мёртвая камера не должна заставлять
             # каждый запрос превью висеть полный таймаут съёмки
             self._preview_cache[role] = (shot, time.monotonic())
@@ -513,6 +526,10 @@ def build_runtime(
         streams=streams,
         log_path=log_path,
     )
+    # превью подписывается на смену камер из центра ПОСЛЕ создания runtime
+    # (менеджер собирается раньше); без подписки превью снимало бы по
+    # локальному конфигу до рестарта службы (боевой урок К-К 14.08.2026)
+    manager_ref[-1].set_preview(runtime)
     return runtime, driver, storage, client, uploader, camera_health, watcher, auto_config, streams
 
 

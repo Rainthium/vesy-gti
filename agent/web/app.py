@@ -266,7 +266,12 @@ def create_app(
             raise HTTPException(status_code=404, detail="нет такой камеры") from exc
         if camera_role not in services.camera_roles():
             raise HTTPException(status_code=404, detail="камера не настроена")
-        shot = services.camera_snapshot(camera_role)
+        try:
+            shot = services.camera_snapshot(camera_role)
+        except ValueError as exc:
+            # роль могла исчезнуть между проверкой и съёмкой: применение
+            # scale_config заменяет камеры превью на лету (агент 0.4.15)
+            raise HTTPException(status_code=404, detail="камера не настроена") from exc
         if not shot.ok or shot.jpeg is None:
             raise HTTPException(status_code=502, detail=shot.error or "камера недоступна")
         return Response(

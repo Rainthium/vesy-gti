@@ -262,6 +262,16 @@ class FakeCameraHealth:
         self.cameras.append(cameras)
 
 
+class FakePreview:
+    """Превью веб-интерфейса (боевой урок Кызыл-Кыи 14.08.2026)."""
+
+    def __init__(self) -> None:
+        self.cameras: list[list[CameraConfig]] = []
+
+    def set_cameras(self, cameras: list[CameraConfig]) -> None:
+        self.cameras.append(cameras)
+
+
 class ManagerEnv:
     """Собранный SettingsManager с фейками и памятью на диске (in-memory)."""
 
@@ -276,6 +286,7 @@ class ManagerEnv:
         self.runner = FakeRunner()
         self.manual = FakeManual()
         self.camera_health = FakeCameraHealth()
+        self.preview = FakePreview()
         self.storage = AgentStorage(":memory:")
         self.manager = SettingsManager(
             driver=self.driver,  # type: ignore[arg-type]
@@ -286,6 +297,8 @@ class ManagerEnv:
             storage=self.storage,
             local_camera_timeouts=local_camera_timeouts,
         )
+        # как в build_runtime: превью подписывается отдельным шагом сборки
+        self.manager.set_preview(self.preview)
 
     def close(self) -> None:
         self.storage.close()
@@ -393,8 +406,9 @@ class TestManagerCycle:
 
 
 class TestManagerCameras:
-    def test_cameras_delivered_to_three_consumers(self, env: ManagerEnv) -> None:
-        """Камеры расходятся в авторежим, ручной режим и фоновую проверку."""
+    def test_cameras_delivered_to_all_consumers(self, env: ManagerEnv) -> None:
+        """Камеры расходятся в авторежим, ручной режим, фоновую проверку
+        и превью оператора (превью — боевой урок Кызыл-Кыи 14.08.2026)."""
         payload = ScaleSettingsPayload(
             cameras=[
                 CameraSettings(role=CameraRole.FRONT, snapshot_url="http://u:p@10.0.0.5/f"),
@@ -403,7 +417,13 @@ class TestManagerCameras:
         )
         status = env.handle(payload)
         assert status.ok is True
-        for consumer in (env.runner.cameras, env.manual.cameras, env.camera_health.cameras):
+        consumers = (
+            env.runner.cameras,
+            env.manual.cameras,
+            env.camera_health.cameras,
+            env.preview.cameras,
+        )
+        for consumer in consumers:
             assert len(consumer) == 1
             assert [(c.role, c.snapshot_url, c.rtsp_url) for c in consumer[0]] == [
                 (CameraRole.FRONT, "http://u:p@10.0.0.5/f", None),
@@ -419,6 +439,35 @@ class TestManagerCameras:
         assert env.runner.cameras == []
         assert env.manual.cameras == []
         assert env.camera_health.cameras == []
+        assert env.preview.cameras == []
+
+    def test_without_preview_subscription_still_ok(self) -> None:
+        """Менеджер без подписанного превью применяет камеры без ошибок
+        (тесты и сборки, зовущие SettingsManager напрямую)."""
+        environment = ManagerEnv.__new__(ManagerEnv)
+        environment.driver = FakeDriver()
+        environment.watcher = FakeWatcher()
+        environment.runner = FakeRunner()
+        environment.manual = FakeManual()
+        environment.camera_health = FakeCameraHealth()
+        environment.storage = AgentStorage(":memory:")
+        environment.manager = SettingsManager(
+            driver=environment.driver,  # type: ignore[arg-type]
+            watcher=environment.watcher,
+            runner=environment.runner,  # type: ignore[arg-type]
+            manual=environment.manual,  # type: ignore[arg-type]
+            camera_health=environment.camera_health,
+            storage=environment.storage,
+        )
+        try:
+            payload = ScaleSettingsPayload(
+                cameras=[CameraSettings(role=CameraRole.FRONT, snapshot_url="http://u:p@x/f")]
+            )
+            status = environment.handle(payload)
+            assert status.ok is True
+            assert len(environment.runner.cameras) == 1
+        finally:
+            environment.close()
 
     def test_cameras_inherit_local_timeout_by_role(self) -> None:
         """Живое применение тоже наследует локальный таймаут по роли
