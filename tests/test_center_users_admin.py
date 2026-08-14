@@ -15,7 +15,11 @@
   разжалованного при живой сессии, страница и мутации для админа,
   вкладка «Пользователи» только у роли admin;
 - рассылка операторов агентам (_push_operators): персональные снимки после
-  каждой успешной мутации create/edit/password/toggle, тишина при ошибке.
+  каждой успешной мутации create/edit/password/toggle, тишина при ошибке;
+- блок «Учётки на агентах»: снимки operators_report на странице, фильтры
+  экрана действуют и на блок (роль и «— все —» неприменимы), перехват
+  местной учётки кнопкой (block_agent_operator + POST agent-block) с
+  защитой легитимных логинов.
 
 Инфраструктура БД — по образцу tests/test_center_panel.py: одноразовая БД
 ves_test_users_<pid> + миграции alembic + TRUNCATE между тестами.
@@ -599,6 +603,7 @@ USERS_MUTATIONS = [
     ("/panel/users/1/edit", {"full_name": "", "role": "dispatcher", "site_id": ""}),
     ("/panel/users/1/password", {"password": "strong-pass-9"}),
     ("/panel/users/1/toggle", {}),
+    ("/panel/users/agent-block", {"scale_id": "1", "login": "x.y"}),
 ]
 
 
@@ -644,6 +649,213 @@ class TestUsersRoutesAccess:
             session.commit()
         response = users_env.client.get("/panel/users", follow_redirects=False)
         assert response.status_code == 403, "разжалованный админ сохранил экран по сессии"
+
+
+class TestBlockAgentOperator:
+    """Перехват местной учётки центром — кнопка «Заблокировать» блока
+    «Учётки на агентах» (запрос Игоря 14.08.2026)."""
+
+    def _seed_scale(self, env: UsersEnv) -> int:
+        with env.factory() as session:
+            site = Site(code="kyzyl-kyia", name="СВХ «Кызыл-Кыя»")
+            session.add(site)
+            session.flush()
+            scale = Scale(
+                site_id=site.id, name="Весы SCS-80", kind=ScaleKind.STATIC, driver="cas22"
+            )
+            session.add(scale)
+            session.commit()
+            return scale.id
+
+    def test_creates_disabled_double_bound_to_site(self, users_env: UsersEnv) -> None:
+        """Двойник: роль оператор, отключён, привязан к объекту весов."""
+        scale_id = self._seed_scale(users_env)
+        with users_env.factory() as session:
+            assert users_admin.block_agent_operator(session, scale_id, "local.backdoor") is None
+            user = session.execute(select(User).where(User.login == "local.backdoor")).scalar_one()
+            scale = session.get(Scale, scale_id)
+            assert scale is not None
+            assert user.role is UserRole.OPERATOR
+            assert user.is_active is False
+            assert user.site_id == scale.site_id
+            assert user.full_name == "Блокировка местной учётки"
+
+    def test_repeat_block_does_not_duplicate(self, users_env: UsersEnv) -> None:
+        """Повторный перехват того же логина не плодит двойников."""
+        scale_id = self._seed_scale(users_env)
+        with users_env.factory() as session:
+            assert users_admin.block_agent_operator(session, scale_id, "local.backdoor") is None
+            assert users_admin.block_agent_operator(session, scale_id, "local.backdoor") is None
+            doubles = (
+                session.execute(select(User).where(User.login == "local.backdoor")).scalars().all()
+            )
+            assert len(doubles) == 1
+
+    def test_panel_user_login_not_touched(self, users_env: UsersEnv) -> None:
+        """Логин пользователя панели перехватить нельзя — и он не отключается."""
+        scale_id = self._seed_scale(users_env)
+        with users_env.factory() as session:
+            error = users_admin.block_agent_operator(session, scale_id, ADMIN_LOGIN)
+            assert error is not None and "занят пользователем панели" in error
+            admin = session.execute(select(User).where(User.login == ADMIN_LOGIN)).scalar_one()
+            assert admin.is_active
+
+    def test_operator_of_other_site_not_touched(self, users_env: UsersEnv) -> None:
+        """Логин оператора другого объекта не перехватывается."""
+        scale_id = self._seed_scale(users_env)
+        with users_env.factory() as session:
+            other = Site(code="kant", name="СВХ «КАНТ»")
+            session.add(other)
+            session.flush()
+            session.add(
+                User(
+                    login="op.kant",
+                    pw_hash=hash_password("op-pass-123"),
+                    role=UserRole.OPERATOR,
+                    site_id=other.id,
+                )
+            )
+            session.commit()
+            error = users_admin.block_agent_operator(session, scale_id, "op.kant")
+            assert error is not None and "другого объекта" in error
+            user = session.execute(select(User).where(User.login == "op.kant")).scalar_one()
+            assert user.is_active
+
+    def test_active_operator_of_same_site_kept_active(self, users_env: UsersEnv) -> None:
+        """Действующий оператор объекта кнопкой НЕ отключается: свежий снимок
+        сам вернёт центровую учётку поверх местной копии."""
+        scale_id = self._seed_scale(users_env)
+        with users_env.factory() as session:
+            scale = session.get(Scale, scale_id)
+            assert scale is not None
+            session.add(
+                User(
+                    login="op.local",
+                    pw_hash=hash_password("op-pass-123"),
+                    role=UserRole.OPERATOR,
+                    site_id=scale.site_id,
+                )
+            )
+            session.commit()
+            assert users_admin.block_agent_operator(session, scale_id, "op.local") is None
+            user = session.execute(select(User).where(User.login == "op.local")).scalar_one()
+            assert user.is_active, "боевой оператор не должен гаснуть кнопкой перехвата"
+
+    def test_invalid_login_and_missing_scale_rejected(self, users_env: UsersEnv) -> None:
+        """Логин вне белого списка и несуществующие весы — внятные ошибки."""
+        scale_id = self._seed_scale(users_env)
+        with users_env.factory() as session:
+            error = users_admin.block_agent_operator(session, scale_id, "весовщик")
+            assert error is not None and "правила центра" in error
+            assert users_admin.block_agent_operator(session, 99999, "x.y") == "весы не найдены"
+
+    def test_route_creates_double_and_notes(self, users_env: UsersEnv) -> None:
+        """POST agent-block: 303 с заметкой, двойник в БД отключён.
+
+        Хаб тестов пуст — агент «не на связи»: заметка честно говорит,
+        что реплика доедет при подключении (замечание ревью — не обещать
+        доставку офлайн-агенту)."""
+        scale_id = self._seed_scale(users_env)
+        _login(users_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        response = users_env.client.post(
+            "/panel/users/agent-block",
+            data={"scale_id": str(scale_id), "login": "local.backdoor"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        note = _note_from(response)
+        assert "готово" in note and "перекрыта" in note
+        assert "не на связи" in note
+        with users_env.factory() as session:
+            user = session.execute(select(User).where(User.login == "local.backdoor")).scalar_one()
+            assert not user.is_active
+
+    def test_route_error_becomes_note(self, users_env: UsersEnv) -> None:
+        """Ошибка перехвата уезжает флеш-заметкой, а не 500."""
+        _login(users_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        response = users_env.client.post(
+            "/panel/users/agent-block",
+            data={"scale_id": "99999", "login": "x.y"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert "перехват не выполнен" in _note_from(response)
+
+
+class TestUsersAgentOperatorsFilters:
+    """Фильтры экрана действуют и на блок «Учётки на агентах»
+    (пожелание Игоря 14.08.2026, второй виток)."""
+
+    def _seed_two_sites(self, env: UsersEnv) -> None:
+        with env.factory() as session:
+            now = datetime.now(UTC)
+            for code, name, scale_name, login, full_name, active in [
+                ("kyzyl-kyia", "СВХ «Кызыл-Кыя»", "Весы SCS-80", "kk.op", "Оператор КК", True),
+                ("kant", "СВХ «КАНТ»", "Весы 22-3", "kant.op", "Оператор Канта", False),
+            ]:
+                site = Site(code=code, name=name)
+                session.add(site)
+                session.flush()
+                scale = Scale(
+                    site_id=site.id, name=scale_name, kind=ScaleKind.STATIC, driver="cas22"
+                )
+                session.add(scale)
+                session.flush()
+                session.add(
+                    AgentOperator(
+                        scale_id=scale.id,
+                        login=login,
+                        full_name=full_name,
+                        is_active=active,
+                        from_center=False,
+                        reported_at=now,
+                    )
+                )
+            session.commit()
+
+    def test_search_narrows_block(self, users_env: UsersEnv) -> None:
+        self._seed_two_sites(users_env)
+        _login(users_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        page = users_env.client.get("/panel/users", params={"search": "kant.op"}).text
+        assert "kant.op" in page
+        assert "kk.op" not in page
+        assert "Учётки на агентах (1)" in page
+
+    def test_site_filter_narrows_block(self, users_env: UsersEnv) -> None:
+        self._seed_two_sites(users_env)
+        with users_env.factory() as session:
+            kant_id = session.execute(select(Site.id).where(Site.code == "kant")).scalar_one()
+        _login(users_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        page = users_env.client.get("/panel/users", params={"site": str(kant_id)}).text
+        assert "kant.op" in page
+        assert "kk.op" not in page
+
+    def test_status_filter_applies_to_block(self, users_env: UsersEnv) -> None:
+        self._seed_two_sites(users_env)
+        _login(users_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        page = users_env.client.get("/panel/users", params={"status": "disabled"}).text
+        assert "kant.op" in page
+        assert "kk.op" not in page
+
+    def test_role_and_no_site_do_not_hide_block(self, users_env: UsersEnv) -> None:
+        """Роль и «— все —» к учёткам агентов неприменимы: блок показывается
+        целиком, а не пустеет."""
+        self._seed_two_sites(users_env)
+        _login(users_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        page = users_env.client.get(
+            "/panel/users", params={"role": "dispatcher", "site": "none"}
+        ).text
+        assert "kk.op" in page
+        assert "kant.op" in page
+
+    def test_filtered_empty_state(self, users_env: UsersEnv) -> None:
+        """Пустой результат фильтра объясняется фильтром, а не «агенты
+        не прислали» (снимки-то есть)."""
+        self._seed_two_sites(users_env)
+        _login(users_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        page = users_env.client.get("/panel/users", params={"search": "nomatch"}).text
+        assert "Под фильтры не попала ни одна учётка" in page
+        assert "Агенты ещё не прислали" not in page
 
 
 class TestUsersAgentOperatorsBlock:

@@ -13,11 +13,12 @@
 
 import logging
 import re
+import secrets
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from center.db.models import Site, User, UserRole
+from center.db.models import Scale, Site, User, UserRole
 from shared.passwords import hash_password
 
 logger = logging.getLogger(__name__)
@@ -180,6 +181,57 @@ def toggle_active(session: Session, user_id: int, *, actor_login: str) -> str | 
     user.is_active = not user.is_active
     session.commit()
     logger.info("пользователи: %s %s", user.login, "включён" if user.is_active else "отключён")
+    return None
+
+
+def block_agent_operator(session: Session, scale_id: int, login: str) -> str | None:
+    """Перехватить логином центра учётку, заведённую на весовом ПК вручную.
+
+    Кнопка «Заблокировать» блока «Учётки на агентах» (запрос Игоря
+    14.08.2026). Механика «центр главнее»: в центре появляется ОТКЛЮЧЁННЫЙ
+    оператор-двойник с тем же логином, случайным паролем и привязкой
+    к объекту весов — реплика перезапишет местную учётку заблокированной,
+    вход погаснет и офлайн. Снимок агенту рассылает маршрут после вызова.
+
+    Если логин уже занят оператором этого объекта, двойник не нужен —
+    свежий снимок сам перекроет местную копию (активным оператором или
+    уже существующей блокировкой). Чужие логины не трогаем.
+    """
+    scale = session.get(Scale, scale_id)
+    if scale is None:
+        return "весы не найдены"
+    login = login.strip()
+    if not LOGIN_RE.fullmatch(login):
+        return (
+            "логин не проходит правила центра (латиница, цифры, . _ -) — "
+            "такую учётку можно убрать только на весовом ПК"
+        )
+    existing = session.execute(select(User).where(User.login == login)).scalar_one_or_none()
+    if existing is not None:
+        if existing.role is not UserRole.OPERATOR:
+            return f"логин {login} занят пользователем панели — перехват невозможен"
+        if existing.site_id is not None and existing.site_id != scale.site_id:
+            return (
+                f"логин {login} занят оператором другого объекта — "
+                "заблокируйте учётку на весовом ПК"
+            )
+        # оператор этого объекта (или без привязки) уже есть в центре:
+        # достаточно повторного снимка, он перекроет местную копию
+        return None
+    session.add(
+        User(
+            login=login,
+            # пароль никому не известен и не нужен: двойник существует
+            # только чтобы занять логин заблокированной репликой
+            pw_hash=hash_password(secrets.token_urlsafe(24)),
+            full_name="Блокировка местной учётки",
+            role=UserRole.OPERATOR,
+            site_id=scale.site_id,
+            is_active=False,
+        )
+    )
+    session.commit()
+    logger.info("пользователи: перехват местной учётки %s (весы %d)", login, scale_id)
     return None
 
 

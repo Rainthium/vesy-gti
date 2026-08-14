@@ -375,18 +375,45 @@ def tare_history(
     return [tuple(row) for row in rows], int(total)
 
 
-def agent_operators(session: Session) -> list[tuple[AgentOperator, Scale, Site]]:
+def agent_operators(
+    session: Session,
+    *,
+    search: str = "",
+    site_id: int | None = None,
+    active: bool | None = None,
+) -> list[tuple[AgentOperator, Scale, Site]]:
     """Снимки учёток весовых ПК для блока на экране «Пользователи».
 
     Экран только для администратора (видит всё), поэтому PanelScope
     здесь не нужен. Локальные учётки (from_center=False) — первыми
     внутри весов: ради них блок и существует (запрос Игоря 14.08.2026).
+
+    Фильтры повторяют экран «Пользователи»: подстрока логина/ФИО,
+    объект, статус. Роль и «— все — (без привязки)» к учёткам агентов
+    неприменимы — эти фильтры на блок не действуют.
     """
-    rows = session.execute(
+    query = (
         select(AgentOperator, Scale, Site)
         .join(Scale, Scale.id == AgentOperator.scale_id)
         .join(Site, Site.id == Scale.site_id)
-        .order_by(Site.name, Scale.name, Scale.id, AgentOperator.from_center, AgentOperator.login)
+    )
+    if search.strip():
+        # экранирование LIKE-знаков — как в users_admin.users_list:
+        # '_' — обычный символ логина, '%' не должен возвращать всех
+        escaped = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        needle = f"%{escaped}%"
+        query = query.where(
+            AgentOperator.login.ilike(needle, escape="\\")
+            | AgentOperator.full_name.ilike(needle, escape="\\")
+        )
+    if site_id is not None:
+        query = query.where(Site.id == site_id)
+    if active is not None:
+        query = query.where(AgentOperator.is_active == active)
+    rows = session.execute(
+        query.order_by(
+            Site.name, Scale.name, Scale.id, AgentOperator.from_center, AgentOperator.login
+        )
     ).all()
     return [tuple(row) for row in rows]
 

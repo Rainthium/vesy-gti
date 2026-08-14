@@ -1353,7 +1353,16 @@ def create_panel_router(
             ),
         )
         sites = await asyncio.to_thread(_db, lambda s: queries.refs_data(s).sites)
-        agent_ops = await asyncio.to_thread(_db, queries.agent_operators)
+        # фильтры экрана действуют и на блок «Учётки на агентах» (запрос
+        # Игоря 14.08.2026); роль и «— все —» к учёткам агентов неприменимы
+        agent_active = {"active": True, "disabled": False}.get(status)
+        agent_site = site_filter if site_ok else None
+        agent_ops = await asyncio.to_thread(
+            _db,
+            lambda s: queries.agent_operators(
+                s, search=search, site_id=agent_site, active=agent_active
+            ),
+        )
         return render(
             "users.html",
             request,
@@ -1362,10 +1371,44 @@ def create_panel_router(
             rows=rows,
             sites=sites,
             agent_ops=agent_ops,
+            agent_ops_filtered=bool(search.strip())
+            or agent_site is not None
+            or agent_active is not None,
             roles=list(UserRole),
             min_password=users_admin.MIN_PASSWORD_LEN,
             filters={"search": search, "role": role, "site": site, "status": status},
             note=request.query_params.get("note"),
+        )
+
+    @router.post("/users/agent-block")
+    async def users_agent_block(
+        request: Request,
+        admin: PanelAdmin,
+        scale_id: Annotated[int, Form()],
+        login: Annotated[str, Form()],
+    ) -> RedirectResponse:
+        """Перехват местной учётки весового ПК (кнопка блока «Учётки на агентах»).
+
+        Создаёт отключённого оператора-двойника (users_admin) и рассылает
+        снимки операторов — реплика «центр главнее» гасит местную учётку.
+        """
+        error = await asyncio.to_thread(
+            _db, lambda s: users_admin.block_agent_operator(s, scale_id, login)
+        )
+        if error:
+            return _users_redirect(f"перехват не выполнен: {error}")
+        logger.info("панель (%s): перехват местной учётки весов %d", admin, scale_id)
+        await _push_operators()
+        # заметка не должна обещать доставку офлайн-агенту (замечание ревью):
+        # сценарий кнопки — недобросовестный оператор — может совпасть
+        # с выдернутым кабелем; снимок тогда доедет при следующем hello
+        if hub.connected(scale_id):
+            return _users_redirect(
+                "готово: агенту отправлен снимок операторов — местная учётка перекрыта центром"
+            )
+        return _users_redirect(
+            "готово: учётка перекрыта в центре; агент сейчас не на связи — "
+            "заблокированная реплика доедет при его подключении"
         )
 
     @router.post("/users/create")
