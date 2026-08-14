@@ -11,6 +11,10 @@
   → пометка synced в локальной БД → следующая порция);
 - приём ``tare_registry`` и ``operators_registry`` → полная замена
   локальных реплик (тары и учётки операторов из центра);
+- обратный отчёт ``operators_report`` — снимок ВСЕХ учёток весового ПК
+  (включая заведённые на месте CLI): при подключении, после применения
+  реплики центра и периодически — CLI пишет в SQLite другим процессом,
+  и работающая служба узнаёт о новой учётке только перечитыванием;
 - бесконечный реконнект с экспоненциальным backoff — потеря связи не
   роняет агента, офлайн-записи копятся в локальной БД (правило §2 п.2).
 
@@ -26,6 +30,7 @@ import asyncio
 import contextlib
 import logging
 import sqlite3
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -46,6 +51,7 @@ from shared.messages import (
     OfflineSync,
     OfflineSyncAck,
     OperatorsRegistryUpdate,
+    OperatorsReport,
     ScaleConfigUpdate,
     TareRegistryUpdate,
     UpdateCommand,
@@ -57,6 +63,11 @@ from shared.messages import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Период планового отчёта об учётках весового ПК (operators_report).
+# Ловит правки CLI add-operator: он пишет в ту же SQLite другим
+# процессом, и служба узнаёт о новой учётке только перечитыванием
+OPERATORS_REPORT_INTERVAL_S = 300.0
 
 
 @dataclass(frozen=True)
@@ -112,6 +123,7 @@ class CenterClient:
         # порция досылки уже отправлена и ждёт ack — повторно не шлём
         self._sync_in_flight = False
         self._session_connected = False  # для сброса backoff в run()
+        self._operators_reported_at = 0.0  # monotonic последнего operators_report
 
     @property
     def connected(self) -> bool:
@@ -151,6 +163,9 @@ class CenterClient:
         async with websockets.connect(self._config.url, additional_headers=headers) as connection:
             logger.info("соединение с центром установлено: %s", self._config.url)
             await connection.send(self._hello().model_dump_json())
+            # состояние учёток на момент подключения — центр видит и те,
+            # что завели на месте, пока связи не было
+            await self._send_operators_report(connection)
             self._connected.set()
             self._session_connected = True
             try:
@@ -187,6 +202,8 @@ class CenterClient:
             # ручного режима) досылаются без ожидания
             # реконнекта — подталкиваем очередь вместе с heartbeat
             await self._send_pending(connection)
+            if time.monotonic() - self._operators_reported_at >= OPERATORS_REPORT_INTERVAL_S:
+                await self._send_operators_report(connection)
 
     async def _receive_loop(self, connection: websockets.ClientConnection) -> None:
         async for raw in connection:
@@ -210,6 +227,9 @@ class CenterClient:
             elif isinstance(message, OperatorsRegistryUpdate):
                 count = self._storage.replace_center_operators(message.records)
                 logger.info("реплика операторов обновлена: %d учёток", count)
+                # центру сразу видно, что реально легло в БД весового ПК
+                # (реплика + локальные учётки поверх неё)
+                await self._send_operators_report(connection)
             elif isinstance(message, HeartbeatAck):
                 if self._on_server_time is not None:
                     try:
@@ -332,6 +352,22 @@ class CenterClient:
         task = asyncio.create_task(handle())
         self._request_tasks.add(task)
         task.add_done_callback(self._request_tasks.discard)
+
+    async def _send_operators_report(self, connection: websockets.ClientConnection) -> None:
+        """Отправить центру снимок всех учёток весового ПК (без хешей).
+
+        Ошибка чтения SQLite не рвёт соединение: отчёт — вспомогательный,
+        следующий уйдёт по расписанию.
+        """
+        try:
+            records = self._storage.list_operators()
+        except sqlite3.Error as exc:
+            logger.warning("ошибка чтения учёток для отчёта центру: %s", exc)
+            return
+        report = OperatorsReport(agent_id=self._config.agent_id, records=records)
+        await connection.send(report.model_dump_json())
+        self._operators_reported_at = time.monotonic()
+        logger.debug("отчёт об учётках отправлен центру: %d", len(records))
 
     async def _send_pending(self, connection: websockets.ClientConnection) -> None:
         """Отправить одну порцию недосланных офлайн-записей (если есть).

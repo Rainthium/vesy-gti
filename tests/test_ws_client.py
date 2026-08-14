@@ -61,6 +61,7 @@ from shared.messages import (
     OfflineSyncAck,
     OperatorRecord,
     OperatorsRegistryUpdate,
+    OperatorsReport,
     ScaleConfigUpdate,
     ScaleSettingsPayload,
     TareRecord,
@@ -665,6 +666,49 @@ def test_operators_registry_replaces_center_replica() -> None:
             # снятый оператор исчез, заблокированный не входит даже с верным паролем
             assert storage.verify_operator("old.operator", "old-pass-123") is None
             assert storage.verify_operator("blocked.op", "blocked-pass-1") is None
+
+    run_scenario(scenario())
+
+
+def test_operators_report_follows_hello_with_source_flags() -> None:
+    """Сразу после hello уходит operators_report: центр видит и локальную
+    CLI-учётку (from_center=False), и реплику центра (запрос 14.08.2026)."""
+
+    async def scenario() -> None:
+        storage = AgentStorage(":memory:")
+        storage.upsert_operator("local.op", "local-pass-123", "Местный Оператор")
+        storage.replace_center_operators(
+            [OperatorRecord(login="c.op", pw_hash=hash_password("center-pass-1"))]
+        )
+        async with Scene(storage=storage) as scene:
+            first = await scene.center.next_message()
+            assert isinstance(first, Hello)
+            report = await scene.center.expect(OperatorsReport)
+            assert report.agent_id == "agent-test"
+            by_login = {r.login: r for r in report.records}
+            assert set(by_login) == {"local.op", "c.op"}
+            assert by_login["local.op"].from_center is False
+            assert by_login["local.op"].full_name == "Местный Оператор"
+            assert by_login["c.op"].from_center is True
+
+    run_scenario(scenario())
+
+
+def test_operators_report_resent_after_registry_update() -> None:
+    """После применения operators_registry центру сразу уходит свежий отчёт:
+    результат слияния «центр главнее» виден без ожидания планового цикла."""
+
+    async def scenario() -> None:
+        async with Scene() as scene:
+            initial = await scene.center.expect(OperatorsReport)
+            assert initial.records == []
+            update = OperatorsRegistryUpdate(
+                records=[OperatorRecord(login="d.ivanov", pw_hash=hash_password("op-pass-123"))]
+            )
+            await scene.center.connection.send(update.model_dump_json())
+            report = await scene.center.expect(OperatorsReport)
+            assert [r.login for r in report.records] == ["d.ivanov"]
+            assert report.records[0].from_center is True
 
     run_scenario(scenario())
 

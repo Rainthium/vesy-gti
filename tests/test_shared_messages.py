@@ -22,6 +22,7 @@ from shared import (
     parse_agent_message,
     parse_center_message,
 )
+from shared.messages import AgentOperatorInfo, OperatorsReport
 
 
 class TestEnums:
@@ -98,6 +99,19 @@ class TestAgentMessages:
         parsed = parse_agent_message(msg.model_dump_json())
         assert isinstance(parsed, OfflineSync)
         assert parsed.records[0].source is WeighingSource.LOCAL_OFFLINE
+
+    def test_operators_report_roundtrip_without_password_hashes(self) -> None:
+        """operators_report — сообщение агента; хеша пароля в записи нет
+        по построению модели (правило №7: секреты не гоняем без нужды)."""
+        msg = OperatorsReport(
+            agent_id="a1",
+            records=[AgentOperatorInfo(login="local.op", from_center=False)],
+        )
+        parsed = parse_agent_message(msg.model_dump_json())
+        assert isinstance(parsed, OperatorsReport)
+        assert parsed.records[0].from_center is False
+        assert parsed.records[0].is_active is True
+        assert "pw_hash" not in AgentOperatorInfo.model_fields
 
     def test_unknown_type_rejected(self) -> None:
         with pytest.raises(ValidationError):

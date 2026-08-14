@@ -175,6 +175,25 @@ class Agent(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 
+class AgentOperator(Base):
+    """Снимок учётки весового ПК — как её видит сам агент (обратный канал).
+
+    Заполняется целиком из ``operators_report`` (агент 0.4.14, запрос
+    Игоря 14.08.2026): центр видит и учётки, заведённые на месте вручную
+    (``from_center=False`` — CLI add-operator, аварийный доступ). Хеш
+    пароля сюда не попадает никогда (правило №7).
+    """
+
+    __tablename__ = "agent_operators"
+
+    scale_id: Mapped[int] = mapped_column(ForeignKey("scales.id"), primary_key=True)
+    login: Mapped[str] = mapped_column(String(128), primary_key=True)
+    full_name: Mapped[str] = mapped_column(String(200), default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    from_center: Mapped[bool] = mapped_column(Boolean, default=True)
+    reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class User(Base):
     """Пользователь панели центра (и синхронизация операторов на агентов)."""
 

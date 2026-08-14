@@ -8,12 +8,13 @@ import hashlib
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from center.db.models import (
     Agent,
+    AgentOperator,
     AgentStatus,
     Camera,
     Scale,
@@ -26,6 +27,7 @@ from center.db.models import (
 )
 from shared.enums import CameraRole, ErrorCode, Operation
 from shared.messages import (
+    AgentOperatorInfo,
     CameraSettings,
     CycleSettings,
     OperatorRecord,
@@ -245,6 +247,31 @@ def load_operators_for_scale(session: Session, scale_id: int) -> list[OperatorRe
 def agent_versions(session: Session) -> dict[int, str | None]:
     """Версии агентов по scale_id (для гейта снимков с секретами)."""
     return {agent.scale_id: agent.version for agent in session.execute(select(Agent)).scalars()}
+
+
+def replace_agent_operators(
+    session: Session, scale_id: int, records: list[AgentOperatorInfo]
+) -> None:
+    """Заменить снимок учёток весового ПК целиком (operators_report).
+
+    Отчёт — полный список, поэтому пропавшие логины удаляются вместе
+    со старым снимком. Длины срезаются до колонок: логины CLI агента
+    не проходят белый список панели и бывают любыми.
+    """
+    now = datetime.now(UTC)
+    session.execute(delete(AgentOperator).where(AgentOperator.scale_id == scale_id))
+    for record in records:
+        session.add(
+            AgentOperator(
+                scale_id=scale_id,
+                login=record.login[:128],
+                full_name=record.full_name[:200],
+                is_active=record.is_active,
+                from_center=record.from_center,
+                reported_at=now,
+            )
+        )
+    session.commit()
 
 
 def load_scale_settings(session: Session, scale_id: int) -> ScaleSettingsPayload | None:

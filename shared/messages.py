@@ -6,7 +6,7 @@
 
 Направления:
 - агент → центр: hello, heartbeat, weigh_result, offline_sync, update_status,
-  config_status;
+  config_status, operators_report;
 - центр → агент: weigh_request, offline_sync_ack, tare_registry,
   operators_registry, scale_config, update_command.
 
@@ -179,6 +179,35 @@ class UpdateStatus(BaseModel):
     version: str  # целевая версия из команды
     ok: bool  # True — обновление запущено (перезапуск службы пошёл)
     error: str | None = None
+
+
+class AgentOperatorInfo(BaseModel):
+    """Учётка на весовом ПК — как её видит сам агент (обратный канал).
+
+    Хеша пароля здесь НЕТ намеренно: центру он не нужен, а гонять
+    секреты лишний раз нельзя (правило №7). ``from_center=False`` —
+    учётка заведена на месте вручную (CLI add-operator, аварийный
+    доступ); в центре такой учётки нет.
+    """
+
+    login: str
+    full_name: str = ""
+    is_active: bool = True
+    from_center: bool = True
+
+
+class OperatorsReport(BaseModel):
+    """Агент → центр: полный снимок учёток на весовом ПК (агент 0.4.14).
+
+    Запрос Игоря 14.08.2026: центр должен видеть ВСЕ учётки агентов,
+    включая заведённые на месте вручную. Шлётся при подключении, после
+    применения operators_registry и периодически (ловит правки CLI,
+    сделанные при работающей службе другим процессом).
+    """
+
+    type: Literal["operators_report"] = "operators_report"
+    agent_id: str
+    records: list[AgentOperatorInfo] = Field(default_factory=list)
 
 
 # --- центр → агент ---
@@ -361,7 +390,14 @@ class LogTailResponse(BaseModel):
 # --- дискриминированные объединения и разбор ---
 
 AgentMessage = Annotated[
-    Hello | Heartbeat | WeighResult | OfflineSync | UpdateStatus | ConfigStatus | LogTailResponse,
+    Hello
+    | Heartbeat
+    | WeighResult
+    | OfflineSync
+    | UpdateStatus
+    | ConfigStatus
+    | LogTailResponse
+    | OperatorsReport,
     Field(discriminator="type"),
 ]
 CenterMessage = Annotated[

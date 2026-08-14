@@ -569,6 +569,20 @@ class TestTareList:
         assert total == 1
         assert [row[0].vehicle_number for row in rows] == ["05KG999ZZZ"]
 
+    def test_search_covers_trailer(self, db_session: Session) -> None:
+        """Поиск реестра находит и по номеру прицепа (история машины,
+        запрос Игоря 14.08.2026: искать сцепку по любому из номеров)."""
+        scale = self._seed(db_session)
+        paired = _make_taring(
+            vehicle_number="01KG444DDD",
+            trailer_number="01KG900CC",
+            weighed_at=datetime.now(UTC) - timedelta(days=1),
+        )
+        repo.save_weighing_record(db_session, scale.id, paired)
+        rows, total = queries.tare_list(db_session, search="900cc")
+        assert total == 1
+        assert [row[0].vehicle_number for row in rows] == ["01KG444DDD"]
+
     def test_newest_first(self, db_session: Session) -> None:
         """Действующие тары отсортированы по свежести тарирования."""
         scale = self._seed(db_session)
@@ -605,6 +619,62 @@ class TestTareList:
         rows, total = queries.tare_list(db_session, scale_id=scale_2.id)
         assert total == 1
         assert [row[0].vehicle_number for row in rows] == ["02KG222BBB"]
+
+
+# ---------------------------------------------------------------------------
+# queries.tare_history
+# ---------------------------------------------------------------------------
+
+
+class TestTareHistory:
+    """История тарирований из журнала: реестр хранит одну строку на сцепку,
+    прошлые тарирования машины видны только здесь (запрос Игоря 14.08.2026)."""
+
+    def _seed(self, session: Session) -> Scale:
+        """Сцепка тарировалась дважды + одинокая просроченная тара."""
+        _, scale = _add_site_scale(session, "a-site", "СВХ «А»", "Весы 1")
+        now = datetime.now(UTC)
+        older = _make_taring(
+            vehicle_number="01KG222HHH", massa=6900.0, weighed_at=now - timedelta(days=40)
+        )
+        newer = _make_taring(
+            vehicle_number="01KG222HHH", massa=7100.0, weighed_at=now - timedelta(days=1)
+        )
+        stale = _make_taring(vehicle_number="01KG333EEE", weighed_at=now - timedelta(days=200))
+        for record in (older, newer, stale):
+            repo.save_weighing_record(session, scale.id, record)
+        return scale
+
+    def test_returns_all_tarings_with_registry_mark(self, db_session: Session) -> None:
+        """Отдаются ВСЕ тарирования; строка реестра — только у последнего
+        тарирования своей сцепки (по ней маршрут отличает заменённые)."""
+        self._seed(db_session)
+        rows, total = queries.tare_history(db_session)
+        assert total == 3
+        registry_by_mass = {row[0].massa: row[3] for row in rows}
+        assert registry_by_mass[6900.0] is None  # заменено более поздним
+        assert registry_by_mass[7100.0] is not None  # актуальная тара сцепки
+        assert registry_by_mass[7500.0] is not None  # просрочена, но последняя своей машины
+
+    def test_newest_first(self, db_session: Session) -> None:
+        """История отсортирована по моменту тарирования, новые сверху."""
+        self._seed(db_session)
+        rows, _ = queries.tare_history(db_session)
+        moments = [row[0].weighed_at or row[0].created_at for row in rows]
+        assert moments == sorted(moments, reverse=True)
+
+    def test_search_covers_trailer(self, db_session: Session) -> None:
+        """Поиск истории находит сцепку и по номеру прицепа."""
+        scale = self._seed(db_session)
+        paired = _make_taring(
+            vehicle_number="01KG444DDD",
+            trailer_number="01KG900CC",
+            weighed_at=datetime.now(UTC) - timedelta(days=2),
+        )
+        repo.save_weighing_record(db_session, scale.id, paired)
+        rows, total = queries.tare_history(db_session, search="900cc")
+        assert total == 1
+        assert rows[0][0].vehicle_number == "01KG444DDD"
 
 
 # ---------------------------------------------------------------------------
@@ -1022,6 +1092,91 @@ class TestPanelJournalRoutes:
         response = panel_env.client.get("/panel/tares", params={"scale_id": other_scale_id})
         assert response.status_code == 200
         assert "01KG555TTT" not in response.text
+
+
+class TestTaresHistoryScreen:
+    """Режим «Вся история» экрана тарирований (запрос Игоря 14.08.2026):
+    история машины со статусами Действует/Истекло/Заменено."""
+
+    def _seed_history(self, env: PanelEnv) -> None:
+        now = datetime.now(UTC)
+        with env.factory() as session:
+            older = _make_taring(
+                vehicle_number="01KG222HHH", massa=6900.0, weighed_at=now - timedelta(days=40)
+            )
+            newer = _make_taring(
+                vehicle_number="01KG222HHH", massa=7100.0, weighed_at=now - timedelta(days=1)
+            )
+            stale = _make_taring(vehicle_number="01KG333EEE", weighed_at=now - timedelta(days=200))
+            for record in (older, newer, stale):
+                repo.save_weighing_record(session, env.scale_id, record)
+
+    def test_default_mode_unchanged(self, panel_env: PanelEnv) -> None:
+        """Без show — прежний реестр: одна строка на сцепку, просроченных нет,
+        статусных пилюль истории нет."""
+        self._seed_history(panel_env)
+        _login(panel_env)
+        page = panel_env.client.get("/panel/tares").text
+        assert page.count("01KG222HHH") == 1
+        assert "01KG333EEE" not in page
+        assert "Заменено" not in page
+        assert "Истекло" not in page
+
+    def test_history_shows_replaced_and_expired(self, panel_env: PanelEnv) -> None:
+        """Вся история: обе записи сцепки и все три статуса."""
+        self._seed_history(panel_env)
+        _login(panel_env)
+        page = panel_env.client.get("/panel/tares", params={"show": "all"}).text
+        assert page.count("01KG222HHH") == 2
+        assert "01KG333EEE" in page
+        assert ">Заменено</span>" in page
+        assert ">Истекло</span>" in page
+        assert ">Действует</span>" in page
+
+    def test_history_search_by_trailer(self, panel_env: PanelEnv) -> None:
+        """Поиск в истории работает и по прицепу."""
+        self._seed_history(panel_env)
+        with panel_env.factory() as session:
+            paired = _make_taring(
+                vehicle_number="01KG444DDD",
+                trailer_number="01KG900CC",
+                weighed_at=datetime.now(UTC) - timedelta(days=2),
+            )
+            repo.save_weighing_record(session, panel_env.scale_id, paired)
+        _login(panel_env)
+        page = panel_env.client.get("/panel/tares", params={"show": "all", "search": "900cc"}).text
+        assert "01KG444DDD" in page
+        assert "01KG222HHH" not in page
+
+    def test_history_scoped_to_own_site(self, panel_env: PanelEnv) -> None:
+        """Ограниченный объектом пользователь не видит чужую историю,
+        но видит свою (PanelScope сильнее фильтров — правило новых маршрутов)."""
+        self._seed_history(panel_env)
+        with panel_env.factory() as session:
+            kant_scale_id = session.execute(
+                select(Scale.id).where(Scale.id != panel_env.scale_id)
+            ).scalar_one()
+            repo.save_weighing_record(
+                session,
+                kant_scale_id,
+                _make_taring(
+                    vehicle_number="09KG777KNT",
+                    weighed_at=datetime.now(UTC) - timedelta(days=3),
+                ),
+            )
+        _login(panel_env)
+        _bind_user_to_site(panel_env, "kant")
+        page = panel_env.client.get("/panel/tares", params={"show": "all"}).text
+        assert "01KG222HHH" not in page
+        assert "01KG555TTT" not in page
+        assert "09KG777KNT" in page  # своя история видна
+
+    def test_garbage_show_value_renders_active_mode(self, panel_env: PanelEnv) -> None:
+        """Мусор в show трактуется как «Действующие», а не 422/500."""
+        _login(panel_env)
+        response = panel_env.client.get("/panel/tares", params={"show": "history?"})
+        assert response.status_code == 200
+        assert "01KG555TTT" in response.text
 
 
 class TestPanelCard:

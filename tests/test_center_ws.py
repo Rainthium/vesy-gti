@@ -62,6 +62,7 @@ from center.agents_ws.router import create_agents_router
 from center.db import repo
 from center.db.models import (
     Agent,
+    AgentOperator,
     AgentStatus,
     Camera,
     Scale,
@@ -77,6 +78,7 @@ from center.db.models import (
 from center.db.session import database_url, make_session_factory
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
 from shared.messages import (
+    AgentOperatorInfo,
     ConfigStatus,
     EquipmentStatus,
     Heartbeat,
@@ -86,6 +88,7 @@ from shared.messages import (
     OfflineSync,
     OperatorRecord,
     OperatorsRegistryUpdate,
+    OperatorsReport,
     PhotoMeta,
     ScaleConfigUpdate,
     ScaleSettingsPayload,
@@ -956,6 +959,55 @@ class TestAgentsWsSession:
             # после мусора цикл жив: hello обрабатывается и приходит реестр
             registry = _hello_and_registry(ws)
             assert registry["records"] == []
+
+
+class TestAgentsWsOperatorsReport:
+    """Обратный канал operators_report (агент 0.4.14, запрос 14.08.2026):
+    снимок учёток весового ПК ложится в agent_operators целиком."""
+
+    def _report_json(self, *records: AgentOperatorInfo) -> str:
+        return OperatorsReport(agent_id="agent-1", records=list(records)).model_dump_json()
+
+    def _rows(self, env: WsEnv) -> dict[str, tuple[bool, bool]]:
+        with env.factory() as session:
+            rows = session.execute(select(AgentOperator)).scalars().all()
+            return {row.login: (row.from_center, row.is_active) for row in rows}
+
+    def test_report_saved_then_next_report_replaces(self, ws_env: WsEnv) -> None:
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            _hello_and_registry(ws)
+            ws.send_text(
+                self._report_json(
+                    AgentOperatorInfo(login="c.op", full_name="Из Центра"),
+                    AgentOperatorInfo(login="local.op", from_center=False),
+                )
+            )
+            assert _wait_until(lambda: len(self._rows(ws_env)) == 2)
+            rows = self._rows(ws_env)
+            assert rows["c.op"] == (True, True)
+            assert rows["local.op"] == (False, True)
+            with ws_env.factory() as session:
+                stored = session.get(AgentOperator, (ws_env.scale_id, "local.op"))
+                assert stored is not None and stored.reported_at is not None
+
+            # следующий снимок — полная замена: пропавший логин исчезает,
+            # изменившийся флаг доезжает
+            ws.send_text(
+                self._report_json(
+                    AgentOperatorInfo(login="local.op", from_center=False, is_active=False)
+                )
+            )
+            assert _wait_until(lambda: set(self._rows(ws_env)) == {"local.op"})
+            assert self._rows(ws_env)["local.op"] == (False, False)
+
+    def test_empty_report_clears_snapshot(self, ws_env: WsEnv) -> None:
+        """Пустой отчёт очищает снимок весов (учёток на ПК не осталось)."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            _hello_and_registry(ws)
+            ws.send_text(self._report_json(AgentOperatorInfo(login="x.op")))
+            assert _wait_until(lambda: len(self._rows(ws_env)) == 1)
+            ws.send_text(self._report_json())
+            assert _wait_until(lambda: self._rows(ws_env) == {})
 
 
 class TestAgentsWsWeighResult:

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from center.db.models import (
     Agent,
+    AgentOperator,
     Camera,
     MonitoringEvent,
     Scale,
@@ -314,12 +315,80 @@ def tare_list(
     if scale_id is not None:
         query = query.where(Scale.id == scale_id)
     if search:
-        query = query.where(TareRegistry.vehicle_number.like(f"%{search.strip().upper()}%"))
+        needle = f"%{search.strip().upper()}%"
+        query = query.where(
+            or_(
+                TareRegistry.vehicle_number.like(needle),
+                TareRegistry.trailer_number.like(needle),
+            )
+        )
     total = session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
     rows = session.execute(
         query.order_by(desc(TareRegistry.tared_at)).limit(limit).offset(offset)
     ).all()
     return [tuple(row) for row in rows], int(total)
+
+
+def tare_history(
+    session: Session,
+    *,
+    search: str | None = None,
+    site_id: int | None = None,
+    scale_id: int | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    site_scope: int | None = None,
+) -> tuple[list[tuple[Weighing, Scale, Site, TareRegistry | None]], int]:
+    """Вся история тарирований из журнала — включая истёкшие и заменённые.
+
+    Реестр хранит одну строку на сцепку (правило №4), поэтому историю машины
+    можно восстановить только по ``weighings``. Присоединённая строка реестра
+    означает «это последнее тарирование своей сцепки»; действует оно или уже
+    истекло — решает маршрут по дате (пилюля статуса).
+    """
+    query = (
+        select(Weighing, Scale, Site, TareRegistry)
+        .join(Scale, Scale.id == Weighing.scale_id)
+        .join(Site, Site.id == Scale.site_id)
+        .outerjoin(TareRegistry, TareRegistry.weighing_id == Weighing.id)
+        .where(Weighing.operation == Operation.TARING)
+        # как в журнале: показываем только состоявшиеся операции
+        .where(Weighing.code == ErrorCode.OK)
+    )
+    if site_scope is not None:
+        # ограничение пользователя сильнее фильтра экрана
+        query = query.where(Site.id == site_scope)
+    elif site_id is not None:
+        query = query.where(Site.id == site_id)
+    if scale_id is not None:
+        query = query.where(Scale.id == scale_id)
+    if search:
+        needle = f"%{search.strip().upper()}%"
+        query = query.where(
+            or_(Weighing.vehicle_number.like(needle), Weighing.trailer_number.like(needle))
+        )
+    total = session.execute(select(func.count()).select_from(query.subquery())).scalar_one()
+    moment = func.coalesce(Weighing.weighed_at, Weighing.created_at)
+    rows = session.execute(
+        query.order_by(desc(moment), desc(Weighing.id)).limit(limit).offset(offset)
+    ).all()
+    return [tuple(row) for row in rows], int(total)
+
+
+def agent_operators(session: Session) -> list[tuple[AgentOperator, Scale, Site]]:
+    """Снимки учёток весовых ПК для блока на экране «Пользователи».
+
+    Экран только для администратора (видит всё), поэтому PanelScope
+    здесь не нужен. Локальные учётки (from_center=False) — первыми
+    внутри весов: ради них блок и существует (запрос Игоря 14.08.2026).
+    """
+    rows = session.execute(
+        select(AgentOperator, Scale, Site)
+        .join(Scale, Scale.id == AgentOperator.scale_id)
+        .join(Site, Site.id == Scale.site_id)
+        .order_by(Site.name, Scale.name, Scale.id, AgentOperator.from_center, AgentOperator.login)
+    ).all()
+    return [tuple(row) for row in rows]
 
 
 def photos_for_weighings(session: Session, weighing_ids: list[int]) -> dict[int, dict[str, str]]:

@@ -126,5 +126,41 @@
       </table>
     </div>
   </section>
+
+  <section class="table-card">
+    <div class="card-title">Учётки на агентах ({{ agent_ops | length }})</div>
+    <div class="journal-scroll">
+      <table class="journal">
+        <thead><tr><th>Объект / весы</th><th>Логин</th><th>ФИО</th><th>Источник</th><th>Статус</th><th>Снимок от</th></tr></thead>
+        <tbody>
+          {% for op, scale, site in agent_ops %}
+          <tr class="{{ '' if op.is_active else 'row-off' }}">
+            <td>{{ site.name }}<div class="cell-sub">{{ scale.name }}</div></td>
+            <td class="cell-gross">{{ op.login }}</td>
+            <td>{{ op.full_name or "—" }}</td>
+            <td>
+              {% if op.from_center %}
+              <span class="pill pill-ok"><span class="dot"></span>из центра</span>
+              {% else %}
+              <span class="pill pill-warn"><span class="dot"></span>заведена на месте</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if op.is_active %}
+              <span class="pill pill-ok"><span class="dot"></span>активна</span>
+              {% else %}
+              <span class="pill pill-err"><span class="dot"></span>отключена</span>
+              {% endif %}
+            </td>
+            <td class="cell-muted">{{ op.reported_at | fmt_dt }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="6" class="empty">Агенты ещё не прислали снимки учёток (нужен агент 0.4.14 и новее)</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="card-hint">Что реально лежит в базе каждого весового ПК: реплика операторов центра плюс учётки, заведённые на месте вручную (CLI add-operator — аварийный доступ). Снимок присылает сам агент — при подключении, после изменений в центре и раз в 5 минут; вход в интерфейс оператора возможен только по этим учёткам. «Заведена на месте» у незнакомого логина — повод спросить объект, кто и зачем её создал.</div>
+  </section>
 </main>
 {% endblock %}

@@ -25,6 +25,7 @@ import json
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -40,7 +41,7 @@ from sqlalchemy.pool import NullPool
 from starlette.middleware.sessions import SessionMiddleware
 
 from center.agents_ws.hub import AgentHub
-from center.db.models import Scale, ScaleKind, Site, User, UserRole
+from center.db.models import AgentOperator, Scale, ScaleKind, Site, User, UserRole
 from center.db.session import database_url, make_session_factory
 from center.web import queries, users_admin
 from center.web.router import create_panel_router
@@ -643,6 +644,60 @@ class TestUsersRoutesAccess:
             session.commit()
         response = users_env.client.get("/panel/users", follow_redirects=False)
         assert response.status_code == 403, "разжалованный админ сохранил экран по сессии"
+
+
+class TestUsersAgentOperatorsBlock:
+    """Блок «Учётки на агентах» на экране «Пользователи»: снимки
+    operators_report, локальные учётки помечены (запрос Игоря 14.08.2026)."""
+
+    def _seed_snapshot(self, env: UsersEnv) -> None:
+        with env.factory() as session:
+            site = Site(code="kyzyl-kyia", name="СВХ «Кызыл-Кыя»")
+            session.add(site)
+            session.flush()
+            scale = Scale(
+                site_id=site.id, name="Весы SCS-80", kind=ScaleKind.STATIC, driver="cas22"
+            )
+            session.add(scale)
+            session.flush()
+            now = datetime.now(UTC)
+            session.add(
+                AgentOperator(
+                    scale_id=scale.id,
+                    login="c.operator",
+                    full_name="Из Центра",
+                    is_active=True,
+                    from_center=True,
+                    reported_at=now,
+                )
+            )
+            session.add(
+                AgentOperator(
+                    scale_id=scale.id,
+                    login="local.backdoor",
+                    is_active=True,
+                    from_center=False,
+                    reported_at=now,
+                )
+            )
+            session.commit()
+
+    def test_block_shows_local_and_center_operators(self, users_env: UsersEnv) -> None:
+        """Обе учётки на странице; локальная — с пилюлей «заведена на месте»."""
+        self._seed_snapshot(users_env)
+        _login(users_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        page = users_env.client.get("/panel/users").text
+        assert "Учётки на агентах (2)" in page
+        assert "local.backdoor" in page
+        assert "заведена на месте" in page
+        assert "c.operator" in page
+        assert ">из центра</span>" in page
+
+    def test_empty_snapshot_shows_hint(self, users_env: UsersEnv) -> None:
+        """Без отчётов агентов блок объясняет, почему пуст (нужен 0.4.14)."""
+        _login(users_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        page = users_env.client.get("/panel/users").text
+        assert "Агенты ещё не прислали снимки учёток" in page
 
 
 class TestUsersRoutesAdmin:

@@ -1210,6 +1210,30 @@ class TestUpsertOperatorAfterReplica:
         assert storage.verify_operator("op.x", CLI_PASSWORD) == "op.x"
 
 
+class TestListOperators:
+    """Снимок учёток для отчёта центру (operators_report, 14.08.2026)."""
+
+    def test_lists_both_sources_without_hashes(self, storage: AgentStorage) -> None:
+        """В снимке обе разновидности учёток с верными флагами; хешей
+        паролей в записях нет по построению модели (правило №7)."""
+        storage.upsert_operator("local.op", CLI_PASSWORD, "Местный Оператор")
+        storage.replace_center_operators(
+            [make_operator("center.op", full_name="Из Центра", is_active=False)]
+        )
+        records = storage.list_operators()
+        assert [r.login for r in records] == ["center.op", "local.op"]  # порядок по логину
+        by_login = {r.login: r for r in records}
+        assert by_login["local.op"].from_center is False
+        assert by_login["local.op"].full_name == "Местный Оператор"
+        assert by_login["local.op"].is_active is True
+        assert by_login["center.op"].from_center is True
+        assert by_login["center.op"].is_active is False
+        assert "pw_hash" not in type(records[0]).model_fields
+
+    def test_empty_db_gives_empty_list(self, storage: AgentStorage) -> None:
+        assert storage.list_operators() == []
+
+
 class TestCenterSettingsStore:
     """Снимок настроек центра (scale_config): save/load_center_settings."""
 

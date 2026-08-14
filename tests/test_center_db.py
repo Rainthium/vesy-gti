@@ -64,8 +64,9 @@ from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Все 11 таблиц схемы центра (architecture §5 + мониторинг этапа 2)
+# Все 12 таблиц схемы центра (architecture §5 + мониторинг этапа 2)
 ALL_TABLES = (
+    "agent_operators",
     "agent_releases",
     "audit_log",
     "monitoring_events",
@@ -79,7 +80,7 @@ ALL_TABLES = (
     "weighing_photos",
 )
 
-HEAD_REVISION = "d4e5f6a7b8c9"  # журнал событий мониторинга (13.08.2026)
+HEAD_REVISION = "e5f6a7b8c9d0"  # снимки учёток весовых ПК (14.08.2026)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -310,7 +311,7 @@ class TestMigration:
     """alembic upgrade/downgrade и объекты, создаваемые миграцией."""
 
     def test_upgrade_creates_all_tables(self, db_engine: Engine) -> None:
-        """upgrade head на чистой БД создаёт все 10 таблиц + alembic_version."""
+        """upgrade head на чистой БД создаёт все таблицы ALL_TABLES + alembic_version."""
         tables = _table_names(db_engine)
         assert set(ALL_TABLES) <= tables
         assert "alembic_version" in tables

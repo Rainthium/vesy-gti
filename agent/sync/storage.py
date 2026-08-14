@@ -25,7 +25,13 @@ from pathlib import Path
 from uuid import UUID
 
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
-from shared.messages import OperatorRecord, PhotoMeta, TareRecord, WeighingRecord
+from shared.messages import (
+    AgentOperatorInfo,
+    OperatorRecord,
+    PhotoMeta,
+    TareRecord,
+    WeighingRecord,
+)
 from shared.passwords import hash_password, verify_password
 from shared.tare import TARE_VALIDITY_MONTHS, three_months_before  # noqa: F401 — реэкспорт
 
@@ -749,6 +755,26 @@ class AgentStorage:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) AS n FROM local_users").fetchone()
         return int(row["n"])
+
+    def list_operators(self) -> list[AgentOperatorInfo]:
+        """Все учётки весового ПК для отчёта центру (operators_report).
+
+        Хеши паролей в отчёт не попадают (правило №7): центру достаточно
+        знать, ЧТО за учётки существуют и откуда они взялись.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT login, full_name, is_active, from_center FROM local_users ORDER BY login"
+            ).fetchall()
+        return [
+            AgentOperatorInfo(
+                login=str(row["login"]),
+                full_name=str(row["full_name"] or ""),
+                is_active=bool(row["is_active"]),
+                from_center=bool(row["from_center"]),
+            )
+            for row in rows
+        ]
 
     def verify_operator(self, login: str, password: str) -> str | None:
         """Проверить пароль; вернуть отображаемое имя оператора или None.

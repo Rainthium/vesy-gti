@@ -38,6 +38,7 @@ from shared.messages import (
     OfflineSync,
     OfflineSyncAck,
     OperatorsRegistryUpdate,
+    OperatorsReport,
     ScaleConfigUpdate,
     TareRegistryUpdate,
     UpdateStatus,
@@ -189,6 +190,19 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                     if not hub.resolve_log_tail(message, scale_id=scale_id):
                         # никто не ждёт: запрос уже отвалился по тайм-ауту
                         logger.info("весы %d: журнал пришёл поздно, отброшен", scale_id)
+
+                elif isinstance(message, OperatorsReport):
+                    # снимок учёток весового ПК (агент 0.4.14): полная
+                    # замена; отчёт плановый — лог не засоряем
+                    await asyncio.to_thread(
+                        _db,
+                        lambda s, m=message: repo.replace_agent_operators(s, scale_id, m.records),
+                    )
+                    logger.debug(
+                        "весы %d: снимок учёток агента, %d записей",
+                        scale_id,
+                        len(message.records),
+                    )
 
                 elif isinstance(message, UpdateStatus):
                     if message.ok:

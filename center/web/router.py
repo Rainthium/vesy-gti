@@ -41,6 +41,7 @@ from center.db.models import (
     Scale,
     ScaleKind,
     Site,
+    TareRegistry,
     UserRole,
     Weighing,
 )
@@ -59,6 +60,7 @@ from shared.messages import (
     supports_log_tail,
     supports_secure_sync,
 )
+from shared.tare import three_months_before
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +125,20 @@ def _plural_ru(n: int, one: str, few: str, many: str) -> str:
     if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
         return few
     return many
+
+
+def _tare_status(weighing: Weighing, registry: TareRegistry | None, threshold: datetime) -> str:
+    """Статус записи в истории тарирований (пилюля экрана).
+
+    Строка реестра есть только у последнего тарирования своей сцепки;
+    тарирование без номера ТС в реестр не попадает и в расчёте нетто
+    не участвует никогда.
+    """
+    if not weighing.vehicle_number:
+        return "no_vehicle"
+    if registry is None:
+        return "replaced"
+    return "active" if registry.tared_at >= threshold else "expired"
 
 
 def create_panel_router(
@@ -790,28 +806,78 @@ def create_panel_router(
         user: PanelUser,
         scope: PanelScope,
         search: str | None = None,
+        show: str = "",
         site_id: str = "",
         scale_id: str = "",
         page: int = 1,
     ) -> HTMLResponse:
+        """Реестр тарирований; ``show=all`` — вся история из журнала.
+
+        Реестр хранит одну строку на сцепку, поэтому историю машины —
+        вместе с истёкшими и заменёнными тарированиями — видно только
+        по журналу (запрос Игоря 14.08.2026).
+        """
         refs = await asyncio.to_thread(_db, lambda s: queries.filter_options(s, scope))
         site = _parse_id(site_id)
         scale = _scale_of_site(refs, _parse_id(scale_id), site)
         page = max(1, page)
-        rows, total = await asyncio.to_thread(
-            _db,
-            lambda s: queries.tare_list(
-                s,
-                search=search,
-                site_id=site,
-                scale_id=scale,
-                limit=PAGE_SIZE,
-                offset=(page - 1) * PAGE_SIZE,
-                site_scope=scope,
-            ),
-        )
+        history = show == "all"
+        rows: list[dict[str, Any]]
+        if history:
+            raw_history, total = await asyncio.to_thread(
+                _db,
+                lambda s: queries.tare_history(
+                    s,
+                    search=search,
+                    site_id=site,
+                    scale_id=scale,
+                    limit=PAGE_SIZE,
+                    offset=(page - 1) * PAGE_SIZE,
+                    site_scope=scope,
+                ),
+            )
+            threshold = three_months_before(datetime.now(UTC))
+            rows = [
+                {
+                    "weighing": weighing,
+                    "site": row_site,
+                    "scale": row_scale,
+                    "vehicle_number": weighing.vehicle_number,
+                    "trailer_number": weighing.trailer_number,
+                    "tare_value": weighing.massa,
+                    "tared_at": weighing.weighed_at or weighing.created_at,
+                    "status": _tare_status(weighing, registry, threshold),
+                }
+                for weighing, row_scale, row_site, registry in raw_history
+            ]
+        else:
+            raw_active, total = await asyncio.to_thread(
+                _db,
+                lambda s: queries.tare_list(
+                    s,
+                    search=search,
+                    site_id=site,
+                    scale_id=scale,
+                    limit=PAGE_SIZE,
+                    offset=(page - 1) * PAGE_SIZE,
+                    site_scope=scope,
+                ),
+            )
+            rows = [
+                {
+                    "weighing": weighing,
+                    "site": row_site,
+                    "scale": row_scale,
+                    "vehicle_number": tare.vehicle_number,
+                    "trailer_number": tare.trailer_number,
+                    "tare_value": tare.tare_value,
+                    "tared_at": tare.tared_at,
+                    "status": "active",
+                }
+                for tare, weighing, row_scale, row_site in raw_active
+            ]
         photos = await asyncio.to_thread(
-            _db, lambda s: queries.photos_for_weighings(s, [w.id for _, w, _, _ in rows])
+            _db, lambda s: queries.photos_for_weighings(s, [r["weighing"].id for r in rows])
         )
         return render(
             "tares.html",
@@ -823,6 +889,7 @@ def create_panel_router(
             page=page,
             pages=max(1, -(-total // PAGE_SIZE)),
             search=search or "",
+            show="all" if history else "",
             refs=refs,
             filters={"site_id": site, "scale_id": scale},
         )
@@ -1286,6 +1353,7 @@ def create_panel_router(
             ),
         )
         sites = await asyncio.to_thread(_db, lambda s: queries.refs_data(s).sites)
+        agent_ops = await asyncio.to_thread(_db, queries.agent_operators)
         return render(
             "users.html",
             request,
@@ -1293,6 +1361,7 @@ def create_panel_router(
             admin_login=admin,
             rows=rows,
             sites=sites,
+            agent_ops=agent_ops,
             roles=list(UserRole),
             min_password=users_admin.MIN_PASSWORD_LEN,
             filters={"search": search, "role": role, "site": site, "status": status},

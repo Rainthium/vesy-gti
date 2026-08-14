@@ -9,11 +9,19 @@
 <main class="content content--wide">
   <div class="page-head">
     <h1>Реестр тарирований</h1>
+    {% if show == 'all' %}
+    <span class="page-meta">{{ total }} тарирований за всё время · нетто считается только по действующим</span>
+    {% else %}
     <span class="page-meta">{{ total }} действующих тарирований · реплицируется на агентов</span>
+    {% endif %}
   </div>
   <form method="get" action="/panel/tares" class="filters">
+    <select name="show">
+      <option value="">Действующие</option>
+      <option value="all" {{ 'selected' if show == 'all' else '' }}>Вся история</option>
+    </select>
     {{ site_scale(refs, filters) }}
-    <input name="search" placeholder="Поиск по номеру ТС" value="{{ search }}">
+    <input name="search" placeholder="Поиск по номеру ТС или прицепа" value="{{ search }}">
     <button type="submit" class="btn-primary">Найти</button>
   </form>
   <div class="table-card">
@@ -24,30 +32,44 @@
           <th>Объект / весы</th><th>Действует до</th><th class="cell-print"></th><th>Статус</th>
         </tr></thead>
         <tbody>
-          {% for tare, weighing, scale, site in rows %}
-          <tr class="clickable" onclick="location.href='/panel/journal/{{ weighing.id }}'">
-            <td class="cell-vehicle">{{ tare.vehicle_number }}</td>
-            <td>{{ tare.trailer_number or "—" }}</td>
-            <td class="cell-photos">{{ photo_thumbs(photos.get(weighing.id), '%s · %s' | format(tare.vehicle_number, tare.tared_at | fmt_dt)) }}</td>
-            <td class="num cell-gross">{{ tare.tare_value | fmt_kg }}</td>
-            <td class="cell-muted">{{ tare.tared_at | fmt_dt }}</td>
-            {{ site_scale_cell(site, scale) }}
-            <td class="cell-muted">{{ expires(tare.tared_at) | fmt_dt }}</td>
+          {% for row in rows %}
+          <tr class="clickable" onclick="location.href='/panel/journal/{{ row.weighing.id }}'">
+            <td class="cell-vehicle">{{ row.vehicle_number or "—" }}</td>
+            <td>{{ row.trailer_number or "—" }}</td>
+            <td class="cell-photos">{{ photo_thumbs(photos.get(row.weighing.id), '%s · %s' | format(row.vehicle_number or "без номера", row.tared_at | fmt_dt)) }}</td>
+            <td class="num cell-gross">{{ row.tare_value | fmt_kg }}</td>
+            <td class="cell-muted">{{ row.tared_at | fmt_dt }}</td>
+            {{ site_scale_cell(row.site, row.scale) }}
+            {# у заменённой записи «действует до» бессмысленно: её вытеснило
+               новое тарирование задолго до календарного срока #}
+            {% if row.status in ('active', 'expired') %}
+            <td class="cell-muted">{{ expires(row.tared_at) | fmt_dt }}</td>
+            {% else %}
+            <td class="cell-muted">—</td>
+            {% endif %}
             {# stopPropagation: клик по печати не должен заодно открывать запись #}
-            <td class="cell-print"><a class="print-link" href="/panel/journal/{{ weighing.id }}/card" target="_blank" title="Печать тарной карточки" onclick="event.stopPropagation()">Печать</a></td>
+            <td class="cell-print"><a class="print-link" href="/panel/journal/{{ row.weighing.id }}/card" target="_blank" title="Печать тарной карточки" onclick="event.stopPropagation()">Печать</a></td>
+            {% if row.status == 'active' %}
             <td><span class="pill pill-ok"><span class="dot"></span>Действует</span></td>
+            {% elif row.status == 'expired' %}
+            <td><span class="pill pill-warn"><span class="dot"></span>Истекло</span></td>
+            {% elif row.status == 'replaced' %}
+            <td><span class="pill pill-info"><span class="dot"></span>Заменено</span></td>
+            {% else %}
+            <td class="cell-muted">Без номера ТС</td>
+            {% endif %}
           </tr>
           {% else %}
-          <tr><td colspan="9" class="empty">Действующих тарирований нет</td></tr>
+          <tr><td colspan="9" class="empty">{{ 'Тарирований не найдено' if show == 'all' else 'Действующих тарирований нет' }}</td></tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
     {% set base -%}
-    /panel/tares?search={{ search | urlencode }}&site_id={{ filters.site_id or '' }}&scale_id={{ filters.scale_id or '' }}
+    /panel/tares?show={{ show }}&search={{ search | urlencode }}&site_id={{ filters.site_id or '' }}&scale_id={{ filters.scale_id or '' }}
     {%- endset %}
     {{ pagination(page, pages, base | trim) }}
   </div>
-  <p class="table-hint">При взвешивании брутто система автоматически подставляет последнее действующее тарирование этого номера ТС. Истёкшие записи в расчёте нетто не участвуют.</p>
+  <p class="table-hint">При взвешивании брутто система автоматически подставляет последнее действующее тарирование этой сцепки. Истёкшие и заменённые записи в расчёте нетто не участвуют.</p>
 </main>
 {% endblock %}
