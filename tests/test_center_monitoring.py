@@ -413,6 +413,33 @@ class TestTelegramNotifier:
         assert notifier.deliver_once() == 0
         assert len(sent) == 2
 
+    def test_http_error_body_reaches_log(
+        self, db: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Тело ответа Telegram при HTTP-ошибке попадает в текст исключения:
+        боевой урок 14.08.2026 — группа мигрировала в супергруппу, а в логе
+        был голый «400 Bad Request» без description и нового chat_id."""
+        import io
+        import urllib.error
+
+        body = (
+            b'{"ok":false,"error_code":400,'
+            b'"description":"Bad Request: group chat was upgraded to a supergroup chat",'
+            b'"parameters":{"migrate_to_chat_id":-1004389188992}}'
+        )
+
+        def raising_urlopen(request: object, timeout: float = 0) -> None:
+            raise urllib.error.HTTPError(
+                "https://api.telegram.org/", 400, "Bad Request", None, io.BytesIO(body)
+            )
+
+        monkeypatch.setattr("urllib.request.urlopen", raising_urlopen)
+        notifier = TelegramNotifier(db, token="t", chat_id="-5485263200")
+        with pytest.raises(RuntimeError) as excinfo:
+            notifier._send("проверка")
+        assert "group chat was upgraded to a supergroup chat" in str(excinfo.value)
+        assert "-1004389188992" in str(excinfo.value)
+
     def test_failure_keeps_rest_for_retry(self, db: sessionmaker[Session]) -> None:
         """Telegram упал на втором сообщении: первое помечено, остальные
         ждут следующего цикла — порядок доставки сохраняется."""

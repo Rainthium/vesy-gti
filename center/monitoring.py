@@ -30,6 +30,7 @@
 import asyncio
 import json
 import logging
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -492,6 +493,13 @@ class TelegramNotifier:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=TELEGRAM_TIMEOUT_S) as response:
-            # Telegram отвечает 200 с ok=true; иные коды бросают HTTPError
-            response.read()
+        try:
+            with urllib.request.urlopen(request, timeout=TELEGRAM_TIMEOUT_S) as response:
+                # Telegram отвечает 200 с ok=true; иные коды бросают HTTPError
+                response.read()
+        except urllib.error.HTTPError as exc:
+            # тело ответа — причина отказа: description и, при миграции группы
+            # в супергруппу, новый chat_id; без него в логе голый «400», и
+            # причину пришлось добывать руками curl'ом (боевой урок 14.08.2026)
+            detail = exc.read(500).decode("utf-8", "replace")
+            raise RuntimeError(f"{exc}: {detail}") from exc
