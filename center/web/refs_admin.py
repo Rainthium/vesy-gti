@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from center.api_v2.schemas import AIS_OBJECT_RE
 from center.db import repo
 from center.db.models import (
     Agent,
@@ -116,6 +117,34 @@ def _check_legacy(
     return ip, port, autoscale, None
 
 
+def _check_ais_route(
+    ais_object: str, ais_scale_no: int | None
+) -> tuple[str | None, int | None, str | None]:
+    """Нормализация привязки АИС v2: (объект АИС, № весов, ошибка).
+
+    «Специальный идентификатор СВХ» — строка как в справочнике АИС («0014»,
+    ведущие нули значимы); номер весов на объекте по умолчанию 1.
+    """
+    ais_object = ais_object.strip()
+    if not ais_object:
+        if ais_scale_no is not None:
+            return None, None, "привязка АИС: укажите идентификатор СВХ"
+        return None, None, None
+    if not AIS_OBJECT_RE.fullmatch(ais_object):
+        return None, None, "привязка АИС: идентификатор СВХ — цифры/латиница до 16 символов"
+    scale_no = 1 if ais_scale_no is None else ais_scale_no
+    if not 1 <= scale_no <= 999:
+        return None, None, "привязка АИС: № весов от 1 до 999"
+    return ais_object, scale_no, None
+
+
+def _integrity_message(exc: IntegrityError) -> str:
+    """Какой уникальный индекс сработал: legacy-маршрут или привязка АИС."""
+    if "uq_scales_ais_route" in str(exc.orig):
+        return "такая привязка АИС (объект + № весов) уже назначена другим весам"
+    return "такой legacy-маршрут уже назначен другим весам"
+
+
 def create_scale(
     session: Session,
     *,
@@ -126,6 +155,8 @@ def create_scale(
     legacy_ip: str = "",
     legacy_port: int | None = None,
     legacy_autoscale: int | None = None,
+    ais_object: str = "",
+    ais_scale_no: int | None = None,
 ) -> str | None:
     if session.get(Site, site_id) is None:
         return "объект не найден"
@@ -138,6 +169,9 @@ def create_scale(
     ip, port, autoscale, error = _check_legacy(legacy_ip, legacy_port, legacy_autoscale)
     if error:
         return error
+    ais_obj, ais_no, error = _check_ais_route(ais_object, ais_scale_no)
+    if error:
+        return error
     session.add(
         Scale(
             site_id=site_id,
@@ -147,13 +181,15 @@ def create_scale(
             legacy_ip=ip,
             legacy_port=port,
             legacy_autoscale=autoscale,
+            ais_object=ais_obj,
+            ais_scale_no=ais_no,
         )
     )
     try:
         session.commit()
-    except IntegrityError:  # уникальный индекс legacy-маршрута
+    except IntegrityError as exc:  # уникальные индексы маршрутов
         session.rollback()
-        return "такой legacy-маршрут уже назначен другим весам"
+        return _integrity_message(exc)
     logger.info("справочники: созданы весы «%s» (driver %s)", name, driver)
     return None
 
@@ -168,6 +204,8 @@ def update_scale(
     legacy_ip: str = "",
     legacy_port: int | None = None,
     legacy_autoscale: int | None = None,
+    ais_object: str = "",
+    ais_scale_no: int | None = None,
 ) -> str | None:
     scale = session.get(Scale, scale_id)
     if scale is None:
@@ -181,17 +219,22 @@ def update_scale(
     ip, port, autoscale, error = _check_legacy(legacy_ip, legacy_port, legacy_autoscale)
     if error:
         return error
+    ais_obj, ais_no, error = _check_ais_route(ais_object, ais_scale_no)
+    if error:
+        return error
     scale.name = name
     scale.kind = kind
     scale.driver = driver
     scale.legacy_ip = ip
     scale.legacy_port = port
     scale.legacy_autoscale = autoscale
+    scale.ais_object = ais_obj
+    scale.ais_scale_no = ais_no
     try:
         session.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         session.rollback()
-        return "такой legacy-маршрут уже назначен другим весам"
+        return _integrity_message(exc)
     logger.info("справочники: весы id=%d обновлены («%s»)", scale_id, name)
     return None
 

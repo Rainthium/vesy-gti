@@ -1032,8 +1032,13 @@ def create_panel_router(
         legacy_ip: Annotated[str, Form()] = "",
         legacy_port: Annotated[str, Form()] = "",
         legacy_autoscale: Annotated[str, Form()] = "",
+        ais_object: Annotated[str, Form()] = "",
+        ais_scale_no: Annotated[str, Form()] = "",
     ) -> RedirectResponse:
         parsed_kind, port, autoscale, error = _parse_scale_form(kind, legacy_port, legacy_autoscale)
+        ais_no, ais_no_ok = _parse_opt_int(ais_scale_no)
+        if error is None and not ais_no_ok:
+            error = "привязка АИС: № весов — число"
         if error is None:
             assert parsed_kind is not None
             error = await asyncio.to_thread(
@@ -1047,6 +1052,8 @@ def create_panel_router(
                     legacy_ip=legacy_ip,
                     legacy_port=port,
                     legacy_autoscale=autoscale,
+                    ais_object=ais_object,
+                    ais_scale_no=ais_no,
                 ),
             )
         if error is None:
@@ -1065,8 +1072,13 @@ def create_panel_router(
         legacy_ip: Annotated[str, Form()] = "",
         legacy_port: Annotated[str, Form()] = "",
         legacy_autoscale: Annotated[str, Form()] = "",
+        ais_object: Annotated[str, Form()] = "",
+        ais_scale_no: Annotated[str, Form()] = "",
     ) -> RedirectResponse:
         parsed_kind, port, autoscale, error = _parse_scale_form(kind, legacy_port, legacy_autoscale)
+        ais_no, ais_no_ok = _parse_opt_int(ais_scale_no)
+        if error is None and not ais_no_ok:
+            error = "привязка АИС: № весов — число"
         if error is None:
             assert parsed_kind is not None
             error = await asyncio.to_thread(
@@ -1080,6 +1092,8 @@ def create_panel_router(
                     legacy_ip=legacy_ip,
                     legacy_port=port,
                     legacy_autoscale=autoscale,
+                    ais_object=ais_object,
+                    ais_scale_no=ais_no,
                 ),
             )
         if error is None:

@@ -97,13 +97,15 @@
           <label>IP (маршрут АИС) <input name="legacy_ip" maxlength="45" placeholder="192.168.158.20"></label>
           <label>Порт <input name="legacy_port" inputmode="numeric" maxlength="5" class="narrow" placeholder="8087"></label>
           <label title="Номер весов на объекте; у одиночных весов АИС шлёт 1">autoscale (№ весов) <input name="legacy_autoscale" inputmode="numeric" maxlength="3" class="narrow" placeholder="1"></label>
+          <label title="«Специальный идентификатор СВХ» из справочника АИС, с ведущими нулями (0014 — Кызыл-Кыя)">Объект АИС (v2) <input name="ais_object" maxlength="16" class="narrow" placeholder="0014"></label>
+          <label title="Номер весов на объекте в АИС («Авто весы 1/2»); у одиночных — 1">№ весов АИС <input name="ais_scale_no" inputmode="numeric" maxlength="3" class="narrow" placeholder="1"></label>
           <button type="submit" class="btn-primary">Создать весы</button>
         </form>
-        <div class="card-hint">Маршрут АИС (legacy) — ключ, по которому АИС «СВХ» находит весы: IP и порт UniServer объекта + autoscale — номер весов на объекте (у одиночных весов АИС шлёт 1). Заполняется целиком или не заполняется вовсе. <b>Менять только синхронно со стороной АИС</b> — после смены любого из трёх полей их команды перестанут находить весы («Весы не найдены»). Пороги, таймауты и COM-порт — на странице «Настройки» весов.</div>
+        <div class="card-hint">Маршрут АИС (legacy) — ключ, по которому АИС «СВХ» находит весы по старому контракту v1: IP и порт UniServer объекта + autoscale — номер весов на объекте (у одиночных весов АИС шлёт 1). Заполняется целиком или не заполняется вовсе. <b>Привязка АИС (v2, контракт от 17.08.2026)</b>: «Специальный идентификатор СВХ» из справочника АИС (строка с ведущими нулями: 0014 — Кызыл-Кыя, 0013 — Джалал-Абад ПЗТК, 0002 — Кант) + № весов на объекте («Авто весы 1/2», у одиночных — 1); одна пара — одни весы. <b>Оба ключа менять только синхронно со стороной АИС</b> — иначе их команды перестанут находить весы («Весы не найдены»). Пороги, таймауты и COM-порт — на странице «Настройки» весов.</div>
         {% endif %}
         <div class="journal-scroll">
           <table class="journal users">
-            <thead><tr><th>Объект</th><th>Весы</th><th>Тип</th><th>Драйвер</th><th>Маршрут АИС (legacy)</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
+            <thead><tr><th>Объект</th><th>Весы</th><th>Тип</th><th>Драйвер</th><th>Маршрут АИС (legacy)</th><th title="Контракт v2: специальный идентификатор СВХ + № весов">Привязка АИС (v2)</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
             <tbody>
               {% for scale, site in refs.scales %}
               <tr>
@@ -124,6 +126,10 @@
                   <input class="cell-input narrow" form="scale-{{ scale.id }}" name="legacy_port" value="{{ scale.legacy_port if scale.legacy_port is not none else '' }}" maxlength="5" placeholder="порт" title="Порт — маршрут АИС, менять только синхронно с их стороной">
                   <input class="cell-input narrow" form="scale-{{ scale.id }}" name="legacy_autoscale" value="{{ scale.legacy_autoscale if scale.legacy_autoscale is not none else '' }}" maxlength="3" placeholder="№" title="autoscale — номер весов на объекте (у одиночных — 1); маршрут АИС, менять только синхронно с их стороной">
                 </td>
+                <td class="legacy-cell">
+                  <input class="cell-input narrow" form="scale-{{ scale.id }}" name="ais_object" value="{{ scale.ais_object or '' }}" maxlength="16" placeholder="0014" title="«Специальный идентификатор СВХ» из справочника АИС (с ведущими нулями); менять только синхронно с их стороной">
+                  <input class="cell-input narrow" form="scale-{{ scale.id }}" name="ais_scale_no" value="{{ scale.ais_scale_no if scale.ais_scale_no is not none else '' }}" maxlength="3" placeholder="№" title="Номер весов на объекте в АИС («Авто весы 1/2»); у одиночных — 1">
+                </td>
                 <td class="cell-actions">
                   <button type="submit" form="scale-{{ scale.id }}" class="btn-row btn-row-primary">Сохранить</button>
                   <a href="/panel/refs/scales/{{ scale.id }}/settings" class="btn-row btn-link">Настройки</a>
@@ -133,10 +139,11 @@
                 <td class="cell-muted">{{ kind_names.get(scale.kind.value, scale.kind.value) }}</td>
                 <td class="cell-muted">{{ scale.driver }}</td>
                 <td class="cell-muted">{% if scale.legacy_ip %}{{ scale.legacy_ip }}:{{ scale.legacy_port or '—' }} · autoscale {{ scale.legacy_autoscale }}{% else %}—{% endif %}</td>
+                <td class="cell-muted">{% if scale.ais_object %}{{ scale.ais_object }} · весы {{ scale.ais_scale_no }}{% else %}—{% endif %}</td>
                 {% endif %}
               </tr>
               {% else %}
-              <tr><td colspan="{{ 6 if can_edit else 5 }}" class="empty">Весы не заведены</td></tr>
+              <tr><td colspan="{{ 7 if can_edit else 6 }}" class="empty">Весы не заведены</td></tr>
               {% endfor %}
             </tbody>
           </table>

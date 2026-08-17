@@ -73,6 +73,9 @@ def main() -> None:
                 legacy_ip=f"192.168.150.{185 + index}",
                 legacy_port=8087,
                 legacy_autoscale=2 + index,
+                # привязка v2 (контракт 17.08.2026): демо-идентификаторы СВХ
+                ais_object=f"{9000 + index:04d}",
+                ais_scale_no=1,
             )
             session.add(scale)
             session.flush()

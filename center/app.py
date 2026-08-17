@@ -1,6 +1,5 @@
-"""Сборка приложения центра: WS-сервер агентов + совместимый API v1.
-
-Веб-панель диспетчера подключится сюда же (следующая задача).
+"""Сборка приложения центра: WS-сервер агентов, совместимый API v1, нативный
+API v2 для АИС «СВХ» (контракт 17.08.2026), фото, релизы, веб-панель.
 
 Запуск в разработке:
     uv run uvicorn center.app:create_app --factory --port 8080
@@ -23,6 +22,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from center.agents_ws.hub import AgentHub
 from center.agents_ws.router import create_agents_router
 from center.api_v1.router import ApiV1Config, create_api_v1_router
+from center.api_v2.router import ApiV2Config, create_api_v2_router
 from center.db.session import make_engine, make_session_factory
 from center.monitoring import MonitoringService, TelegramNotifier
 from center.photos.router import PhotosConfig, create_photos_router
@@ -75,14 +75,23 @@ def create_app() -> FastAPI:
         weigh_timeout_s=float(os.environ.get("V1_WEIGH_TIMEOUT_S", "120")),
     )
 
-    # сервисные токены интеграторов (правило №7: значения только из env);
-    # dev-значение по умолчанию — чтобы локальный стенд работал из коробки
+    # сервисный токен АИС «СВХ» — один и для команд v2, и для фото (контракт
+    # v2, раздел 3); правило №7: значения только из env, dev-значение по
+    # умолчанию — чтобы локальный стенд работал из коробки
     ais_token = os.environ.get("AIS_PHOTO_TOKEN", "dev-only-ais-token")
     allowed = os.environ.get("AIS_ALLOWED_IPS", "")
+    service_tokens = {ais_token: "ais-svh"}
+    allowed_ips = frozenset(ip.strip() for ip in allowed.split(",") if ip.strip()) or None
     photos_config = PhotosConfig(
         photos_dir=Path(os.environ.get("PHOTOS_DIR", "./photos_data")),
-        service_tokens={ais_token: "ais-svh"},
-        allowed_ips=frozenset(ip.strip() for ip in allowed.split(",") if ip.strip()) or None,
+        service_tokens=service_tokens,
+        allowed_ips=allowed_ips,
+    )
+    api_v2_config = ApiV2Config(
+        service_tokens=service_tokens,
+        photos_dir=photos_config.photos_dir,
+        allowed_ips=allowed_ips,
+        weigh_timeout_s=api_v1_config.weigh_timeout_s,
     )
 
     # мониторинг объектов (этап 2): детекторы — фоновая задача процесса
@@ -141,6 +150,7 @@ def create_app() -> FastAPI:
     releases_dir = Path(os.environ.get("AGENT_RELEASES_DIR", "./releases_data"))
     app.include_router(create_agents_router(hub, session_factory))
     app.include_router(create_api_v1_router(hub, session_factory, api_v1_config))
+    app.include_router(create_api_v2_router(hub, session_factory, api_v2_config))
     app.include_router(create_photos_router(session_factory, photos_config))
     app.include_router(create_releases_router(session_factory, releases_dir))
     app.include_router(

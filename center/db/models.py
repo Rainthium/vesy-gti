@@ -127,6 +127,11 @@ class Scale(Base):
     verif_number: Mapped[str | None] = mapped_column(String(64), default=None)
     verif_date: Mapped[date | None] = mapped_column(Date, default=None)
     verif_until: Mapped[date | None] = mapped_column(Date, default=None)
+    # маршрутизация контракта v2 (согласован 17.08.2026): «Специальный
+    # идентификатор СВХ» из справочника АИС (строка с ведущими нулями, «0014»)
+    # + номер весов на объекте («Авто весы 1/2») → эти весы
+    ais_object: Mapped[str | None] = mapped_column(String(16), default=None)
+    ais_scale_no: Mapped[int | None] = mapped_column(default=None)
 
     __table_args__ = (
         # уникальность legacy-маршрута только для заполненных маршрутов:
@@ -139,6 +144,14 @@ class Scale(Base):
             unique=True,
             postgresql_where=text("legacy_ip IS NOT NULL"),
             postgresql_nulls_not_distinct=True,
+        ),
+        # одна пара «объект АИС + номер весов» — одни весы (маршрут v2)
+        Index(
+            "uq_scales_ais_route",
+            "ais_object",
+            "ais_scale_no",
+            unique=True,
+            postgresql_where=text("ais_object IS NOT NULL"),
         ),
     )
 
@@ -265,6 +278,31 @@ class WeighingPhoto(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger)
 
     __table_args__ = (UniqueConstraint("weighing_id", "role", name="uq_weighing_photos_role"),)
+
+
+class WeighingAisRef(Base):
+    """Номер документа АИС «СВХ» (``WEI…``/``TAR…``) у операции журнала.
+
+    Контракт v2 (согласован 17.08.2026): номер — ключ идемпотентности команд
+    (один документ АИС = одна операция) и обратная связь по офлайн-операциям
+    (АИС заводит документ по событию и сообщает номер). Отдельная таблица,
+    потому что запись ``weighings`` неизменяема (правило №2), а номер у
+    офлайн-операции появляется позже неё.
+
+    ``origin``: ``command`` — из команды v2 (пишется в одной транзакции с
+    записью), ``callback`` — из обратного вызова АИС.
+    """
+
+    __tablename__ = "weighing_ais_refs"
+
+    weighing_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("weighings.id"), primary_key=True
+    )
+    ais_ref: Mapped[str] = mapped_column(String(32), unique=True)
+    origin: Mapped[str] = mapped_column(String(16))
+    linked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
 
 
 class TareRegistry(Base):

@@ -309,6 +309,72 @@ class TestCreateScale:
         assert scale.legacy_port is None
         assert scale.legacy_autoscale is None
 
+    def test_ais_route_saved_with_default_scale_no(self, db_session: Session) -> None:
+        """Привязка АИС v2: идентификатор СВХ как есть (нули значимы), № весов по умолчанию 1."""
+        site = _add_site(db_session)
+        error = refs_admin.create_scale(
+            db_session,
+            site_id=site.id,
+            name="Весы",
+            kind=ScaleKind.STATIC,
+            driver="cas22",
+            ais_object=" 0014 ",
+        )
+        assert error is None
+        scale = db_session.execute(select(Scale)).scalar_one()
+        assert scale.ais_object == "0014"
+        assert scale.ais_scale_no == 1
+
+    def test_ais_route_duplicate_rejected(self, db_session: Session) -> None:
+        """Одна пара «объект АИС + № весов» — одни весы; другой номер — можно (Кант)."""
+        site = _add_site(db_session)
+        assert (
+            refs_admin.create_scale(
+                db_session,
+                site_id=site.id,
+                name="Весы 1",
+                kind=ScaleKind.STATIC,
+                driver="cas22",
+                ais_object="0002",
+                ais_scale_no=1,
+            )
+            is None
+        )
+        error = refs_admin.create_scale(
+            db_session,
+            site_id=site.id,
+            name="Весы 1 дубль",
+            kind=ScaleKind.STATIC,
+            driver="cas22",
+            ais_object="0002",
+            ais_scale_no=1,
+        )
+        assert error == "такая привязка АИС (объект + № весов) уже назначена другим весам"
+        assert (
+            refs_admin.create_scale(
+                db_session,
+                site_id=site.id,
+                name="Весы 2",
+                kind=ScaleKind.STATIC,
+                driver="cas22",
+                ais_object="0002",
+                ais_scale_no=2,
+            )
+            is None
+        )
+
+    def test_ais_scale_no_without_object_rejected(self, db_session: Session) -> None:
+        site = _add_site(db_session)
+        error = refs_admin.create_scale(
+            db_session,
+            site_id=site.id,
+            name="Весы",
+            kind=ScaleKind.STATIC,
+            driver="cas22",
+            ais_scale_no=2,
+        )
+        assert error == "привязка АИС: укажите идентификатор СВХ"
+
     def test_two_scales_without_legacy_allowed(self, db_session: Session) -> None:
         """Пустой маршрут не считается дублем: несколько весов без legacy."""
         site = _add_site(db_session)

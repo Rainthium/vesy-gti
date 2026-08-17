@@ -421,6 +421,7 @@ class TestTelegramNotifier:
         был голый «400 Bad Request» без description и нового chat_id."""
         import io
         import urllib.error
+        from email.message import Message
 
         body = (
             b'{"ok":false,"error_code":400,'
@@ -430,7 +431,7 @@ class TestTelegramNotifier:
 
         def raising_urlopen(request: object, timeout: float = 0) -> None:
             raise urllib.error.HTTPError(
-                "https://api.telegram.org/", 400, "Bad Request", None, io.BytesIO(body)
+                "https://api.telegram.org/", 400, "Bad Request", Message(), io.BytesIO(body)
             )
 
         monkeypatch.setattr("urllib.request.urlopen", raising_urlopen)

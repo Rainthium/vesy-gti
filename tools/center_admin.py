@@ -51,6 +51,12 @@ def main() -> None:
     p_scale.add_argument("--legacy-ip", default=None)
     p_scale.add_argument("--legacy-port", type=int, default=None)
     p_scale.add_argument("--legacy-autoscale", type=int, default=None)
+    # привязка контракта v2 (17.08.2026): «Специальный идентификатор СВХ» из
+    # справочника АИС (строка с ведущими нулями) + № весов на объекте
+    p_scale.add_argument("--ais-object", default=None, help="напр. 0014 (Кызыл-Кыя)")
+    p_scale.add_argument(
+        "--ais-scale-no", type=int, default=None, help="№ весов в АИС, по умолчанию 1"
+    )
 
     p_agent = sub.add_parser("create-agent", help="создать агента и выпустить токен")
     p_agent.add_argument("--scale-id", type=int, required=True)
@@ -97,6 +103,10 @@ def main() -> None:
             site = session.execute(select(Site).where(Site.code == args.site)).scalar_one_or_none()
             if site is None:
                 sys.exit(f"Объект с кодом {args.site} не найден (create-site сначала).")
+            if args.ais_scale_no is not None and not args.ais_object:
+                sys.exit(
+                    "--ais-scale-no без --ais-object не имеет смысла (укажите идентификатор СВХ)."
+                )
             scale = Scale(
                 site_id=site.id,
                 name=args.name,
@@ -105,6 +115,8 @@ def main() -> None:
                 legacy_ip=args.legacy_ip,
                 legacy_port=args.legacy_port,
                 legacy_autoscale=args.legacy_autoscale,
+                ais_object=args.ais_object,
+                ais_scale_no=((args.ais_scale_no or 1) if args.ais_object else args.ais_scale_no),
             )
             session.add(scale)
             session.commit()

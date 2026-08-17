@@ -165,10 +165,13 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                         )
 
                 elif isinstance(message, WeighResult):
+                    # номер документа АИС команды v2 — в ту же транзакцию, что
+                    # и запись (идемпотентность контракта v2); у v1 его нет
+                    ais_ref = hub.take_ais_ref(message.request_id)
                     saved = await asyncio.to_thread(
                         _db,
-                        lambda s, m=message: repo.save_weighing_record(
-                            s, scale_id, m.record, m.record.photos
+                        lambda s, m=message, ref=ais_ref: repo.save_weighing_record(
+                            s, scale_id, m.record, m.record.photos, ais_ref=ref
                         ),
                     )
                     hub.resolve_result(message, scale_id=scale_id)

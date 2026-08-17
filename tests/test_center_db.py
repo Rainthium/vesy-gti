@@ -33,7 +33,7 @@ from uuid import UUID, uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Engine, create_engine, inspect, text
+from sqlalchemy import Engine, create_engine, inspect, select, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session
@@ -78,9 +78,12 @@ ALL_TABLES = (
     "weighings",
     "tare_registry",
     "weighing_photos",
+    "weighing_ais_refs",
 )
 
-HEAD_REVISION = "e5f6a7b8c9d0"  # снимки учёток весовых ПК (14.08.2026)
+HEAD_REVISION = (
+    "f6a7b8c9d0e1"  # контракт v2 с АИС: привязка объектов, номера документов (17.08.2026)
+)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -772,3 +775,130 @@ class TestReviewFixes:
                 source="ais",
                 photo_sha256s=[],
             )
+
+
+class TestAisV2Repo:
+    """Контракт v2 с АИС (17.08.2026): последнее тарирование сцепки на момент,
+    сохранение записи с номером АИС, конфликты номера."""
+
+    @staticmethod
+    def _taring(scale_id: int, moment: datetime, **overrides: Any) -> Weighing:
+        fields: dict[str, Any] = {
+            "operation": Operation.TARING,
+            "massa": 15300.0,
+            "weighed_at": moment,
+            "vehicle_number": "01KG777AAA",
+            "trailer_number": "01KG500AB",
+        }
+        fields.update(overrides)
+        return _make_weighing(scale_id, **fields)
+
+    def _scale(self, session: Session) -> Scale:
+        site = _make_site()
+        session.add(site)
+        session.flush()
+        scale = _make_scale(site.id)
+        session.add(scale)
+        session.flush()
+        return scale
+
+    def test_latest_taring_as_of_picks_latest_not_later_than_moment(
+        self, db_session: Session
+    ) -> None:
+        from center.db import repo
+
+        scale = self._scale(db_session)
+        moment = datetime(2026, 8, 14, 9, 30, tzinfo=UTC)
+        older = self._taring(scale.id, datetime(2026, 5, 1, 9, 0, tzinfo=UTC))
+        latest = self._taring(scale.id, datetime(2026, 7, 1, 9, 0, tzinfo=UTC))
+        boundary = self._taring(scale.id, moment)  # ровно в момент — подходит (<=)
+        later = self._taring(scale.id, moment + timedelta(seconds=1))
+        db_session.add_all([older, latest, boundary, later])
+        db_session.flush()
+        found = repo.latest_taring_as_of(db_session, "01KG777AAA", "01KG500AB", moment)
+        assert found is not None and found.uuid == boundary.uuid
+        found = repo.latest_taring_as_of(
+            db_session, "01KG777AAA", "01KG500AB", moment - timedelta(seconds=1)
+        )
+        assert found is not None and found.uuid == latest.uuid
+
+    def test_latest_taring_as_of_respects_coupling(self, db_session: Session) -> None:
+        """Тара — свойство сцепки: другой прицеп или его отсутствие не подходят."""
+        from center.db import repo
+
+        scale = self._scale(db_session)
+        moment = datetime(2026, 8, 14, 9, 30, tzinfo=UTC)
+        with_trailer = self._taring(scale.id, datetime(2026, 7, 1, 9, 0, tzinfo=UTC))
+        solo = self._taring(scale.id, datetime(2026, 7, 2, 9, 0, tzinfo=UTC), trailer_number=None)
+        db_session.add_all([with_trailer, solo])
+        db_session.flush()
+        assert repo.latest_taring_as_of(db_session, "01KG777AAA", "01KG999ZZ", moment) is None
+        found = repo.latest_taring_as_of(db_session, "01KG777AAA", None, moment)
+        assert found is not None and found.uuid == solo.uuid
+        found = repo.latest_taring_as_of(db_session, "01KG777AAA", " 01kg500ab ", moment)
+        assert found is not None and found.uuid == with_trailer.uuid
+        # пустая строка прицепа считается «без прицепа»
+        found = repo.latest_taring_as_of(db_session, "01KG777AAA", "", moment)
+        assert found is not None and found.uuid == solo.uuid
+
+    def test_latest_taring_as_of_ignores_weighings_and_other_vehicles(
+        self, db_session: Session
+    ) -> None:
+        from center.db import repo
+
+        scale = self._scale(db_session)
+        moment = datetime(2026, 8, 14, 9, 30, tzinfo=UTC)
+        db_session.add_all(
+            [
+                _make_weighing(
+                    scale.id,
+                    weighed_at=datetime(2026, 7, 1, tzinfo=UTC),
+                    vehicle_number="01KG777AAA",
+                    trailer_number="01KG500AB",
+                ),
+                self._taring(
+                    scale.id, datetime(2026, 7, 1, tzinfo=UTC), vehicle_number="01KG000BBB"
+                ),
+            ]
+        )
+        db_session.flush()
+        assert repo.latest_taring_as_of(db_session, "01KG777AAA", "01KG500AB", moment) is None
+
+    def test_save_with_taken_ais_ref_keeps_record_without_link(self, db_session: Session) -> None:
+        """Занятый номер АИС не роняет сохранение: запись есть, связки нет."""
+        from center.db import repo
+        from shared.messages import WeighingRecord
+
+        scale = self._scale(db_session)
+        db_session.commit()
+
+        def record() -> WeighingRecord:
+            return WeighingRecord(
+                uuid=uuid4(),
+                operation=Operation.WEIGHING,
+                code=ErrorCode.OK,
+                massa=1000.0,
+                weighed_at=datetime(2026, 8, 14, 9, 30, tzinfo=UTC),
+                vehicle_number="01KG777AAA",
+                source=WeighingSource.AIS,
+            )
+
+        first, second = record(), record()
+        assert repo.save_weighing_record(db_session, scale.id, first, ais_ref="WEI000000001")
+        assert repo.save_weighing_record(db_session, scale.id, second, ais_ref="WEI000000001")
+        linked = repo.weighing_by_ais_ref(db_session, "WEI000000001")
+        assert linked is not None and linked.uuid == first.uuid
+        assert repo.ais_refs_for(db_session, [linked.id]) == {linked.id: "WEI000000001"}
+        second_row = db_session.execute(
+            select(Weighing).where(Weighing.uuid == second.uuid)
+        ).scalar_one()
+        assert repo.ais_refs_for(db_session, [second_row.id]) == {}
+        # обратный вызов тем же номером на вторую — конфликт, на первую — same
+        assert (
+            repo.link_ais_ref(db_session, second_row, "WEI000000001", origin="callback")
+            == "conflict"
+        )
+        assert repo.link_ais_ref(db_session, linked, "WEI000000001", origin="callback") == "same"
+        assert (
+            repo.link_ais_ref(db_session, second_row, "WEI000000002", origin="callback") == "linked"
+        )

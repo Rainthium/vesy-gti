@@ -8,8 +8,9 @@ import hashlib
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from center.db.models import (
@@ -22,6 +23,7 @@ from center.db.models import (
     User,
     UserRole,
     Weighing,
+    WeighingAisRef,
     WeighingPhoto,
     weighing_checksum,
 )
@@ -89,11 +91,17 @@ def save_weighing_record(
     photos: list[PhotoMeta] | None = None,
     *,
     request_payload: dict[str, object] | None = None,
+    ais_ref: str | None = None,
 ) -> bool:
     """Записать операцию в журнал центра; вернуть True, если запись новая.
 
     Идемпотентно по uuid: повтор досылки той же записи — не ошибка
     (False). Запись после вставки неизменяема (правило №2).
+
+    ``ais_ref`` — номер документа АИС из команды v2: пишется в
+    ``weighing_ais_refs`` той же транзакцией, что и запись, — чтобы повтор
+    команды АИС нашёл состоявшуюся операцию, даже если центр упадёт между
+    сохранением и ответом (контракт v2, идемпотентность 4.5).
 
     Отказы (code != OK) НЕ сохраняются (решение Игоря 10.08.2026):
     с семантикой авторежима v0.2.0 неуспешная операция агентом просто
@@ -159,12 +167,120 @@ def save_weighing_record(
                 size_bytes=photo.size_bytes,
             )
         )
+    if ais_ref:
+        # номер уже закреплён за другой операцией (повтор АИС проскочил в окно
+        # между тайм-аутом и поздним результатом) — запись сохраняем БЕЗ связки,
+        # чтобы уникальный индекс не откатил транзакцию и не уронил цикл агента
+        taken = session.execute(
+            select(WeighingAisRef.weighing_id).where(WeighingAisRef.ais_ref == ais_ref)
+        ).scalar_one_or_none()
+        if taken is None:
+            session.add(WeighingAisRef(weighing_id=row.id, ais_ref=ais_ref, origin="command"))
+        else:
+            logger.warning(
+                "запись %s: номер АИС %s уже закреплён за операцией id=%s — сохраняем без связки",
+                record.uuid,
+                ais_ref,
+                taken,
+            )
     # успешное тарирование обновляет единый реестр активных тар
     # (сюда доходят только code == OK — отказы отсеяны выше)
     if record.operation is Operation.TARING and record.vehicle_number and record.massa is not None:
         _upsert_tare(session, row, record)
     session.commit()
     return True
+
+
+# --- контракт v2 с АИС «СВХ» (согласован 17.08.2026) ---
+
+
+def find_scale_by_ais_route(session: Session, ais_object: str, scale_no: int) -> Scale | None:
+    """Весы по паре «Специальный идентификатор СВХ + № весов на объекте».
+
+    Привязка живёт в справочнике центра (правится в панели); непривязанная
+    пара → 404 ERR_UNKNOWN_SCALE у API v2.
+    """
+    return session.execute(
+        select(Scale).where(Scale.ais_object == ais_object, Scale.ais_scale_no == scale_no)
+    ).scalar_one_or_none()
+
+
+def weighing_by_ais_ref(session: Session, ais_ref: str) -> Weighing | None:
+    """Операция, за которой закреплён номер документа АИС (или None)."""
+    return session.execute(
+        select(Weighing)
+        .join(WeighingAisRef, WeighingAisRef.weighing_id == Weighing.id)
+        .where(WeighingAisRef.ais_ref == ais_ref)
+    ).scalar_one_or_none()
+
+
+def ais_refs_for(session: Session, weighing_ids: list[int]) -> dict[int, str]:
+    """Номера документов АИС для набора операций: {weighing_id: ais_ref}."""
+    if not weighing_ids:
+        return {}
+    rows = session.execute(
+        select(WeighingAisRef.weighing_id, WeighingAisRef.ais_ref).where(
+            WeighingAisRef.weighing_id.in_(weighing_ids)
+        )
+    ).all()
+    return {weighing_id: ref for weighing_id, ref in rows}
+
+
+def link_ais_ref(session: Session, weighing: Weighing, ais_ref: str, *, origin: str) -> str:
+    """Закрепить номер документа АИС за операцией (обратная связь 7.5).
+
+    Возвращает ``"linked"`` (новая связь), ``"same"`` (уже этот номер) или
+    ``"conflict"`` (у операции другой номер либо номер занят другой
+    операцией) — 409 ERR_ALREADY_LINKED у API v2. Запись при этом не
+    меняется: связь хранится рядом с ней (правило №2).
+    """
+    existing = session.get(WeighingAisRef, weighing.id)
+    if existing is not None:
+        return "same" if existing.ais_ref == ais_ref else "conflict"
+    taken = session.execute(
+        select(WeighingAisRef.weighing_id).where(WeighingAisRef.ais_ref == ais_ref)
+    ).scalar_one_or_none()
+    if taken is not None:
+        return "conflict"
+    session.add(WeighingAisRef(weighing_id=weighing.id, ais_ref=ais_ref, origin=origin))
+    try:
+        session.commit()
+    except IntegrityError:  # два одновременных обратных вызова с одним номером
+        session.rollback()
+        return "conflict"
+    return "linked"
+
+
+def latest_taring_as_of(
+    session: Session, vehicle_number: str, trailer_number: str | None, moment: datetime
+) -> Weighing | None:
+    """Последнее состоявшееся тарирование СЦЕПКИ не позже момента ``moment``.
+
+    Для документа операции v2 (вложение ``tare`` со статусом): что система
+    знала о таре сцепки на момент взвешивания. Ищется по журналу, а не по
+    реестру (реестр хранит только последнее тарирование вообще — после
+    перетарирования он уже не скажет, какая тара действовала тогда).
+    """
+    trailer = (trailer_number or "").strip().upper() or None
+    query = (
+        select(Weighing)
+        .where(
+            Weighing.operation == Operation.TARING,
+            Weighing.code == ErrorCode.OK,
+            Weighing.vehicle_number == vehicle_number,
+            Weighing.weighed_at.is_not(None),
+            Weighing.weighed_at <= moment,
+        )
+        .order_by(Weighing.weighed_at.desc(), Weighing.id.desc())
+        .limit(1)
+    )
+    if trailer is None:
+        # «без прицепа» в журнале — NULL (агент нормализует пустую строку в None);
+        # пустую строку тоже принимаем, чтобы не зависеть от источника записи
+        query = query.where(or_(Weighing.trailer_number.is_(None), Weighing.trailer_number == ""))
+    else:
+        query = query.where(Weighing.trailer_number == trailer)
+    return session.execute(query).scalar_one_or_none()
 
 
 def _upsert_tare(session: Session, row: Weighing, record: WeighingRecord) -> None:

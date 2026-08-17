@@ -72,6 +72,7 @@ from center.db.models import (
     User,
     UserRole,
     Weighing,
+    WeighingAisRef,
     WeighingPhoto,
     weighing_checksum,
 )
@@ -1068,6 +1069,34 @@ class TestAgentsWsWeighResult:
                 .all()
             )
         assert photo_shas == [SHA_A], "фото из weigh_result не записаны в weighing_photos"
+
+    def test_weigh_result_links_ais_ref_of_v2_command(self, ws_env: WsEnv) -> None:
+        """Номер документа АИС команды v2 (хаб помнит его по request_id) пишется в
+        weighing_ais_refs одной транзакцией с записью; хаб его забывает."""
+        record = _make_record()
+        request_id = uuid4()
+        ws_env.hub.remember_ais_ref(request_id, "WEI000000777")
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            ws.send_text(WeighResult(request_id=request_id, record=record).model_dump_json())
+            _hello_and_registry(ws)
+        with ws_env.factory() as session:
+            linked = repo.weighing_by_ais_ref(session, "WEI000000777")
+            assert linked is not None and linked.uuid == record.uuid
+            row = session.get(WeighingAisRef, linked.id)
+            assert row is not None and row.origin == "command"
+        assert ws_env.hub.take_ais_ref(request_id) is None
+
+    def test_failed_weigh_result_does_not_link_ais_ref(self, ws_env: WsEnv) -> None:
+        """Отказ не записывается — и номер АИС ни за чем не закрепляется."""
+        refusal = _make_record(code=ErrorCode.ERR_VEHICLE_TIMEOUT, massa=None, weighed_at=None)
+        request_id = uuid4()
+        ws_env.hub.remember_ais_ref(request_id, "WEI000000778")
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            ws.send_text(WeighResult(request_id=request_id, record=refusal).model_dump_json())
+            _hello_and_registry(ws)
+        with ws_env.factory() as session:
+            assert repo.weighing_by_ais_ref(session, "WEI000000778") is None
+        assert ws_env.hub.take_ais_ref(request_id) is None
 
 
 class TestAgentsWsOfflineSync:

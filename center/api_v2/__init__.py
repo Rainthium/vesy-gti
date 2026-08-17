@@ -1,1 +1,1 @@
-"""API v2 — нативный контракт (site_id/scale_id, JWT)."""
+"""API v2 — нативный контракт с АИС «СВХ» (docs/contracts/ais-api-v2.md, 1.0)."""

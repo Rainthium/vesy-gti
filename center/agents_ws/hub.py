@@ -10,6 +10,8 @@
 
 import asyncio
 import logging
+import time
+from collections.abc import Callable
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -30,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WEIGH_TIMEOUT_S = 120.0  # тайм-аут всей операции взвешивания
 DEFAULT_LOG_TAIL_TIMEOUT_S = 20.0  # журнал маленький: агент отвечает за секунды
+AIS_REF_TTL_S = 15 * 60.0  # сколько помнить номер документа АИС команды без результата
 
 
 class AgentLink(Protocol):
@@ -49,7 +52,8 @@ class AgentHubError(Exception):
 class AgentHub:
     """Соединения агентов: по одному на весы (scale_id)."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock  # монотонные часы (подменяются в тестах TTL)
         self._links: dict[int, AgentLink] = {}
         # request_id -> (scale_id, future результата)
         self._pending: dict[UUID, tuple[int, asyncio.Future[WeighResult]]] = {}
@@ -58,6 +62,12 @@ class AgentHub:
         # последняя самодиагностика из hello/heartbeat (для дашборда панели:
         # состояние индикатора и камер на одном экране, запрос Игоря 09.08.2026)
         self._equipment: dict[int, EquipmentStatus] = {}
+        # request_id → (номер документа АИС, момент регистрации): команда v2
+        # несёт ais_ref, который WS-сервер пишет в одной транзакции с записью
+        # (идемпотентность контракта v2). Живёт до прихода результата либо
+        # до истечения TTL — поздний weigh_result после тайм-аута команды
+        # всё равно свяжется со своим номером
+        self._ais_refs: dict[UUID, tuple[str, float]] = {}
 
     # --- жизненный цикл соединений (вызывает WS-маршрут) ---
 
@@ -95,6 +105,21 @@ class AgentHub:
 
     def update_equipment(self, scale_id: int, equipment: EquipmentStatus) -> None:
         self._equipment[scale_id] = equipment
+
+    # --- номера документов АИС у команд v2 ---
+
+    def remember_ais_ref(self, request_id: UUID, ais_ref: str) -> None:
+        """Запомнить номер документа АИС команды до прихода её результата."""
+        now = self._clock()
+        stale = [key for key, (_, at) in self._ais_refs.items() if now - at > AIS_REF_TTL_S]
+        for key in stale:
+            self._ais_refs.pop(key, None)
+        self._ais_refs[request_id] = (ais_ref, now)
+
+    def take_ais_ref(self, request_id: UUID) -> str | None:
+        """Забрать номер документа АИС команды (результат пришёл); None — не v2."""
+        entry = self._ais_refs.pop(request_id, None)
+        return entry[0] if entry else None
 
     def equipment(self, scale_id: int) -> EquipmentStatus | None:
         """Последняя самодиагностика агента; None — агент офлайн/не слал."""
