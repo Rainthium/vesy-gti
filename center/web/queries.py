@@ -146,6 +146,9 @@ class JournalFilters:
     date_to: datetime | None = None
     vehicle: str | None = None  # подстрока номера ТС/прицепа
     source: WeighingSource | None = None
+    # только операции без номера документа АИС (офлайн-операции, по которым АИС
+    # ещё не сообщила номер, — контракт v2, 7.5: «зависшие» сопоставления)
+    unlinked: bool = False
 
 
 def _journal_query(
@@ -179,6 +182,8 @@ def _journal_query(
         )
     if filters.source is not None:
         query = query.where(Weighing.source == filters.source)
+    if filters.unlinked:
+        query = query.where(Weighing.id.not_in(select(WeighingAisRef.weighing_id)))
     return query
 
 

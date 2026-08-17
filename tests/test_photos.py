@@ -577,6 +577,26 @@ class TestServePhoto:
         thumb = stored.with_name(stored.stem + "_thumb" + stored.suffix)
         assert response.content == thumb.read_bytes()
 
+    def test_etag_immutable_and_304(self, photo_env: PhotoEnv) -> None:
+        """Контракт v2, раздел 6: ETag = sha256 файла из записи, кэш бессрочный,
+        If-None-Match с тем же ETag → 304 без тела."""
+        client, record, _ = _uploaded_env(photo_env)
+        url = _db_url_of(record)
+        response = client.get(url, headers=SERVICE_AUTH)
+        assert response.status_code == 200
+        etag = response.headers["etag"]
+        assert etag == f'"{GRAY_SHA}"'
+        assert "immutable" in response.headers["cache-control"]
+        cached = client.get(url, headers={**SERVICE_AUTH, "If-None-Match": etag})
+        assert cached.status_code == 304
+        assert cached.content == b""
+        # миниатюры в записи нет — sha256-ETag не ставится (остаётся ETag
+        # FileResponse по stat), кэш бессрочный тот же
+        thumb = client.get(url.replace("_photo1.jpeg", "_photo1_thumb.jpeg"), headers=SERVICE_AUTH)
+        assert thumb.status_code == 200
+        assert thumb.headers.get("etag") != etag
+        assert "immutable" in thumb.headers["cache-control"]
+
     def test_missing_file_404(self, photo_env: PhotoEnv) -> None:
         """Файл не загружен агентом → 404."""
         record = _seed_weighing(photo_env, [gray_meta()])

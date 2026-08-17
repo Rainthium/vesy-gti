@@ -2277,3 +2277,26 @@ class TestRecordAisBlock:
         self._offline_record_id(panel_env)
         response = panel_env.client.get("/panel/fragments/dashboard")
         assert "событий в АИС: 1" in response.text
+
+    def test_journal_filter_offline_without_ais_ref(self, panel_env: PanelEnv) -> None:
+        """Фильтр «Офлайн без номера АИС» показывает офлайн-операции без номера и
+        скрывает их после обратного вызова АИС."""
+        _login(panel_env)
+        weighing_id = self._offline_record_id(panel_env)
+        response = panel_env.client.get(
+            "/panel/journal", params={"source": "local_offline_unlinked"}
+        )
+        assert response.status_code == 200
+        assert "01KG999OFF" in response.text
+        assert "01KG777AAA" not in response.text  # онлайн-запись не попадает
+        with panel_env.factory() as session:
+            weighing = session.get(Weighing, weighing_id)
+            assert weighing is not None
+            repo.link_ais_ref(session, weighing, "WEI000094201", origin="callback")
+        response = panel_env.client.get(
+            "/panel/journal", params={"source": "local_offline_unlinked"}
+        )
+        assert "01KG999OFF" not in response.text
+        # обычный фильтр «Вручную (офлайн)» по-прежнему показывает запись
+        response = panel_env.client.get("/panel/journal", params={"source": "local_offline"})
+        assert "01KG999OFF" in response.text

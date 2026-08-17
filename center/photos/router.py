@@ -215,17 +215,31 @@ def create_photos_router(session_factory: SessionFactory, config: PhotosConfig) 
         if not full.is_file():
             return Response(status_code=404)
 
-        def audit(session: Session) -> None:
+        db_path = f"/vesy/{file_path}"
+
+        def sha_and_audit(session: Session) -> str | None:
+            sha = session.execute(
+                select(WeighingPhoto.sha256).where(WeighingPhoto.path == db_path)
+            ).scalar_one_or_none()
             session.add(
                 AuditLog(
                     actor=f"integrator:{integrator}",
                     action="photo_download",
-                    details={"path": f"/vesy/{file_path}", "ip": client_ip},
+                    details={"path": db_path, "ip": client_ip},
                 )
             )
             session.commit()
+            return sha
 
-        await asyncio.to_thread(_db, audit)
-        return FileResponse(full, media_type="image/jpeg")
+        sha256 = await asyncio.to_thread(_db, sha_and_audit)
+        # файл после сохранения не меняется никогда (правило №2): ETag = sha256
+        # из записи, кэшировать можно бессрочно (контракт v2, раздел 6)
+        headers = {"Cache-Control": "private, max-age=31536000, immutable"}
+        if sha256:
+            etag = f'"{sha256}"'
+            headers["ETag"] = etag
+            if request.headers.get("If-None-Match", "").strip() == etag:
+                return Response(status_code=304, headers=headers)
+        return FileResponse(full, media_type="image/jpeg", headers=headers)
 
     return router

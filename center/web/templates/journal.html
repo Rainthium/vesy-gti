@@ -20,6 +20,7 @@
       <option value="">Любой источник</option>
       <option value="ais" {{ 'selected' if filters.source == 'ais' else '' }}>АИС</option>
       <option value="local_offline" {{ 'selected' if filters.source == 'local_offline' else '' }}>Вручную (офлайн)</option>
+      <option value="local_offline_unlinked" {{ 'selected' if filters.source == 'local_offline_unlinked' else '' }} title="Офлайн-операции, по которым АИС ещё не сообщила номер документа (контракт v2)">Офлайн без номера АИС</option>
     </select>
     <button type="submit" class="btn-primary">Показать</button>
     <a class="btn-outline" title="Выгрузить в CSV (открывается в Excel)"

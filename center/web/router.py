@@ -141,6 +141,10 @@ def _tare_status(weighing: Weighing, registry: TareRegistry | None, threshold: d
     return "active" if registry.tared_at >= threshold else "expired"
 
 
+# значение фильтра «Источник» журнала: офлайн-операции без номера документа АИС
+SOURCE_OFFLINE_UNLINKED = "local_offline_unlinked"
+
+
 def create_panel_router(
     session_factory: SessionFactory,
     hub: AgentHub,
@@ -603,7 +607,12 @@ def create_panel_router(
                 return None
 
         parsed_source = None
-        if source in (WeighingSource.AIS.value, WeighingSource.LOCAL_OFFLINE.value):
+        unlinked = False
+        if source == SOURCE_OFFLINE_UNLINKED:
+            # офлайн-операции, по которым АИС ещё не сообщила номер документа
+            parsed_source = WeighingSource.LOCAL_OFFLINE
+            unlinked = True
+        elif source in (WeighingSource.AIS.value, WeighingSource.LOCAL_OFFLINE.value):
             parsed_source = WeighingSource(source)
         return queries.JournalFilters(
             site_id=site_id,
@@ -612,6 +621,7 @@ def create_panel_router(
             date_to=parse_date(date_to),
             vehicle=vehicle or None,
             source=parsed_source,
+            unlinked=unlinked,
         )
 
     @router.get("/journal", response_class=HTMLResponse)
