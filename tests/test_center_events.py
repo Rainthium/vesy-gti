@@ -138,6 +138,12 @@ class FakeBroker:
         self.published: list[OutgoingEvent] = []
         self.fail = fail
         self.closed = False
+        self.topology_calls = 0
+
+    async def ensure_topology(self) -> None:
+        self.topology_calls += 1
+        if self.fail:
+            raise ConnectionError("нет связи с брокером")
 
     async def publish(self, event: OutgoingEvent) -> None:
         if self.fail:
@@ -331,6 +337,8 @@ class TestPublisher:
         # две ошибки → 2, 4; затем публикация → 0 (сразу за следующей); пусто → 1
         assert sleeps == [2.0, 4.0, 0.0, 1.0]
         assert len(broker.published) == 1
+        # топология объявляется при старте цикла и не переобъявляется на каждом проходе
+        assert broker.topology_calls == 3  # две неудачные попытки + одна успешная
 
 
 class TestRabbitBroker:

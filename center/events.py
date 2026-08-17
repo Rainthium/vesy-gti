@@ -70,7 +70,9 @@ class OutgoingEvent:
 
 
 class EventBroker(Protocol):
-    """Минимум транспорта: опубликовать с подтверждением, закрыть."""
+    """Минимум транспорта: объявить топологию, опубликовать с подтверждением, закрыть."""
+
+    async def ensure_topology(self) -> None: ...
 
     async def publish(self, event: OutgoingEvent) -> None: ...
 
@@ -122,6 +124,12 @@ class RabbitBroker:
             "RabbitMQ: подключено, топология объявлена (%s → %s)", EXCHANGE_NAME, QUEUE_NAME
         )
         return exchange
+
+    async def ensure_topology(self) -> None:
+        """Подключиться и объявить exchange/очередь, не дожидаясь первого события:
+        консьюмер АИС не имеет права объявлять очередь — она должна существовать
+        с момента старта центра."""
+        await self._ensure()
 
     async def publish(self, event: OutgoingEvent) -> None:
         import aio_pika
@@ -198,8 +206,12 @@ class EventPublisher:
         """Цикл: публиковать хвост outbox; при ошибках — пауза с ростом до минуты."""
         backoff = self.interval_s
         logger.info("публикатор событий АИС запущен (интервал %.0f с)", self.interval_s)
+        topology_ready = False
         while True:
             try:
+                if not topology_ready and self.broker is not None:
+                    await self.broker.ensure_topology()
+                    topology_ready = True
                 published, failed = await self.publish_pending()
             except asyncio.CancelledError:
                 raise
