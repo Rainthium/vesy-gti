@@ -38,7 +38,7 @@ from uuid import UUID
 import pytest
 import uvicorn
 from PIL import Image
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
@@ -77,6 +77,7 @@ LEGACY_IP = "192.168.150.185"
 LEGACY_PORT = 8087
 LEGACY_AUTOSCALE = 2
 VEHICLE = "01KG777AAA"
+AIS_OBJECT = "0014"  # «Специальный идентификатор СВХ» Кызыл-Кыи в АИС (контракт v2)
 
 TARE_KG = 8000.0
 BRUTTO_KG = 20000.0
@@ -171,6 +172,9 @@ def _seed_center(factory: sessionmaker[Session]) -> int:
             legacy_ip=LEGACY_IP,
             legacy_port=LEGACY_PORT,
             legacy_autoscale=LEGACY_AUTOSCALE,
+            # привязка контракта v2 (17.08.2026): спец. идентификатор СВХ + № весов
+            ais_object=AIS_OBJECT,
+            ais_scale_no=1,
         )
         session.add(scale)
         session.flush()
@@ -198,6 +202,34 @@ def _post_v1(base_url: str, operation: str) -> dict[str, Any]:
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=90) as response:
+        return dict(json.loads(response.read()))
+
+
+def _post_v2(base_url: str, ais_ref: str, operation: str = "weighing") -> dict[str, Any]:
+    """Команда нативного контракта v2 (как tools/ais_client_v2): токен, документ АИС."""
+    payload = {
+        "ais_ref": ais_ref,
+        "ais_object": AIS_OBJECT,
+        "scale_no": 1,
+        "operation": operation,
+        "vehicle_number": VEHICLE,
+        "operator": "Акимов Нурлан Боронбаевич",
+    }
+    request = urllib.request.Request(
+        f"{base_url}/api/v2/weighings",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {AIS_TOKEN}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=90) as response:
+        return dict(json.loads(response.read()))
+
+
+def _get_v2(base_url: str, path: str) -> dict[str, Any]:
+    request = urllib.request.Request(
+        f"{base_url}{path}", headers={"Authorization": f"Bearer {AIS_TOKEN}"}
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
         return dict(json.loads(response.read()))
 
 
@@ -414,6 +446,31 @@ def test_full_chain_emulator_agent_center_ais(
                 assert all(row.source is WeighingSource.AIS for row in rows)
                 assert rows[1].netto == BRUTTO_KG - TARE_KG
                 assert rows[1].tare_weighing_id == rows[0].id
+
+            # --- 5. нативный контракт v2 (17.08.2026): та же машина на платформе,
+            # команда с номером документа АИС → документ операции с тарой во
+            # вложении; повтор — тот же документ; сверка по номеру АИС ---
+            v2 = await asyncio.to_thread(_post_v2, base_url, "WEI000094176")
+            assert v2["code"] == "OK", v2
+            document = v2["weighing"]
+            assert document["ais_ref"] == "WEI000094176"
+            assert document["site"]["ais_object"] == AIS_OBJECT
+            assert document["scale"]["no"] == 1
+            assert document["massa"] == BRUTTO_KG
+            assert document["tare"]["status"] == "applied"
+            assert document["tare"]["massa"] == TARE_KG
+            assert document["netto"] == BRUTTO_KG - TARE_KG
+            assert document["photos"]["front"]["url"].endswith("_photo1.jpeg")
+            assert str(document["weighed_at"]).endswith("+06:00")
+            repeated = await asyncio.to_thread(_post_v2, base_url, "WEI000094176")
+            assert repeated["repeated"] is True
+            assert repeated["weighing"]["id"] == document["id"]
+            found = await asyncio.to_thread(
+                _get_v2, base_url, "/api/v2/weighings?ais_ref=WEI000094176"
+            )
+            assert [row["id"] for row in found["weighings"]] == [document["id"]]
+            with factory() as session:
+                assert session.execute(select(func.count()).select_from(Weighing)).scalar_one() == 3
         finally:
             # драйвер первым: обработчик эмулятора увидит разрыв соединения
             await asyncio.to_thread(driver.stop)

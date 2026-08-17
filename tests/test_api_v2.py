@@ -845,3 +845,62 @@ class TestAisRefCallback:
             f"/api/v2/weighings/{taring.uuid}/ais_ref", json={}, headers=_auth()
         )
         assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Инструменты для разработчиков АИС (без сети)
+# ---------------------------------------------------------------------------
+
+
+class TestTools:
+    @pytest.mark.parametrize("module", ["tools.ais_client_v2", "tools.ais_consumer"])
+    def test_help_runs(self, module: str) -> None:
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-m", module, "--help"], capture_output=True, text=True, timeout=60
+        )
+        assert result.returncode == 0, result.stderr
+        assert "АИС" in result.stdout
+
+    def test_client_requires_token(self) -> None:
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-m", "tools.ais_client_v2", "get", "x"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+        assert result.returncode == 2
+        assert "токен" in result.stderr
+
+    def test_consumer_masks_password(self) -> None:
+        from tools.ais_consumer import _masked, _summary
+
+        assert _masked("amqp://ais-svh:secret@192.168.140.70:5672/vesy") == (
+            "amqp://ais-svh:***@192.168.140.70:5672/vesy"
+        )
+        assert "secret" not in _masked("amqp://ais-svh:secret@host/vesy")
+        line = _summary(
+            {
+                "type": "weighing.completed",
+                "event_id": "e1",
+                "ais_object": "0013",
+                "weighing": {
+                    "id": "w1",
+                    "operation": "weighing",
+                    "source": "local_offline",
+                    "vehicle_number": "01KG777AAA",
+                    "trailer_number": None,
+                    "massa": 21850.0,
+                    "tare": {"status": "expired", "massa": 15300.0},
+                    "netto": None,
+                    "ais_ref": None,
+                },
+            }
+        )
+        assert "СВХ 0013" in line and "[expired]" in line and "01KG777AAA/—" in line
