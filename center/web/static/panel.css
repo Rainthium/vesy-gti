@@ -532,6 +532,14 @@ img.thumb:hover { border-color: var(--green-border); box-shadow: var(--shadow-ca
   word-break: break-all;
 }
 
+/* блок «АИС «СВХ»» на записи: номер документа и статус события (контракт v2) */
+.ais-row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
+.ais-row b { font-weight: 700; color: var(--text); }
+.ais-row code { font-family: ui-monospace, "Cascadia Mono", monospace; background: var(--surface-2); border-radius: 6px; padding: 4px 10px; }
+.ais-row-pending { color: #7a5308; }
+.ais-row .inline-form { display: inline; margin: 0; }
+.ais-note { color: var(--primary); font-weight: 600; }
+
 .record-foot {
   display: flex;
   gap: 12px;

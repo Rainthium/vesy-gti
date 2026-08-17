@@ -79,11 +79,10 @@ ALL_TABLES = (
     "tare_registry",
     "weighing_photos",
     "weighing_ais_refs",
+    "weighing_events",
 )
 
-HEAD_REVISION = (
-    "f6a7b8c9d0e1"  # контракт v2 с АИС: привязка объектов, номера документов (17.08.2026)
-)
+HEAD_REVISION = "a7b8c9d0e1f2"  # outbox событий в АИС «СВХ» (17.08.2026)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64

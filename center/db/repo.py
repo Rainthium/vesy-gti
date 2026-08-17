@@ -8,7 +8,7 @@ import hashlib
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -24,10 +24,11 @@ from center.db.models import (
     UserRole,
     Weighing,
     WeighingAisRef,
+    WeighingEvent,
     WeighingPhoto,
     weighing_checksum,
 )
-from shared.enums import CameraRole, ErrorCode, Operation
+from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 from shared.messages import (
     AgentOperatorInfo,
     CameraSettings,
@@ -45,6 +46,8 @@ logger = logging.getLogger(__name__)
 
 
 PHOTO_INDEX_BY_ROLE = {CameraRole.FRONT: 1, CameraRole.REAR: 2}
+# событие контракта v2 (раздел 7): состоявшаяся операция → АИС
+EVENT_WEIGHING_COMPLETED = "weighing.completed"
 
 
 def canonical_photo_path(record: WeighingRecord, role: CameraRole) -> str:
@@ -187,11 +190,91 @@ def save_weighing_record(
     # (сюда доходят только code == OK — отказы отсеяны выше)
     if record.operation is Operation.TARING and record.vehicle_number and record.massa is not None:
         _upsert_tare(session, row, record)
+    # офлайн-операция выполнена без АИС — единственный путь доставить её в АИС
+    # событие (контракт v2, раздел 7): outbox в той же транзакции, что и запись
+    if record.source is WeighingSource.LOCAL_OFFLINE:
+        session.add(WeighingEvent(weighing_id=row.id, event_type=EVENT_WEIGHING_COMPLETED))
     session.commit()
     return True
 
 
 # --- контракт v2 с АИС «СВХ» (согласован 17.08.2026) ---
+
+
+def enqueue_weighing_event(
+    session: Session, weighing: Weighing, event_type: str = EVENT_WEIGHING_COMPLETED
+) -> WeighingEvent:
+    """Поставить событие операции в outbox повторно (кнопка «переотправить»).
+
+    Не коммитит: вызывающий добавляет запись аудита и коммитит одной
+    транзакцией.
+    """
+    event = WeighingEvent(weighing_id=weighing.id, event_type=event_type)
+    session.add(event)
+    session.flush()
+    return event
+
+
+def pending_weighing_events(session: Session, limit: int = 50) -> list[WeighingEvent]:
+    """Неотправленные события в порядке постановки (для публикатора)."""
+    return list(
+        session.execute(
+            select(WeighingEvent)
+            .where(WeighingEvent.published_at.is_(None))
+            .order_by(WeighingEvent.id)
+            .limit(limit)
+        ).scalars()
+    )
+
+
+def mark_weighing_event_published(
+    session: Session, event_id: int, at: datetime, *, note: str | None = None
+) -> None:
+    """Отметить отправку; ``note`` — причина закрытия без отправки (остаётся в last_error)."""
+    event = session.get(WeighingEvent, event_id)
+    if event is None:
+        return
+    event.published_at = at
+    event.attempts += 1
+    event.last_error = note
+    session.commit()
+
+
+def mark_weighing_event_failed(session: Session, event_id: int, error: str) -> None:
+    event = session.get(WeighingEvent, event_id)
+    if event is None:
+        return
+    event.attempts += 1
+    event.last_error = error[:500]
+    session.commit()
+
+
+def pending_event_stats(session: Session) -> dict[int, tuple[int, datetime]]:
+    """Неотправленные события по весам: {scale_id: (сколько, самое старое created_at)}.
+
+    Для счётчика дашборда и детектора мониторинга «события в АИС не уходят».
+    """
+    rows = session.execute(
+        select(
+            Weighing.scale_id,
+            func.count(WeighingEvent.id),
+            func.min(WeighingEvent.created_at),
+        )
+        .join(Weighing, Weighing.id == WeighingEvent.weighing_id)
+        .where(WeighingEvent.published_at.is_(None))
+        .group_by(Weighing.scale_id)
+    ).all()
+    return {scale_id: (int(count), oldest) for scale_id, count, oldest in rows}
+
+
+def latest_weighing_event(session: Session, weighing_id: int) -> WeighingEvent | None:
+    """Последнее событие операции (для страницы записи: отправлено / в очереди / ошибка)."""
+    return session.execute(
+        select(WeighingEvent)
+        .where(WeighingEvent.weighing_id == weighing_id)
+        .order_by(WeighingEvent.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
 
 
 def find_scale_by_ais_route(session: Session, ais_object: str, scale_no: int) -> Scale | None:

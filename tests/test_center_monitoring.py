@@ -480,3 +480,76 @@ class TestTelegramNotifier:
         notifier = TelegramNotifier(db, token="t", chat_id="c", send=sent.append, now=clock.now)
         assert notifier.deliver_once() == 1
         assert sent == ["🔴 свежее"]
+
+
+# ---------------------------------------------------------------------------
+# Детектор «события в АИС не уходят» (outbox RabbitMQ, контракт v2)
+# ---------------------------------------------------------------------------
+
+
+class TestAisEventsDetector:
+    @staticmethod
+    def _offline_record(db: sessionmaker[Session], scale_id: int, created_at: datetime) -> int:
+        """Офлайн-запись → строка outbox с заданным временем постановки; вернуть id события."""
+        from uuid import uuid4
+
+        from center.db.models import WeighingEvent
+        from shared.enums import ErrorCode, Operation, WeighingSource
+        from shared.messages import WeighingRecord
+
+        record = WeighingRecord(
+            uuid=uuid4(),
+            operation=Operation.WEIGHING,
+            code=ErrorCode.OK,
+            massa=1000.0,
+            weighed_at=created_at,
+            vehicle_number="01KG777AAA",
+            source=WeighingSource.LOCAL_OFFLINE,
+        )
+        with db() as session:
+            repo.save_weighing_record(session, scale_id, record)
+            event = session.execute(select(WeighingEvent)).scalars().all()[-1]
+            event.created_at = created_at
+            session.commit()
+            return event.id
+
+    def test_alert_when_oldest_event_stuck_and_recovery(self, db: sessionmaker[Session]) -> None:
+        """Событие висит дольше порога → danger-алерт ais_events на весах операции;
+        после отправки — ok-событие и алерт закрыт. Порог — от постановки события."""
+        _site_id, scale_id, agent_id = _seed_scale(db)
+        clock = FakeClock()
+        _set_agent(db, agent_id, status=AgentStatus.ONLINE, last_seen_at=clock.current)
+        service = _make_service(db, AgentHub(), clock)
+        event_id = self._offline_record(db, scale_id, clock.current)
+
+        service.tick()  # событие свежее — молчим
+        assert [e.kind for e in _events(db)] == []
+
+        clock.advance(THRESHOLDS.ais_events_after_s + 1)
+        service.tick()
+        events = _events(db)
+        assert [e.kind for e in events] == ["ais_events"]
+        assert events[0].severity is MonitoringSeverity.DANGER
+        assert "1 событие в АИС не уходит" in events[0].message
+        assert "RabbitMQ" in events[0].message
+        alerts = service.active_alerts()
+        assert len(alerts) == 1 and alerts[0].kind == "ais_events"
+        assert alerts[0].kind_label == "События АИС"
+
+        with db() as session:
+            repo.mark_weighing_event_published(session, event_id, clock.current)
+        service.tick()
+        events = _events(db)
+        assert [e.severity for e in events] == [MonitoringSeverity.DANGER, MonitoringSeverity.OK]
+        assert "снова уходят" in events[-1].message
+        assert service.active_alerts() == []
+
+    def test_fresh_events_do_not_alert(self, db: sessionmaker[Session]) -> None:
+        _site_id, scale_id, agent_id = _seed_scale(db)
+        clock = FakeClock()
+        _set_agent(db, agent_id, status=AgentStatus.ONLINE, last_seen_at=clock.current)
+        service = _make_service(db, AgentHub(), clock)
+        self._offline_record(db, scale_id, clock.current - timedelta(seconds=60))
+        clock.advance(120)
+        service.tick()
+        assert service.active_alerts() == []

@@ -2197,3 +2197,83 @@ class TestEventsPage:
         _login(panel_env)
         page = panel_env.client.get("/panel/").text
         assert 'href="/panel/events"' in page
+
+
+class TestRecordAisBlock:
+    """Блок «АИС «СВХ»» на странице записи (контракт v2, 17.08.2026): номер
+    документа АИС, статус события outbox и кнопка «Переотправить» (админ)."""
+
+    def _offline_record_id(self, env: PanelEnv) -> int:
+        with env.factory() as session:
+            record = _make_record(vehicle_number="01KG999OFF", source=WeighingSource.LOCAL_OFFLINE)
+            repo.save_weighing_record(session, env.scale_id, record)
+            return session.execute(
+                select(Weighing.id).where(Weighing.uuid == record.uuid)
+            ).scalar_one()
+
+    def test_online_record_without_ais_ref_shows_v1_note(self, panel_env: PanelEnv) -> None:
+        _login(panel_env)
+        response = panel_env.client.get(f"/panel/journal/{panel_env.weighing_id}")
+        assert response.status_code == 200
+        assert "команда без номера документа АИС" in response.text
+        assert "Переотправить событие" not in response.text  # не админ
+
+    def test_offline_record_shows_queue_status_and_ais_ref_after_link(
+        self, panel_env: PanelEnv
+    ) -> None:
+        _login(panel_env)
+        weighing_id = self._offline_record_id(panel_env)
+        response = panel_env.client.get(f"/panel/journal/{weighing_id}")
+        assert "номер документа АИС ещё не сообщён" in response.text
+        assert "в очереди на отправку" in response.text
+        with panel_env.factory() as session:
+            weighing = session.get(Weighing, weighing_id)
+            assert weighing is not None
+            assert (
+                repo.link_ais_ref(session, weighing, "WEI000094200", origin="callback") == "linked"
+            )
+            event = repo.latest_weighing_event(session, weighing_id)
+            assert event is not None
+            repo.mark_weighing_event_published(
+                session, event.id, datetime(2026, 8, 14, 5, 5, 4, tzinfo=UTC)
+            )
+        response = panel_env.client.get(f"/panel/journal/{weighing_id}")
+        assert "WEI000094200" in response.text
+        assert "отправлено 14.08.2026 11:05:04" in response.text
+
+    def test_admin_resend_enqueues_event(self, panel_env: PanelEnv) -> None:
+        _make_admin(panel_env)
+        _login(panel_env)
+        weighing_id = self._offline_record_id(panel_env)
+        page = panel_env.client.get(f"/panel/journal/{weighing_id}")
+        assert "Переотправить событие" in page.text
+        response = panel_env.client.post(
+            f"/panel/journal/{weighing_id}/ais_event", follow_redirects=False
+        )
+        assert response.status_code == 303
+        assert response.headers["location"].startswith(f"/panel/journal/{weighing_id}?ais_note=")
+        with panel_env.factory() as session:
+            pending = repo.pending_weighing_events(session)
+            assert [e.weighing_id for e in pending] == [weighing_id, weighing_id]
+            audit = (
+                session.execute(select(AuditLog).where(AuditLog.action == "ais_event_resend"))
+                .scalars()
+                .all()
+            )
+            assert len(audit) == 1 and (audit[0].details or {})["weighing_id"] == weighing_id
+        followed = panel_env.client.get(response.headers["location"])
+        assert "поставлено в очередь" in followed.text
+
+    def test_dispatcher_cannot_resend(self, panel_env: PanelEnv) -> None:
+        _login(panel_env)
+        weighing_id = self._offline_record_id(panel_env)
+        response = panel_env.client.post(
+            f"/panel/journal/{weighing_id}/ais_event", follow_redirects=False
+        )
+        assert response.status_code == 403
+
+    def test_dashboard_counter_includes_pending_events(self, panel_env: PanelEnv) -> None:
+        _login(panel_env)
+        self._offline_record_id(panel_env)
+        response = panel_env.client.get("/panel/fragments/dashboard")
+        assert "событий в АИС: 1" in response.text

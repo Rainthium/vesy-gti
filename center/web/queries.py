@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import Select, desc, func, or_, select
 from sqlalchemy.orm import Session
 
+from center.db import repo
 from center.db.models import (
     Agent,
     AgentOperator,
@@ -21,6 +22,8 @@ from center.db.models import (
     TareRegistry,
     User,
     Weighing,
+    WeighingAisRef,
+    WeighingEvent,
     WeighingPhoto,
 )
 from shared.enums import ErrorCode, Operation, WeighingSource
@@ -240,6 +243,10 @@ class WeighingCard:
     tare_weighing: Weighing | None
     storno_of: Weighing | None
     expired_tare: Weighing | None
+    # контракт v2 с АИС (17.08.2026): номер документа АИС и последнее событие
+    # outbox (офлайн-операции публикуются в RabbitMQ)
+    ais_ref: str | None = None
+    ais_event: WeighingEvent | None = None
 
 
 def weighing_card(
@@ -284,6 +291,8 @@ def weighing_card(
         # а тарирование ПОЗЖЕ записи не меняет старую карту задним числом
         if registry is not None and registry.tared_at < three_months_before(weighing.weighed_at):
             expired_tare = session.get(Weighing, registry.weighing_id)
+    ais_link = session.get(WeighingAisRef, weighing.id)
+    ais_event = repo.latest_weighing_event(session, weighing.id)
     return WeighingCard(
         weighing=weighing,
         scale=scale,
@@ -292,6 +301,8 @@ def weighing_card(
         tare_weighing=tare,
         storno_of=storno,
         expired_tare=expired_tare,
+        ais_ref=ais_link.ais_ref if ais_link is not None else None,
+        ais_event=ais_event,
     )
 
 

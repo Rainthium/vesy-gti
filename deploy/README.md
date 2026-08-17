@@ -46,9 +46,53 @@ cp .env.example .env
   После смены chat_id в `.env` контейнер пересоздать:
   `docker compose up -d --force-recreate app` (restart env не перечитывает)
 
+- `RABBITMQ_PASSWORD` — `openssl rand -hex 24`: пароль учётки центра
+  `vesy-center` в RabbitMQ (см. §2а)
+
 Центр запускается с `CENTER_ENV=production` и **откажется стартовать**,
 если секреты не заданы или совпадают с dev-дефолтами (Telegram —
 исключение: он необязательный).
+
+## 2а. RabbitMQ — события в АИС «СВХ» (контракт v2, раздел 7)
+
+Брокер — свой, контейнер `rabbitmq` в этом же compose (решение
+17.08.2026): vhost `vesy`, учётка центра `vesy-center` создаётся брокером
+из `RABBITMQ_PASSWORD`, порт 5672 открыт наружу для серверов АИС
+(`192.168.140.150` боевой, `192.168.6.116` тестовый — доступ открывает
+системщик на firewall ВМ), панель управления 15672 слушает только
+`127.0.0.1` (при нужде — ssh-туннель). Топологию (exchange `vesy.events`
+topic, очередь `ais-svh.weighings`, привязка `weighing.completed.#`)
+центр объявляет сам при первом подключении публикатора.
+
+Учётка АИС — один раз, только чтение своей очереди (пароль передать
+разработчикам АИС; в `.env` он не нужен):
+
+```bash
+docker compose exec rabbitmq rabbitmqctl add_user ais-svh "$(openssl rand -hex 24 | tee ~/rabbit-ais-svh.txt)"
+docker compose exec rabbitmq rabbitmqctl set_permissions -p vesy ais-svh '' '' '^ais-svh\.weighings$'
+```
+
+Проверка: `docker compose exec rabbitmq rabbitmqctl list_queues -p vesy name messages`
+(очередь появится после первого подключения публикатора), эталонный
+консьюмер — `tools/ais_consumer.py`. Что публикуется и когда —
+`docs/contracts/ais-api-v2.md` (только офлайн-операции; неотправленное
+видно на дашборде и в алерте «События АИС»). Пустой `RABBITMQ_URL` (или
+недоступный брокер) центр не роняет: события копятся в outbox и уходят,
+когда брокер появится.
+
+Ловушки:
+
+- перед первым выкатом с этим compose добавить `RABBITMQ_PASSWORD` в
+  `deploy/.env` на ВМ (hex — безопасен внутри URL), иначе
+  `docker compose up` откажется интерполировать конфиг;
+- `RABBITMQ_DEFAULT_*` применяются только при первом старте пустого тома;
+  смена пароля потом — `rabbitmqctl change_password vesy-center …` + `.env`
+  + `docker compose up -d --force-recreate app`;
+- у `ais-svh` нет права `configure`: консьюмер АИС не должен объявлять
+  очередь (`queue.declare` без passive → ACCESS_REFUSED) — только читать
+  `ais-svh.weighings`;
+- порт 5672 публикует докер, минуя ufw ВМ: если доступ режется ufw, правило
+  нужно в цепочке DOCKER-USER (или на внешнем firewall).
 
 ## 3. Запуск
 

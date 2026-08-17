@@ -41,6 +41,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from center.agents_ws.hub import AgentHub
+from center.db import repo
 from center.db.models import Agent, AgentStatus, MonitoringEvent, MonitoringSeverity, Scale, Site
 from shared.enums import CameraRole, ScaleStatus
 
@@ -69,6 +70,7 @@ class MonitoringThresholds:
     backlog_after_s: float = 600.0  # очереди не рассасываются 10 минут
     photo_backlog_min: int = 20  # снимков в очереди при живой связи
     disk_low_mb: int = 5120  # меньше 5 ГБ на диске с фото — алерт
+    ais_events_after_s: float = 600.0  # события в АИС (RabbitMQ) не уходят 10 минут
 
 
 # подписи типов проблем — пилюли дашборда и экрана «События»
@@ -80,6 +82,7 @@ KIND_LABELS = {
     "sync_backlog": "Досылка",
     "photo_backlog": "Снимки",
     "disk_low": "Диск",
+    "ais_events": "События АИС",
 }
 
 
@@ -117,6 +120,16 @@ class _ScaleSnapshot:
     scale_id: int
     site_id: int
     title: str  # «СВХ «Кызыл-Кыя» · Весы SCS-80» — префикс сообщений
+
+
+def _plural(count: int, one: str, few: str, many: str) -> str:
+    """Русское склонение по числу: 1 событие, 2 события, 5 событий."""
+    tail, tail2 = count % 10, count % 100
+    if tail == 1 and tail2 != 11:
+        return one
+    if 2 <= tail <= 4 and not 12 <= tail2 <= 14:
+        return few
+    return many
 
 
 def _fmt_hm(value: datetime | None, *, now: datetime) -> str:
@@ -211,6 +224,8 @@ class MonitoringService:
             events: list[MonitoringEvent] = []
             seen_scale_ids = set()
             site_ids: dict[int, int] = {}
+            # неотправленные события в АИС по весам (outbox RabbitMQ)
+            pending_events = repo.pending_event_stats(session)
             for scale, site, agent in rows:
                 seen_scale_ids.add(scale.id)
                 site_ids[scale.id] = site.id
@@ -220,6 +235,7 @@ class MonitoringService:
                     title=f"{site.name} · {scale.name}",
                 )
                 events.extend(self._check_scale(snapshot, agent, now))
+                events.extend(self._check_ais_events(snapshot, pending_events.get(scale.id), now))
             self._site_ids = site_ids
             # весы, удалённые из справочника (или лишившиеся агента),
             # не должны вечно висеть активным алертом
@@ -354,6 +370,49 @@ class MonitoringService:
                 )
             )
         return events
+
+    def _check_ais_events(
+        self,
+        snap: _ScaleSnapshot,
+        pending: tuple[int, datetime] | None,
+        now: datetime,
+    ) -> list[MonitoringEvent]:
+        """События в АИС (офлайн-операции) не уходят из outbox — брокер или сеть.
+
+        Порог считается от постановки самого старого события, а не от первого
+        наблюдения: пока RabbitMQ не настроен, очередь копится молча, и алерт
+        покажет это через ais_events_after_s после первой офлайн-операции.
+        Детекторы обходят только весы с агентом — события по весам без агента
+        (агент удалён после офлайн-записей) видны в счётчике дашборда, но алерт
+        не поднимают.
+        """
+        count, oldest = pending if pending is not None else (0, None)
+        if oldest is not None and oldest.tzinfo is None:
+            oldest = oldest.replace(tzinfo=UTC)
+        stuck = (
+            oldest is not None
+            and (now - oldest).total_seconds() >= self._thresholds.ais_events_after_s
+        )
+        return self._transition(
+            snap,
+            "ais_events",
+            bad=stuck,
+            delay_s=0.0,  # порог уже учтён по времени постановки события
+            severity=MonitoringSeverity.DANGER,
+            problem=(
+                f"{snap.title}: {count} "
+                + _plural(
+                    count,
+                    "событие в АИС не уходит",
+                    "события в АИС не уходят",
+                    "событий в АИС не уходят",
+                )
+                + f" (самое старое с {_fmt_hm(oldest, now=now)}) — "
+                "проверьте RabbitMQ и связь с ним"
+            ),
+            recovery=f"{snap.title}: события в АИС снова уходят",
+            now=now,
+        )
 
     def _transition(
         self,

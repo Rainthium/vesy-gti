@@ -1,4 +1,4 @@
-# Боевой compose центра (ВМ Ubuntu): app + postgres + nginx.
+# Боевой compose центра (ВМ Ubuntu): app + postgres + rabbitmq + nginx.
 # Секреты — в deploy/.env (скопировать из .env.example, правило проекта №7).
 # Запуск из каталога deploy/:  docker compose up -d --build
 # Пошагово — deploy/README.md.
@@ -19,6 +19,32 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # брокер событий в АИС «СВХ» (контракт v2, раздел 7): свой, на ВМ центра
+  # (decisions 17.08.2026). Учётка vesy-center — публикатор центра (создаётся
+  # брокером из env); учётка АИС ais-svh с правом только читать очередь
+  # ais-svh.weighings заводится один раз rabbitmqctl — deploy/README.md §2а.
+  # Порт 5672 открыт наружу для серверов АИС (доступ режет firewall ВМ).
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    restart: unless-stopped
+    hostname: vesy-rabbit  # имя узла = имя каталога данных: не менять
+    environment:
+      RABBITMQ_DEFAULT_USER: vesy-center
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?задайте в deploy/.env}
+      RABBITMQ_DEFAULT_VHOST: vesy
+    ports:
+      - "5672:5672"
+      # панель управления брокером — только с самой ВМ (ssh-туннель)
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmq:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   # применяет миграции и завершается; app стартует только после успеха
   migrate:
@@ -55,6 +81,8 @@ services:
       # Telegram-уведомления мониторинга; пусто — выключены
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      # события в АИС «СВХ» (RabbitMQ на этой же ВМ); публикатор центра
+      RABBITMQ_URL: amqp://vesy-center:${RABBITMQ_PASSWORD}@rabbitmq:5672/vesy
       PHOTOS_DIR: /data/photos
       AGENT_RELEASES_DIR: /data/releases
     volumes:
@@ -67,6 +95,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      # rabbitmq намеренно НЕ в depends_on: центр (агенты, команды АИС, панель)
+      # должен подниматься и без брокера — публикатор сам ждёт его и повторяет
     healthcheck:
       test:
         - CMD
@@ -97,3 +127,4 @@ services:
 volumes:
   pgdata:
   photos:
+  rabbitmq:

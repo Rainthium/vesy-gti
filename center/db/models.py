@@ -29,6 +29,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -302,6 +303,34 @@ class WeighingAisRef(Base):
     origin: Mapped[str] = mapped_column(String(16))
     linked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class WeighingEvent(Base):
+    """Outbox события в АИС «СВХ» (контракт v2, раздел 7).
+
+    Строка появляется в одной транзакции с записью офлайн-операции; фоновый
+    публикатор отправляет её в RabbitMQ с подтверждением брокера и ставит
+    ``published_at``. Неотправленные строки видны панели и мониторингу;
+    повторная публикация по кнопке — новая строка с тем же ``event_id``
+    (он детерминирован по операции и типу события).
+    """
+
+    __tablename__ = "weighing_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    weighing_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("weighings.id"))
+    event_type: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, default=None)
+
+    __table_args__ = (
+        Index("ix_weighing_events_pending", "id", postgresql_where=text("published_at IS NULL")),
+        Index("ix_weighing_events_weighing", "weighing_id"),
     )
 
 

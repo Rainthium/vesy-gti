@@ -24,6 +24,7 @@ from center.agents_ws.router import create_agents_router
 from center.api_v1.router import ApiV1Config, create_api_v1_router
 from center.api_v2.router import ApiV2Config, create_api_v2_router
 from center.db.session import make_engine, make_session_factory
+from center.events import EventBroker, EventPublisher, RabbitBroker
 from center.monitoring import MonitoringService, TelegramNotifier
 from center.photos.router import PhotosConfig, create_photos_router
 from center.releases_router import create_releases_router
@@ -104,6 +105,12 @@ def create_app() -> FastAPI:
         chat_id=os.environ.get("TELEGRAM_CHAT_ID", ""),
     )
 
+    # события в АИС «СВХ» (контракт v2, раздел 7): outbox → RabbitMQ; без
+    # RABBITMQ_URL публикатор выключен, офлайн-операции копятся в outbox
+    rabbitmq_url = os.environ.get("RABBITMQ_URL", "")
+    broker: EventBroker | None = RabbitBroker(rabbitmq_url) if rabbitmq_url else None
+    publisher = EventPublisher(session_factory, broker, photos_dir=photos_config.photos_dir)
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         tasks = [asyncio.create_task(monitor.run(), name="monitoring")]
@@ -113,10 +120,20 @@ def create_app() -> FastAPI:
             logger.info(
                 "Telegram-уведомления выключены: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID не заданы"
             )
+        if publisher.enabled:
+            tasks.append(asyncio.create_task(publisher.run(), name="ais-events"))
+        else:
+            logger.info(
+                "публикатор событий АИС выключен: RABBITMQ_URL не задан — "
+                "офлайн-операции копятся в outbox"
+            )
         yield
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if broker is not None:
+            with contextlib.suppress(Exception):
+                await broker.close()
 
     app = FastAPI(title="Весовая система — центр", docs_url=None, redoc_url=None, lifespan=lifespan)
 
@@ -166,4 +183,5 @@ def create_app() -> FastAPI:
     app.state.hub = hub
     app.state.session_factory = session_factory
     app.state.monitor = monitor
+    app.state.publisher = publisher
     return app

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Единая весовая система ОАО «ГТИ»: центральный сервер и агенты весовых ПК"
 requires-python = ">=3.12"
 dependencies = [
+    "aio-pika>=10.0.1",
     "alembic>=1.19.0",
     "fastapi>=0.141.1",
     "itsdangerous>=2.2.0",

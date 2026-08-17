@@ -86,6 +86,21 @@
       {% if card.storno_of %}
       <div class="record-message"><b>Сторно:</b> запись сторнирует <a href="/panel/journal/{{ card.storno_of.id }}">запись №{{ card.storno_of.id }} от {{ card.storno_of.weighed_at | fmt_dt }}</a></div>
       {% endif %}
+      {% set ais_pending = card.ais_event and not card.ais_event.published_at %}
+      <div class="ais-row{% if ais_pending %} ais-row-pending{% endif %}">
+        <b>АИС «СВХ»:</b>
+        {% if card.ais_ref %}документ <code>{{ card.ais_ref }}</code>{% elif w.source.value == 'local_offline' %}номер документа АИС ещё не сообщён — АИС заведёт его по событию и вернёт номер{% else %}команда без номера документа АИС (контракт v1){% endif %}
+        {% if card.ais_event %}
+        <span>· событие {{ card.ais_event.event_type }}:
+        {% if card.ais_event.published_at %}отправлено {{ card.ais_event.published_at | fmt_dt }}{% else %}в очереди на отправку{% if card.ais_event.attempts %} (попыток: {{ card.ais_event.attempts }}{% if card.ais_event.last_error and can_resend %}, последняя ошибка: {{ card.ais_event.last_error }}{% endif %}){% endif %}{% endif %}</span>
+        {% elif w.source.value == 'local_offline' %}
+        <span>· событие в АИС ещё не поставлено в очередь</span>
+        {% endif %}
+        {% if can_resend %}
+        <form method="post" action="/panel/journal/{{ w.id }}/ais_event" class="inline-form"><button type="submit" class="btn-row" title="Опубликовать событие weighing.completed по этой операции {{ 'ещё раз' if card.ais_event else '' }} (АИС схлопнет повтор по id)">{{ 'Переотправить событие' if card.ais_event else 'Отправить событие' }}</button></form>
+        {% endif %}
+        {% if ais_note %}<span class="ais-note">{{ ais_note }}</span>{% endif %}
+      </div>
       <div class="checksum-row">
         <b>Контрольная сумма записи:</b>
         <code>sha256 · {{ w.checksum }}</code>

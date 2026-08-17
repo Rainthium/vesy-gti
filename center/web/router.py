@@ -308,8 +308,13 @@ def create_panel_router(
         equipment: dict[int, EquipmentStatus],
         alerts: list[ActiveAlert],
         today: tuple[int, int],
+        ais_pending: int = 0,
     ) -> list[dict[str, str]]:
-        """Четыре счётчика дашборда (по макету center-dashboard)."""
+        """Четыре счётчика дашборда (по макету center-dashboard).
+
+        ``ais_pending`` — неотправленные события в АИС (outbox RabbitMQ,
+        контракт v2): считаются в «очередь досылки» вместе с очередями агентов.
+        """
         with_agent = [item for item in scales if item.agent]
         offline = [item for item in with_agent if not online_map.get(item.scale.id)]
         if not offline:
@@ -322,7 +327,7 @@ def create_panel_router(
         danger_count = sum(1 for alert in alerts if alert.severity is MonitoringSeverity.DANGER)
         backlog_records = sum(eq.pending_sync_count for eq in equipment.values())
         backlog_photos = sum(eq.pending_photos_count or 0 for eq in equipment.values())
-        backlog = backlog_records + backlog_photos
+        backlog = backlog_records + backlog_photos + ais_pending
         return [
             {
                 "k": "Весов на связи",
@@ -357,6 +362,7 @@ def create_panel_router(
                 # очереди видны только по агентам на связи (heartbeat)
                 "sub": (
                     f"записей: {backlog_records} · снимков: {backlog_photos}"
+                    + (f" · событий в АИС: {ais_pending}" if ais_pending else "")
                     if backlog
                     else "всё синхронизировано"
                 ),
@@ -370,6 +376,13 @@ def create_panel_router(
         today = await asyncio.to_thread(_db, lambda s: queries.weighings_today(s, scope))
         equipment = _equipment_map(scales)
         alerts = monitor.active_alerts(scope) if monitor is not None else []
+        pending_events = await asyncio.to_thread(_db, repo.pending_event_stats)
+        visible_scale_ids = {item.scale.id for item in scales}
+        ais_pending = sum(
+            count
+            for scale_id, (count, _) in pending_events.items()
+            if scale_id in visible_scale_ids
+        )
         # «на связи» — как у детектора офлайна: статус online И свежий
         # heartbeat; иначе счётчик показывал бы «все агенты онлайн» рядом
         # с danger-алертом о молчащем агенте (замечание ревью 13.08.2026)
@@ -391,7 +404,9 @@ def create_panel_router(
             "equipment": equipment,
             "alerts": alerts,
             "online_map": online_map,
-            "counters": _dashboard_counters(scales, online_map, equipment, alerts, today),
+            "counters": _dashboard_counters(
+                scales, online_map, equipment, alerts, today, ais_pending
+            ),
             "all_good": not alerts
             and all(item.agent is None or online_map.get(item.scale.id) for item in scales),
             "release": await _latest_release(),
@@ -728,7 +743,42 @@ def create_panel_router(
         )
         if card is None:
             raise HTTPException(status_code=404)
-        return render("record.html", request, user=user, card=card)
+        return render(
+            "record.html",
+            request,
+            user=user,
+            card=card,
+            can_resend=request.session.get("panel_role") == "admin",
+            ais_note=request.query_params.get("ais_note"),
+        )
+
+    @router.post("/journal/{weighing_id}/ais_event")
+    async def journal_resend_ais_event(
+        request: Request, admin: PanelAdmin, scope: PanelScope, weighing_id: int
+    ) -> RedirectResponse:
+        """Повторно опубликовать событие weighing.completed по операции
+        (контракт v2, 7.4: «любую операцию можно опубликовать повторно»)."""
+
+        def enqueue(session: Session) -> str:
+            card = queries.weighing_card(session, weighing_id, site_scope=scope)
+            if card is None:
+                raise HTTPException(status_code=404)
+            repo.enqueue_weighing_event(session, card.weighing)
+            session.add(
+                AuditLog(
+                    actor=f"user:{admin}",
+                    action="ais_event_resend",
+                    details={"weighing_id": weighing_id, "record_uuid": str(card.weighing.uuid)},
+                )
+            )
+            session.commit()
+            return "событие поставлено в очередь на отправку в АИС"
+
+        note = await asyncio.to_thread(_db, enqueue)
+        logger.info("панель (%s): событие АИС по записи id=%d переотправлено", admin, weighing_id)
+        return RedirectResponse(
+            f"/panel/journal/{weighing_id}?ais_note={quote(note)}", status_code=303
+        )
 
     def _print_card_context(card: queries.WeighingCard) -> dict[str, object]:
         """Контекст печатной карточки из карточки записи журнала.
