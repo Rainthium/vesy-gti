@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% from "_reports_blocks.html" import kpi_row, masses_block, sites_table, dynamics_block, manual_table, reliability_table, retare_table with context %}
+{% block title %}Отчёты — Весовая система{% endblock %}
+{% block body %}
+{% set active_tab = 'reports' %}
+{% include "_header.html" %}
+{# Экран по макету center-reports.dc.html (5.7): период + объект → счётчики,
+   массы, таблица по объектам, динамика, ручные операции, надёжность.
+   Пресеты периода — ссылки (объект и разбивка сохраняются); даты в форме
+   сбрасывают пресет (скрытое поле чистится при правке дат). #}
+<main class="content content--wide reports">
+  <div class="page-head">
+    <h1>Отчёт по взвешиваниям</h1>
+    <div class="page-actions">
+      <a class="btn-outline" href="/panel/reports/print?{{ query_string }}" target="_blank" title="Печатная версия в новой вкладке">Печать</a>
+      <a class="btn-outline" href="/panel/reports/export.xlsx?{{ query_string }}" title="Книга Excel: лист на блок отчёта">Экспорт Excel</a>
+      <a class="btn-outline" href="/panel/reports/export.csv?{{ query_string }}" title="Один CSV, блоки подряд (открывается в Excel)">Экспорт CSV</a>
+    </div>
+  </div>
+
+  <form method="get" action="/panel/reports" class="filters report-filters" id="report-filters">
+    <input type="hidden" name="preset" value="{{ query.preset if query.preset != 'custom' else '' }}">
+    <div class="preset-chips">
+      {% for key, label in presets %}
+      <a class="chip {{ 'active' if query.preset == key else '' }}"
+         href="/panel/reports?preset={{ key }}{% if query.site_id %}&site_id={{ query.site_id }}{% endif %}{% if query.split_sites %}&split=sites{% endif %}">{{ label }}</a>
+      {% endfor %}
+    </div>
+    <div class="filter-line">
+      <input type="date" name="date_from" value="{{ query.period.date_from.isoformat() }}" title="С даты" oninput="this.form.preset.value=''">
+      <input type="date" name="date_to" value="{{ query.period.date_to.isoformat() }}" title="По дату" oninput="this.form.preset.value=''">
+      {% if refs.sites | length > 1 %}
+      <select name="site_id">
+        <option value="">Все объекты</option>
+        {% for site in refs.sites %}
+        <option value="{{ site.id }}" {{ 'selected' if query.site_id == site.id else '' }}>{{ site.name }}</option>
+        {% endfor %}
+      </select>
+      {% elif refs.sites %}
+      <span class="filter-static">{{ refs.sites[0].name }}</span>
+      {% endif %}
+      <label class="check-label"><input type="checkbox" name="split" value="sites" {{ 'checked' if query.split_sites else '' }}> динамика по объектам</label>
+      <button type="submit" class="btn-primary">Сформировать</button>
+    </div>
+  </form>
+
+  <div class="report-meta">
+    <span class="page-meta"><b>{{ report.period.label }}</b> · {{ site_name or 'все объекты' }} · сравнение с {{ report.comparison.period.label }}</span>
+    <span class="page-meta">сформирован {{ generated }}</span>
+  </div>
+
+  {{ kpi_row(report) }}
+
+  {{ masses_block(report) }}
+
+  <section class="table-card" id="po-obektam">
+    <div class="card-title">По объектам <small>сравнение объектов за период</small></div>
+    {{ sites_table(report) }}
+    <div class="charts-pair">
+      <div class="chart-box"><div class="chart-title">Взвешиваний</div>{{ charts.sites_weighings | safe }}</div>
+      <div class="chart-box"><div class="chart-title">Нетто, т</div>{{ charts.sites_netto | safe }}</div>
+    </div>
+  </section>
+
+  {{ dynamics_block(report, charts, step_label, query) }}
+
+  <section class="table-card" id="ruchnye">
+    <div class="card-title">Ручные (офлайн) операции <small>кто и сколько провёл в ручном режиме агента; без номера АИС — операции, по которым АИС ещё не сообщила номер документа</small></div>
+    {{ manual_table(report) }}
+  </section>
+
+  <section class="table-card" id="nadezhnost">
+    <div class="card-title">Надёжность <small>доступность по событиям мониторинга (с 13.08.2026), инциденты и отказы команд АИС</small></div>
+    {{ reliability_table(report) }}
+  </section>
+
+  {{ retare_table(report) }}
+</main>
+{% endblock %}

@@ -14,6 +14,7 @@
       <a href="/panel/tares" class="{{ 'active' if active_tab == 'tares' else '' }}">Тарирования</a>
       <a href="/panel/events" class="{{ 'active' if active_tab == 'events' else '' }}">События</a>
       <a href="/panel/refs" class="{{ 'active' if active_tab == 'refs' else '' }}">Справочники</a>
+      <a href="/panel/reports" class="{{ 'active' if active_tab == 'reports' else '' }}">Отчёты</a>
       {% if role == 'admin' %}<a href="/panel/releases" class="{{ 'active' if active_tab == 'releases' else '' }}">Релизы</a>{% endif %}
       {% if role == 'admin' %}<a href="/panel/users" class="{{ 'active' if active_tab == 'users' else '' }}">Пользователи</a>{% endif %}
     </nav>

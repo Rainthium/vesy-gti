@@ -998,3 +998,90 @@ table.releases tr.row-off td .cell-sub { opacity: 1; }
 table.rollout .narrow-select { height: 30px; padding: 0 8px; min-width: 90px; }
 table.rollout .status-detail { max-width: 360px; white-space: normal; }
 table.rollout .channel-form { margin-left: 0; }
+
+/* --- экран «Отчёты» (макет center-reports, этап 4) --- */
+.page-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.page-actions .btn-outline { height: 40px; }
+form.report-filters { flex-direction: column; align-items: stretch; gap: 10px; }
+.preset-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.chip:hover { border-color: var(--green-border); color: var(--primary); }
+.chip.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.filter-line { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.filter-static { font-size: 14px; font-weight: 700; padding: 0 6px; }
+.check-label { display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; color: var(--text); }
+.check-label input { width: 16px; height: 16px; accent-color: var(--primary); }
+.report-meta { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.report-meta b { color: var(--text); }
+
+.kpi-row--report .kpi-unit { font-size: 15px; color: var(--muted); font-weight: 600; }
+.kpi-card--small .kpi-v { font-size: 22px; }
+.kpi-sub .delta-pill { padding: 2px 8px; font-size: 11.5px; margin-right: 4px; }
+
+.masses-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; }
+.mass-col { padding: 16px 20px; border-right: 1px solid var(--surface-2); }
+.mass-col:last-child { border-right: none; }
+.mass-head { font-size: 12.5px; font-weight: 800; color: var(--primary-dark); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 10px; }
+.mass-line { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: 14px; font-variant-numeric: tabular-nums; }
+.mass-line span { color: var(--muted); }
+.mass-line b { font-weight: 700; white-space: nowrap; }
+.mass-total { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 9px; }
+.mass-total b { font-size: 16px; font-weight: 800; color: var(--primary-dark); }
+.reasons { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 12px 20px 16px; border-top: 1px solid var(--surface-2); }
+.reasons-title { font-size: 13px; font-weight: 700; }
+.reasons-hint { font-size: 12px; color: var(--muted); flex-basis: 100%; }
+
+.charts-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 14px 20px 18px; border-top: 1px solid var(--surface-2); }
+.chart-stack { display: flex; flex-direction: column; gap: 14px; padding: 14px 20px 6px; }
+.chart-box { min-width: 0; }
+.chart-title { font-size: 12.5px; font-weight: 700; color: var(--muted); margin-bottom: 6px; }
+.dyn-toggle { font-size: 13px; }
+.dyn-toggle .btn-row { margin: 0; }
+.dynamics-table td, .dynamics-table th { padding-top: 7px; padding-bottom: 7px; }
+
+table.report-table td.cell-site { font-weight: 700; }
+table.report-table td.cell-strong { font-weight: 700; }
+table.report-table td.cell-warn { color: #b5780f; font-weight: 700; }
+table.report-table td.cell-danger { color: #c2333e; font-weight: 700; }
+table.report-table td.avail-ok { color: #16855a; font-weight: 700; }
+table.report-table td.avail-warn { color: #b5780f; font-weight: 700; }
+
+/* печатная версия отчёта */
+.print-page { background: #fff; }
+.print-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; flex-wrap: wrap; }
+.print-head h1 { font-size: 22px; font-weight: 800; margin: 4px 0; letter-spacing: -.2px; }
+.print-org { font-size: 12px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; color: var(--primary); }
+.print-actions { display: flex; gap: 10px; }
+.print-foot { text-align: center; padding-top: 8px; }
+.reports-print .dyn-toggle { display: none; }
+
+@media (max-width: 1100px) {
+  .masses-grid { grid-template-columns: 1fr; }
+  .mass-col { border-right: none; border-bottom: 1px solid var(--surface-2); }
+  .charts-pair { grid-template-columns: 1fr; }
+}
+
+@media print {
+  @page { size: A4 landscape; margin: 10mm; }
+  body.print-page { background: #fff; }
+  .print-page .no-print, .print-page .print-link, .print-page .dyn-toggle { display: none !important; }
+  .print-page .content { max-width: 100%; padding: 0; gap: 12px; }
+  .print-page .table-card, .print-page .kpi-card { box-shadow: none; break-inside: avoid; }
+  .print-page .kpi-row { grid-template-columns: repeat(4, 1fr); }
+  .print-page table.journal th { position: static; }
+  .print-page .journal-scroll { overflow: visible; }
+  .print-page table.journal td, .print-page table.journal th { padding: 6px 10px; font-size: 11.5px; }
+  .print-page .kpi-v { font-size: 22px; }
+}

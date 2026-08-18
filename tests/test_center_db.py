@@ -83,7 +83,7 @@ ALL_TABLES = (
     "weighing_events",
 )
 
-HEAD_REVISION = "b8c9d0e1f2a3"  # автовыкат агентов по каналам (18.08.2026)
+HEAD_REVISION = "d0e1f2a3b4c5"  # индекс audit_log для отчётов (18.08.2026)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64

@@ -1,0 +1,262 @@
+{# Блоки отчёта — общие для экрана «Отчёты» и его печатной версии.
+   Импортируются with context: нужны reason_labels, bucket_title, stale_days. #}
+
+{% macro delta_pill(delta, tonnes=False, good_up=True) -%}
+{% set change = delta.change %}
+{% set up = change is not none and change > 0 %}
+{% set down = change is not none and change < 0 %}
+{% set cls = 'pill-info' if change is none else ('pill-ok' if (up if good_up else down) else ('pill-err' if (down if good_up else up) else '')) %}
+<span class="pill {{ cls }} delta-pill" title="{{ delta | fmt_delta(tonnes=tonnes) }} к прошлому периоду">{{ delta | fmt_pct_change }}</span>
+{%- endmacro %}
+
+{% macro kpi_row(report) %}
+{% set t = report.totals %}
+{% set c = report.comparison %}
+<div class="kpi-row kpi-row--report" id="itogi">
+  <div class="kpi-card">
+    <div class="kpi-k">Всего взвешиваний</div>
+    <div class="kpi-v">{{ t.weighings | fmt_kg }}</div>
+    <div class="kpi-sub">{{ delta_pill(c.weighings) }} прошлый период: {{ c.weighings.previous | int | fmt_kg }}</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-k">Тарирований</div>
+    <div class="kpi-v">{{ t.tarings | fmt_kg }}</div>
+    <div class="kpi-sub">{{ delta_pill(c.tarings) }} прошлый период: {{ c.tarings.previous | int | fmt_kg }}</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-k">Офлайн-операций</div>
+    <div class="kpi-v">{{ t.offline | fmt_kg }} <span class="kpi-unit">· {{ t.offline_share | fmt_share }}</span></div>
+    <div class="kpi-sub">{{ delta_pill(c.offline, good_up=False) }} прошлый период: {{ c.offline.previous | int | fmt_kg }}</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-k">Суммарное нетто</div>
+    <div class="kpi-v">{{ t.netto_kg | fmt_t }} <span class="kpi-unit">т</span></div>
+    <div class="kpi-sub">{{ delta_pill(c.netto_kg, tonnes=True) }} прошлый период: {{ c.netto_kg.previous | fmt_t }} т</div>
+  </div>
+  <div class="kpi-card kpi-card--small">
+    <div class="kpi-k">Без нетто</div>
+    <div class="kpi-v {{ 'kpi-warn' if t.without_tare else '' }}">{{ t.without_tare | fmt_kg }} <span class="kpi-unit">· {{ (t.without_tare / t.weighings if t.weighings else none) | fmt_share }}</span></div>
+    <div class="kpi-sub">взвешиваний без действующей тары</div>
+  </div>
+  <div class="kpi-card kpi-card--small">
+    <div class="kpi-k">Отказов команд АИС</div>
+    <div class="kpi-v {{ 'kpi-warn' if t.refusals else '' }}">{{ t.refusals | fmt_kg }}</div>
+    <div class="kpi-sub">команды, кончившиеся ERR_* (записи нет)</div>
+  </div>
+  <div class="kpi-card kpi-card--small">
+    <div class="kpi-k">Офлайн без номера АИС</div>
+    <div class="kpi-v {{ 'kpi-warn' if t.unlinked else '' }}">{{ t.unlinked | fmt_kg }}</div>
+    <div class="kpi-sub">АИС ещё не сообщила номер документа</div>
+  </div>
+  <div class="kpi-card kpi-card--small">
+    <div class="kpi-k">Средний брутто</div>
+    <div class="kpi-v">{{ t.avg_gross_kg | fmt_kg }} <span class="kpi-unit">кг</span></div>
+    <div class="kpi-sub">по состоявшимся взвешиваниям</div>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro masses_block(report) %}
+{% set t = report.totals %}
+{% set m = report.masses %}
+<section class="table-card masses" id="massy">
+  <div class="card-title">Массы за период <small>нетто есть только там, где подставилась действующая тара; по остальным взвешиваниям — брутто отдельно</small></div>
+  <div class="masses-grid">
+    <div class="mass-col">
+      <div class="mass-head">Взвешивания с тарой</div>
+      <div class="mass-line"><span>взвешиваний</span><b>{{ t.with_tare | fmt_kg }}</b></div>
+      <div class="mass-line"><span>Σ брутто</span><b>{{ t.gross_with_tare_kg | fmt_t }} т</b></div>
+      <div class="mass-line"><span>− Σ тара</span><b>{{ t.tare_sum_kg | fmt_t }} т</b></div>
+      <div class="mass-line mass-total"><span>= нетто</span><b>{{ t.netto_kg | fmt_t }} т</b></div>
+    </div>
+    <div class="mass-col">
+      <div class="mass-head">Взвешивания без тары</div>
+      <div class="mass-line"><span>взвешиваний</span><b>{{ t.without_tare | fmt_kg }}</b></div>
+      <div class="mass-line"><span>Σ брутто</span><b>{{ t.gross_without_tare_kg | fmt_t }} т</b></div>
+      <div class="mass-line mass-total"><span>нетто</span><b>не рассчитано</b></div>
+    </div>
+    <div class="mass-col">
+      <div class="mass-head">Итого</div>
+      <div class="mass-line"><span>взвешиваний</span><b>{{ t.weighings | fmt_kg }}</b></div>
+      <div class="mass-line"><span>Σ брутто</span><b>{{ t.gross_kg | fmt_t }} т</b></div>
+      <div class="mass-line"><span>средний брутто</span><b>{{ t.avg_gross_kg | fmt_kg }} кг</b></div>
+      <div class="mass-line"><span>тарирований</span><b>{{ t.tarings | fmt_kg }}</b></div>
+    </div>
+  </div>
+  <div class="reasons">
+    <span class="reasons-title">Почему нет нетто:</span>
+    {% for reason, count in m.reasons.items() %}
+    <span class="pill {{ 'pill-warn' if count and reason == 'expired' else ('pill-err' if count and reason == 'not_applied' else '') }}"><span class="dot"></span>{{ reason_labels[reason] }}: {{ count }}</span>
+    {% endfor %}
+    <span class="reasons-hint">граница правила №4 (3 календарных месяца) считается к моменту взвешивания; нетто по устаревшей таре отчёт не досчитывает — как в записях и ответе АИС</span>
+  </div>
+</section>
+{% endmacro %}
+
+{% macro sites_table(report) %}
+<div class="journal-scroll">
+<table class="journal report-table">
+  <thead><tr>
+    <th>Объект</th>
+    <th class="num">Взвешиваний</th>
+    <th class="num">Тарирований</th>
+    <th class="num">Офлайн</th>
+    <th class="num">Нетто, т</th>
+    <th class="num">Средний брутто, кг</th>
+    <th class="num">Доступность</th>
+    <th class="num">Инцидентов</th>
+    <th class="num">Отказов АИС</th>
+  </tr></thead>
+  <tbody>
+  {% for row in report.sites %}
+  {% set st = row.totals %}
+  <tr>
+    <td class="cell-site">{{ row.site_name }}</td>
+    <td class="num cell-strong">{{ st.weighings | fmt_kg }}</td>
+    <td class="num">{{ st.tarings | fmt_kg }}</td>
+    <td class="num">{{ st.offline | fmt_kg }}{% if st.offline %} <span class="cell-muted">· {{ st.offline_share | fmt_share }}</span>{% endif %}</td>
+    <td class="num cell-strong">{{ st.netto_kg | fmt_t }}</td>
+    <td class="num">{{ st.avg_gross_kg | fmt_kg }}</td>
+    <td class="num {{ 'avail-ok' if row.availability is not none and row.availability >= 0.99 else ('avail-warn' if row.availability is not none else '') }}">{{ row.availability | fmt_share }}</td>
+    <td class="num {{ 'cell-warn' if row.incidents else '' }}">{{ row.incidents }}</td>
+    <td class="num {{ 'cell-warn' if st.refusals else '' }}">{{ st.refusals }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="9" class="empty">Объектов нет</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endmacro %}
+
+{% macro dynamics_block(report, charts, step_label, query) %}
+<section class="table-card dynamics" id="dinamika">
+  <div class="card-title rollout-title">
+    <span>Динамика <small>{{ step_label }}</small></span>
+    {% if query.site_id is none %}
+    <span class="dyn-toggle">
+      {% if query.split_sites %}
+      <a href="/panel/reports?{{ query.query_string(split='') }}" class="btn-row">Суммарно</a> <span class="cell-muted">· по объектам</span>
+      {% else %}
+      <span class="cell-muted">суммарно ·</span> <a href="/panel/reports?{{ query.query_string(split='sites') }}" class="btn-row">По объектам</a>
+      {% endif %}
+    </span>
+    {% endif %}
+  </div>
+  <div class="chart-stack">
+    <div class="chart-box"><div class="chart-title">Взвешиваний</div>{{ charts.dynamics_weighings | safe }}</div>
+    <div class="chart-box"><div class="chart-title">Нетто, т</div>{{ charts.dynamics_netto | safe }}</div>
+  </div>
+  <div class="journal-scroll">
+  <table class="journal report-table dynamics-table">
+    <thead><tr><th>Отрезок</th><th class="num">Взвешиваний</th><th class="num">Тарирований</th><th class="num">Офлайн</th><th class="num">Нетто, т</th></tr></thead>
+    <tbody>
+    {% for point in report.dynamics.points %}
+    <tr>
+      <td class="cell-muted">{{ bucket_title(point.bucket, report.dynamics.step) }}</td>
+      <td class="num">{{ point.totals.weighings | fmt_kg }}</td>
+      <td class="num">{{ point.totals.tarings | fmt_kg }}</td>
+      <td class="num">{{ point.totals.offline | fmt_kg }}</td>
+      <td class="num">{{ point.totals.netto_kg | fmt_t }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endmacro %}
+
+{% macro manual_table(report) %}
+<div class="journal-scroll">
+<table class="journal report-table">
+  <thead><tr>
+    <th>Объект</th>
+    <th>Оператор</th>
+    <th class="num">Взвешиваний</th>
+    <th class="num">Тарирований</th>
+    <th class="num">Всего</th>
+    <th class="num">Доля от операций объекта</th>
+    <th class="num">Без номера АИС</th>
+    <th class="num">Из них старше {{ stale_days }} сут</th>
+  </tr></thead>
+  <tbody>
+  {% for row in report.manual %}
+  <tr>
+    <td class="cell-site">{{ row.site_name }}</td>
+    <td>{{ row.operator or '(не указан)' }}</td>
+    <td class="num">{{ row.weighings }}</td>
+    <td class="num">{{ row.tarings }}</td>
+    <td class="num cell-strong">{{ row.operations }}</td>
+    <td class="num">{{ row.share | fmt_share }}</td>
+    <td class="num {{ 'cell-warn' if row.unlinked else '' }}">{{ row.unlinked }}</td>
+    <td class="num {{ 'cell-danger' if row.unlinked_stale else '' }}">{{ row.unlinked_stale }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="8" class="empty">Офлайн-операций в периоде не было</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endmacro %}
+
+{% macro reliability_table(report) %}
+<div class="journal-scroll">
+<table class="journal report-table">
+  <thead><tr>
+    <th>Объект</th>
+    <th class="num">Доступность</th>
+    <th class="num">Уходов в офлайн</th>
+    <th class="num">Офлайн всего</th>
+    <th class="num">Индикатор</th>
+    <th class="num">Камеры</th>
+    <th class="num">Прочие</th>
+    <th class="num">Отказов АИС</th>
+    <th>Коды отказов</th>
+  </tr></thead>
+  <tbody>
+  {% for row in report.reliability %}
+  <tr>
+    <td class="cell-site">{{ row.site_name }}{% if not row.has_agent %}<div class="cell-sub">агент не подключён</div>{% endif %}</td>
+    <td class="num {{ 'avail-ok' if row.availability is not none and row.availability >= 0.99 else ('avail-warn' if row.availability is not none else '') }}">{{ row.availability | fmt_share }}</td>
+    <td class="num {{ 'cell-warn' if row.offline_count else '' }}">{{ row.offline_count }}</td>
+    <td class="num">{{ row.offline_seconds | fmt_hours }}</td>
+    <td class="num {{ 'cell-warn' if row.indicator_incidents else '' }}">{{ row.indicator_incidents }}</td>
+    <td class="num {{ 'cell-warn' if row.camera_incidents else '' }}">{{ row.camera_incidents }}</td>
+    <td class="num">{{ row.other_incidents }}</td>
+    <td class="num {{ 'cell-warn' if row.refusals_total else '' }}">{{ row.refusals_total }}</td>
+    <td class="cell-muted">{% for code, n in row.refusals.items() %}<span class="mono">{{ code }}</span> × {{ n }}{{ ', ' if not loop.last else '' }}{% else %}—{% endfor %}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="9" class="empty">Объектов нет</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endmacro %}
+
+{% macro retare_table(report) %}
+{% set m = report.masses %}
+{% if m.retare %}
+<section class="table-card" id="peretarirovanie">
+  <div class="card-title">Сцепки к перетарированию <small>взвешивались в периоде без нетто и до сих пор без действующей тары{% if m.retare_total > m.retare | length %} · показаны первые {{ m.retare | length }} из {{ m.retare_total }}{% endif %}</small></div>
+  <div class="journal-scroll">
+  <table class="journal report-table">
+    <thead><tr><th>Номер ТС</th><th>Прицеп</th><th class="num">Взвешиваний без нетто</th><th>Последнее взвешивание</th><th>Последнее тарирование</th><th class="num">Тара, кг</th><th></th></tr></thead>
+    <tbody>
+    {% for row in m.retare %}
+    <tr>
+      <td class="cell-vehicle">{{ row.vehicle_number }}</td>
+      <td>{{ row.trailer_number or '—' }}</td>
+      <td class="num cell-strong">{{ row.weighings }}</td>
+      <td class="cell-muted">{{ row.last_weighed_at | fmt_dt }}</td>
+      <td class="cell-muted">{% if row.last_tared_at %}{{ row.last_tared_at | fmt_dt }} <span class="pill pill-warn"><span class="dot"></span>устарело</span>{% else %}не было{% endif %}</td>
+      <td class="num">{{ row.last_tare_value | fmt_kg }}</td>
+      <td class="cell-print"><a class="print-link" href="/panel/tares?show=all&search={{ row.vehicle_number | urlencode }}">История</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+{% endmacro %}

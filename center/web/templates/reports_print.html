@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% from "_reports_blocks.html" import kpi_row, masses_block, sites_table, dynamics_block, manual_table, reliability_table, retare_table with context %}
+{% block title %}{{ title }}{% endblock %}
+{% block body_class %}panel print-page{% endblock %}
+{% block body %}
+{# Печатная версия отчёта: те же блоки, без шапки панели и фильтров;
+   кнопка «Печать» скрывается при печати (@media print в panel.css). #}
+<main class="content content--wide reports reports-print">
+  <div class="print-head">
+    <div>
+      <div class="print-org">ОАО «ГТИ» · Единая весовая система</div>
+      <h1>{{ title }}</h1>
+      <div class="page-meta">сформирован {{ generated }} · сравнение с {{ report.comparison.period.label }}{% if query.split_sites %} · динамика по объектам{% endif %}</div>
+    </div>
+    <div class="no-print print-actions">
+      <button class="btn-primary" onclick="window.print()">Печать</button>
+      <a class="btn-outline" href="/panel/reports?{{ query_string }}">К отчёту</a>
+    </div>
+  </div>
+
+  {{ kpi_row(report) }}
+  {{ masses_block(report) }}
+
+  <section class="table-card">
+    <div class="card-title">По объектам</div>
+    {{ sites_table(report) }}
+    <div class="charts-pair">
+      <div class="chart-box"><div class="chart-title">Взвешиваний</div>{{ charts.sites_weighings | safe }}</div>
+      <div class="chart-box"><div class="chart-title">Нетто, т</div>{{ charts.sites_netto | safe }}</div>
+    </div>
+  </section>
+
+  {{ dynamics_block(report, charts, step_label, query) }}
+
+  <section class="table-card">
+    <div class="card-title">Ручные (офлайн) операции</div>
+    {{ manual_table(report) }}
+  </section>
+
+  <section class="table-card">
+    <div class="card-title">Надёжность <small>доступность по событиям мониторинга (с 13.08.2026)</small></div>
+    {{ reliability_table(report) }}
+  </section>
+
+  {{ retare_table(report) }}
+
+  <div class="print-foot page-meta">Единая весовая система ОАО «ГТИ» · {{ title }} · сформирован {{ generated }}</div>
+</main>
+{% endblock %}

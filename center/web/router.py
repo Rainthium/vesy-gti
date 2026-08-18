@@ -2,8 +2,9 @@
 
 Экраны: вход, дашборд объектов, журнал с фильтрами и карточкой записи,
 реестр тарирований, справочники (чтение; правило №2: записанные операции
-неизменны, редактирование справочников пока в CLI ``tools/center_admin.py``)
-и администрирование пользователей (``/panel/users``, только admin —
+неизменны, редактирование справочников пока в CLI ``tools/center_admin.py``),
+отчёты за период (``/panel/reports`` + печать и выгрузки CSV/Excel,
+этап 4) и администрирование пользователей (``/panel/users``, только admin —
 права сверяются с БД на каждый запрос, см. ``users_admin``).
 
 Доступ по учёткам users (роли dispatcher/operator видят одно и то же —
@@ -31,7 +32,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from center import rollout
+from center import reports, rollout
 from center.agents_ws.hub import AgentHub, AgentHubError
 from center.db import repo
 from center.db.models import (
@@ -53,7 +54,7 @@ from center.releases import (
     store_release,
     version_key,
 )
-from center.web import queries, refs_admin, users_admin
+from center.web import queries, refs_admin, report_export, report_view, users_admin
 from shared import card as weight_card
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 from shared.messages import (
@@ -173,6 +174,12 @@ def create_panel_router(
     templates.env.filters["fmt_kg"] = _fmt_kg
     # подписи типов событий мониторинга (экран «События», блок алертов)
     templates.env.filters["kind_label"] = lambda kind: KIND_LABELS.get(kind, kind)
+    # экран «Отчёты»: тонны, доли, длительности, изменения к прошлому периоду
+    templates.env.filters["fmt_t"] = report_view.fmt_tonnes
+    templates.env.filters["fmt_share"] = report_view.fmt_share
+    templates.env.filters["fmt_hours"] = report_view.fmt_hours
+    templates.env.filters["fmt_delta"] = report_view.fmt_delta
+    templates.env.filters["fmt_pct_change"] = report_view.fmt_pct_change
     templates.env.globals["expires"] = queries.tare_expires_at
     # метка старта процесса — сброс браузерного кэша статики при деплое
     templates.env.globals["static_v"] = str(int(datetime.now(UTC).timestamp()))
@@ -1060,6 +1067,162 @@ def create_panel_router(
             pages=max(1, -(-total // PAGE_SIZE)),
             refs=refs,
             filters={"site_id": site},
+        )
+
+    # --- отчёты (этап 4, макет 5.7) ---
+
+    async def _report_bundle(
+        scope: int | None,
+        *,
+        preset: str | None,
+        date_from: str | None,
+        date_to: str | None,
+        site_id: str,
+        split: str | None,
+    ) -> tuple[report_view.ReportQuery, reports.Report, queries.FilterOptions, str | None]:
+        """Разобрать параметры экрана и собрать отчёт (общее для страницы,
+        печати и выгрузок): ограничение пользователя по объекту сильнее
+        фильтра, период — пресет или даты по Бишкеку."""
+        refs = await asyncio.to_thread(_db, lambda s: queries.filter_options(s, scope))
+        if scope is not None:
+            site: int | None = scope  # ограничение пользователя сильнее адреса
+        else:
+            site = _parse_id(site_id)
+            if site is not None and not any(s.id == site for s in refs.sites):
+                site = None  # несуществующий объект → «все»
+        query = report_view.resolve_query(
+            preset=preset,
+            date_from=date_from,
+            date_to=date_to,
+            site_id=site,
+            split=split,
+            today=datetime.now(BISHKEK).date(),
+        )
+        report = await asyncio.to_thread(
+            _db,
+            lambda s: reports.build_report(
+                s,
+                query.period,
+                query.site_id,
+                split_sites=query.split_sites,
+                previous=query.previous,
+            ),
+        )
+        site_name = next((s.name for s in refs.sites if s.id == query.site_id), None)
+        return query, report, refs, site_name
+
+    def _report_context(
+        query: report_view.ReportQuery,
+        report: reports.Report,
+        refs: queries.FilterOptions,
+        site_name: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "report": report,
+            "query": query,
+            "refs": refs,
+            "site_name": site_name,
+            "title": report_view.report_title(report, site_name),
+            "presets": reports.PRESETS,
+            "charts": report_view.build_charts(report),
+            "step_label": report_view.STEP_LABELS[report.dynamics.step],
+            "bucket_title": report_view.bucket_title,
+            "reason_labels": reports.REASON_LABELS,
+            "generated": report_view.generated_stamp(report.generated_at),
+            "query_string": query.query_string(),
+            "stale_days": reports.UNLINKED_STALE_DAYS,
+        }
+
+    @router.get("/reports", response_class=HTMLResponse)
+    async def reports_page(
+        request: Request,
+        user: PanelUser,
+        scope: PanelScope,
+        preset: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        site_id: str = "",
+        split: str | None = None,
+    ) -> HTMLResponse:
+        """Сводная аналитика за период: итоги, массы, по объектам, динамика,
+        ручные операции, надёжность, сравнение с прошлым периодом."""
+        query, report, refs, site_name = await _report_bundle(
+            scope, preset=preset, date_from=date_from, date_to=date_to, site_id=site_id, split=split
+        )
+        return render(
+            "reports.html", request, user=user, **_report_context(query, report, refs, site_name)
+        )
+
+    @router.get("/reports/print", response_class=HTMLResponse)
+    async def reports_print(
+        request: Request,
+        user: PanelUser,
+        scope: PanelScope,
+        preset: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        site_id: str = "",
+        split: str | None = None,
+    ) -> HTMLResponse:
+        """Печатная версия отчёта (открывается в новой вкладке, без шапки панели)."""
+        query, report, refs, site_name = await _report_bundle(
+            scope, preset=preset, date_from=date_from, date_to=date_to, site_id=site_id, split=split
+        )
+        return render(
+            "reports_print.html",
+            request,
+            user=user,
+            **_report_context(query, report, refs, site_name),
+        )
+
+    @router.get("/reports/export.csv")
+    async def reports_export_csv(
+        request: Request,
+        user: PanelUser,
+        scope: PanelScope,
+        preset: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        site_id: str = "",
+        split: str | None = None,
+    ) -> Response:
+        """Отчёт одним CSV (блоки подряд; BOM + «;» — открывается в Excel)."""
+        query, report, _refs, site_name = await _report_bundle(
+            scope, preset=preset, date_from=date_from, date_to=date_to, site_id=site_id, split=split
+        )
+        tables = report_export.report_tables(report, site_name=site_name)
+        logger.info("панель (%s): выгрузка отчёта CSV за %s", user, query.period.label)
+        stamp = f"{query.period.date_from:%Y-%m-%d}_{query.period.date_to:%Y-%m-%d}"
+        return Response(
+            content=report_export.report_csv(tables),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="otchet_{stamp}.csv"'},
+        )
+
+    @router.get("/reports/export.xlsx")
+    async def reports_export_xlsx(
+        request: Request,
+        user: PanelUser,
+        scope: PanelScope,
+        preset: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        site_id: str = "",
+        split: str | None = None,
+    ) -> Response:
+        """Отчёт книгой Excel: лист на блок (Итоги, По объектам, Динамика…)."""
+        query, report, _refs, site_name = await _report_bundle(
+            scope, preset=preset, date_from=date_from, date_to=date_to, site_id=site_id, split=split
+        )
+        tables = report_export.report_tables(report, site_name=site_name)
+        title = report_view.report_title(report, site_name)
+        body = await asyncio.to_thread(report_export.report_xlsx, tables, title=title)
+        logger.info("панель (%s): выгрузка отчёта Excel за %s", user, query.period.label)
+        stamp = f"{query.period.date_from:%Y-%m-%d}_{query.period.date_to:%Y-%m-%d}"
+        return Response(
+            content=body,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="otchet_{stamp}.xlsx"'},
         )
 
     @router.get("/refs", response_class=HTMLResponse)

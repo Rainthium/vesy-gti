@@ -365,6 +365,9 @@ class AuditLog(Base):
     )
     details: Mapped[dict[str, object] | None] = mapped_column(JSONB, default=None)
 
+    # отчёты читают отказы команд АИС за период (миграция d0e1f2a3b4c5)
+    __table_args__ = (Index("ix_audit_log_action_at", "action", "at"),)
+
 
 class MonitoringSeverity(enum.StrEnum):
     """Важность события мониторинга; OK — восстановление после проблемы."""
