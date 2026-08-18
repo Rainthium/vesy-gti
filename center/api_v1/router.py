@@ -184,13 +184,23 @@ def create_api_v1_router(
                 "Весы не найдены по указанному адресу — проверьте справочник маршрутизации",
             )
 
+        vehicle_number = (request.vehicle_number or "").strip().upper() or None
+        trailer_number = (request.trailer_number or "").strip().upper() or None
+        # действующая тара по авторитетному реестру центра — в команду агенту
+        # (17.08.2026): реплика на весовом ПК могла отстать
+        tare_hint = await asyncio.to_thread(
+            _db,
+            lambda s: repo.resolve_tare_hint(s, request.operation, vehicle_number, trailer_number),
+        )
         command = WeighRequest(
             request_id=uuid4(),
             operation=request.operation,
-            vehicle_number=(request.vehicle_number or "").strip().upper() or None,
-            trailer_number=(request.trailer_number or "").strip().upper() or None,
+            vehicle_number=vehicle_number,
+            trailer_number=trailer_number,
             # ФИО как прислали, без upper; потолок — ширина колонки в БД
             operator=" ".join((request.operator or "").split())[:200] or None,
+            tare=tare_hint.tare,
+            tare_resolved=tare_hint.resolved,
         )
         try:
             result = await hub.send_weigh_request(scale.id, command, timeout_s=cfg.weigh_timeout_s)

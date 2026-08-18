@@ -1098,6 +1098,42 @@ class TestAgentsWsWeighResult:
             assert repo.weighing_by_ais_ref(session, "WEI000000778") is None
         assert ws_env.hub.take_ais_ref(request_id) is None
 
+    def test_weigh_result_with_ais_ref_in_record_links_without_hub_memory(
+        self, ws_env: WsEnv
+    ) -> None:
+        """Агент 0.4.17 несёт номер в самой записи: связка создаётся даже если
+        центр его не помнит (рестарт центра во время операции)."""
+        record = _make_record(ais_ref="WEI000000779")
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            ws.send_text(WeighResult(request_id=uuid4(), record=record).model_dump_json())
+            _hello_and_registry(ws)
+        with ws_env.factory() as session:
+            linked = repo.weighing_by_ais_ref(session, "WEI000000779")
+            assert linked is not None and linked.uuid == record.uuid
+
+    def test_record_ais_ref_wins_over_hub_memory_and_memory_is_cleared(self, ws_env: WsEnv) -> None:
+        record = _make_record(ais_ref="WEI000000780")
+        request_id = uuid4()
+        ws_env.hub.remember_ais_ref(request_id, "WEI000000780")
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            ws.send_text(WeighResult(request_id=request_id, record=record).model_dump_json())
+            _hello_and_registry(ws)
+        with ws_env.factory() as session:
+            assert repo.weighing_by_ais_ref(session, "WEI000000780") is not None
+        assert ws_env.hub.take_ais_ref(request_id) is None
+
+    def test_offline_sync_record_with_ais_ref_links(self, ws_env: WsEnv) -> None:
+        """Запись команды v2, дошедшая досылкой после разрыва (агент 0.4.17),
+        закрепляет номер АИС — повтор команды АИС найдёт операцию."""
+        record = _make_record(ais_ref="WEI000000781")
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            ws.send_text(OfflineSync(agent_id="agent-1", records=[record]).model_dump_json())
+            ack = json.loads(ws.receive_text())
+            assert ack["type"] == "offline_sync_ack"
+        with ws_env.factory() as session:
+            linked = repo.weighing_by_ais_ref(session, "WEI000000781")
+            assert linked is not None and linked.uuid == record.uuid
+
 
 class TestAgentsWsOfflineSync:
     def test_offline_sync_acks_all_and_no_duplicates(self, ws_env: WsEnv) -> None:

@@ -1328,3 +1328,159 @@ class TestClockOffsetStore:
             assert second.load_clock_offset_s() == 120.5
         finally:
             second.close()
+
+
+class TestAisRefColumn:
+    """Агент 0.4.17: номер документа АИС в журнале — колонка ais_ref, миграция
+    старой схемы, защита триггером неизменяемости."""
+
+    def _old_db(self, db_path: Path) -> UUID:
+        record_uuid = uuid4()
+        conn = sqlite3.connect(db_path)
+        with conn:
+            conn.executescript(_OLD_PHOTO_SCHEMA)
+            conn.execute(
+                "INSERT INTO weighings_local (uuid, operation, code, massa, unit, stable,"
+                " weighed_at, source, synced, created_at)"
+                " VALUES (?, 'weighing', 'OK', 15000.0, 'kg', 1, ?, 'ais', 0, ?)",
+                (
+                    str(record_uuid),
+                    datetime(2026, 8, 1, 10, 0, tzinfo=UTC).isoformat(),
+                    datetime(2026, 8, 1, 10, 0, tzinfo=UTC).isoformat(),
+                ),
+            )
+        conn.close()
+        return record_uuid
+
+    def test_old_schema_gets_column_and_trigger(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "agent.sqlite3"
+        old_uuid = self._old_db(db_path)
+        storage = AgentStorage(db_path)
+        try:
+            columns = {
+                row["name"]
+                for row in storage._conn.execute("PRAGMA table_info(weighings_local)").fetchall()
+            }
+            assert "ais_ref" in columns
+            # старая запись — без номера, читается как раньше
+            old = storage.get_weighing(old_uuid)
+            assert old is not None and old.ais_ref is None
+            assert [r.uuid for r in storage.pending_records()] == [old_uuid]
+            # триггер пересоздан и защищает новую колонку
+            trigger_sql = storage._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger'"
+                " AND name='weighings_local_no_update'"
+            ).fetchone()[0]
+            assert "ais_ref" in trigger_sql
+            with pytest.raises(sqlite3.IntegrityError), storage._conn:
+                storage._conn.execute(
+                    "UPDATE weighings_local SET ais_ref = 'WEI000000001' WHERE uuid = ?",
+                    (str(old_uuid),),
+                )
+        finally:
+            storage.close()
+
+    def test_ais_ref_saved_and_returned(self, storage: AgentStorage) -> None:
+        record = make_record(ais_ref="WEI000094176")
+        storage.save_weighing(record)
+        stored = storage.get_weighing(record.uuid)
+        assert stored is not None and stored.ais_ref == "WEI000094176"
+        assert storage.pending_records()[0].ais_ref == "WEI000094176"
+        # synced 0 → 1 по-прежнему разрешён при заполненном номере
+        assert storage.mark_synced([record.uuid]) == 1
+
+
+# схема журнала 0.4.16: без колонки ais_ref, триггер неизменяемости старого тела
+_SCHEMA_0416_WEIGHINGS = """
+CREATE TABLE weighings_local (
+    uuid TEXT PRIMARY KEY,
+    operation TEXT NOT NULL,
+    code TEXT NOT NULL,
+    massa REAL,
+    unit TEXT NOT NULL,
+    stable INTEGER NOT NULL,
+    weighed_at TEXT,
+    vehicle_number TEXT,
+    trailer_number TEXT,
+    tare_value REAL,
+    tare_weighing_uuid TEXT,
+    netto REAL,
+    source TEXT NOT NULL,
+    operator TEXT,
+    message TEXT,
+    synced INTEGER NOT NULL DEFAULT 0 CHECK (synced IN (0, 1)),
+    created_at TEXT NOT NULL
+);
+CREATE TRIGGER weighings_local_no_update
+    BEFORE UPDATE ON weighings_local
+    WHEN NOT (
+        NEW.uuid = OLD.uuid AND NEW.operation = OLD.operation
+        AND NEW.code = OLD.code AND NEW.massa IS OLD.massa
+        AND NEW.unit = OLD.unit AND NEW.stable = OLD.stable
+        AND NEW.weighed_at IS OLD.weighed_at
+        AND NEW.vehicle_number IS OLD.vehicle_number
+        AND NEW.trailer_number IS OLD.trailer_number
+        AND NEW.tare_value IS OLD.tare_value
+        AND NEW.tare_weighing_uuid IS OLD.tare_weighing_uuid
+        AND NEW.netto IS OLD.netto AND NEW.source = OLD.source
+        AND NEW.operator IS OLD.operator AND NEW.message IS OLD.message
+        AND NEW.created_at = OLD.created_at
+        AND (NEW.synced = OLD.synced OR (OLD.synced = 0 AND NEW.synced = 1))
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'взвешивания не редактируются (правило неизменяемости)');
+END;
+"""
+
+
+class TestAisRefTriggerMigration:
+    """БД агента 0.4.16 (старое тело триггера) → 0.4.17: колонка добавлена, триггер
+    пересоздан и защищает ais_ref; сценарий «служба упала между ALTER TABLE и
+    DROP TRIGGER» тоже лечится при следующем старте."""
+
+    @staticmethod
+    def _old_trigger_db(db_path: Path, *, with_column: bool = False) -> None:
+        conn = sqlite3.connect(db_path)
+        with conn:
+            conn.executescript(_SCHEMA_0416_WEIGHINGS)
+            if with_column:  # крах между ALTER TABLE и DROP TRIGGER
+                conn.execute("ALTER TABLE weighings_local ADD COLUMN ais_ref TEXT")
+            conn.execute(
+                "INSERT INTO weighings_local (uuid, operation, code, massa, unit, stable,"
+                " weighed_at, source, synced, created_at)"
+                " VALUES ('11111111-1111-1111-1111-111111111111', 'weighing', 'OK', 15000.0,"
+                " 'kg', 1, '2026-08-01T10:00:00+00:00', 'ais', 1, '2026-08-01T10:00:00+00:00')"
+            )
+        conn.close()
+
+    @staticmethod
+    def _assert_protected(storage: AgentStorage) -> None:
+        trigger_sql = storage._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger'"
+            " AND name='weighings_local_no_update'"
+        ).fetchone()[0]
+        assert "NEW.ais_ref IS OLD.ais_ref" in trigger_sql
+        with pytest.raises(sqlite3.IntegrityError), storage._conn:
+            storage._conn.execute(
+                "UPDATE weighings_local SET ais_ref = 'WEI000000001'"
+                " WHERE uuid = '11111111-1111-1111-1111-111111111111'"
+            )
+
+    def test_old_trigger_replaced(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "agent.sqlite3"
+        self._old_trigger_db(db_path)
+        storage = AgentStorage(db_path)
+        try:
+            self._assert_protected(storage)
+            assert storage.get_weighing(UUID("11111111-1111-1111-1111-111111111111")) is not None
+        finally:
+            storage.close()
+
+    def test_crash_between_alter_and_drop_is_healed(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "agent.sqlite3"
+        self._old_trigger_db(db_path, with_column=True)
+        storage = AgentStorage(db_path)
+        try:
+            self._assert_protected(storage)
+        finally:
+            storage.close()

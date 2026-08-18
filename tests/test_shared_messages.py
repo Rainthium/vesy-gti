@@ -140,3 +140,48 @@ class TestCenterMessages:
 
     def test_camera_roles(self) -> None:
         assert {role.value for role in CameraRole} == {"front", "rear"}
+
+
+class TestAisRefAndTareHint:
+    """Агент 0.4.17: ais_ref в команде и записи, подсказка тары в команде —
+    поля необязательные, старые сообщения без них разбираются как раньше."""
+
+    def test_defaults_when_absent(self) -> None:
+        from uuid import uuid4
+
+        from shared.messages import WeighingRecord, WeighRequest, parse_center_message
+
+        request = parse_center_message(
+            WeighRequest(request_id=uuid4(), operation=Operation.WEIGHING).model_dump_json()
+        )
+        assert isinstance(request, WeighRequest)
+        assert request.ais_ref is None and request.tare is None and request.tare_resolved is False
+        record = WeighingRecord.model_validate(
+            {"uuid": str(uuid4()), "operation": "weighing", "code": "OK", "source": "ais"}
+        )
+        assert record.ais_ref is None
+
+    def test_roundtrip_with_hint(self) -> None:
+        from datetime import UTC, datetime
+        from uuid import uuid4
+
+        from shared.messages import TareRecord, WeighRequest, parse_center_message
+
+        hint = TareRecord(
+            vehicle_number="01KG777AAA",
+            trailer_number=None,
+            tare_value=15300.0,
+            tared_at=datetime(2026, 6, 12, 4, 21, tzinfo=UTC),
+            weighing_uuid=uuid4(),
+        )
+        request = WeighRequest(
+            request_id=uuid4(),
+            operation=Operation.WEIGHING,
+            ais_ref="WEI000094176",
+            tare=hint,
+            tare_resolved=True,
+        )
+        parsed = parse_center_message(request.model_dump_json())
+        assert isinstance(parsed, WeighRequest)
+        assert parsed.ais_ref == "WEI000094176"
+        assert parsed.tare_resolved is True and parsed.tare == hint

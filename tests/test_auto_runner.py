@@ -681,3 +681,64 @@ def test_blank_numbers_become_none(env: RunnerEnv, blank: str) -> None:
     assert record.vehicle_number is None
     assert record.trailer_number is None
     assert record.netto is None  # без номера нетто не считается
+
+
+# --- агент 0.4.17: тара из команды центра и номер документа АИС в записи ---
+
+
+def test_tare_from_center_overrides_replica(env: RunnerEnv) -> None:
+    """Центр прислал действующую тару в команде (tare_resolved) — она подставляется,
+    даже если реплика на весовом ПК ничего не знает (реплика отстала)."""
+    env.drive_to_ready()
+    hint = TareRecord(
+        vehicle_number=VEHICLE,
+        trailer_number=TRAILER,
+        tare_value=TARE_KG,
+        tared_at=datetime.now(UTC) - timedelta(days=3),
+        weighing_uuid=uuid4(),
+    )
+    record = run_handle(
+        env, make_request(trailer_number=TRAILER, tare=hint, tare_resolved=True)
+    ).record
+    assert record.code is ErrorCode.OK
+    assert record.tare_value == TARE_KG
+    assert record.tare_weighing_uuid == hint.weighing_uuid
+    assert record.netto == GROSS_KG - TARE_KG
+
+
+def test_center_says_no_tare_wins_over_replica(env: RunnerEnv) -> None:
+    """Центр искал и не нашёл (tare_resolved без tare) — реплика не опрашивается,
+    даже если в ней лежит устаревший снимок с действующей тарой."""
+    put_tare(env.storage, trailer_number=TRAILER)
+    env.drive_to_ready()
+    record = run_handle(
+        env, make_request(trailer_number=TRAILER, tare=None, tare_resolved=True)
+    ).record
+    assert record.tare_value is None and record.netto is None
+
+
+def test_without_hint_replica_is_used(env: RunnerEnv) -> None:
+    """Старый центр без подсказки — тара по реплике, как раньше."""
+    tare = put_tare(env.storage, trailer_number=TRAILER)
+    env.drive_to_ready()
+    record = run_handle(env, make_request(trailer_number=TRAILER)).record
+    assert record.tare_weighing_uuid == tare.weighing_uuid
+
+
+def test_ais_ref_travels_with_record(env: RunnerEnv) -> None:
+    """Номер документа АИС из команды v2 сохраняется в записи и уходит с ней
+    (weigh_result и досылка offline_sync)."""
+    env.drive_to_ready()
+    result = run_handle(env, make_request(ais_ref="WEI000094176"))
+    assert result.record.ais_ref == "WEI000094176"
+    stored = stored_record(env, result.record)
+    assert stored is not None and stored.ais_ref == "WEI000094176"
+    pending = env.storage.pending_records()
+    assert [r.ais_ref for r in pending] == ["WEI000094176"]
+
+
+def test_refusal_echoes_ais_ref(env: RunnerEnv) -> None:
+    """Отказ (нет машины) тоже несёт номер — АИС свяжет ответ со своей командой."""
+    result = run_handle(env, make_request(ais_ref="WEI000094177"))
+    assert result.record.code is ErrorCode.ERR_VEHICLE_TIMEOUT
+    assert result.record.ais_ref == "WEI000094177"

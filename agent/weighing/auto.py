@@ -224,11 +224,17 @@ class AutoOperationRunner:
         vehicle, trailer = self._normalized_numbers(request)
 
         # правило №4 (ред. 09.08.2026): нетто только из тарирований системы,
-        # тара ≤ 3 месяцев и только совпавшей СЦЕПКИ голова+прицеп
+        # тара ≤ 3 месяцев и только совпавшей СЦЕПКИ голова+прицеп.
+        # Центр 17.08.2026 присылает действующую тару по своему (авторитетному)
+        # реестру в самой команде — тогда реплика, которая могла отстать, не
+        # опрашивается; без такой команды (старый центр) — реплика, как раньше
         tare = None
         netto = None
         if request.operation is Operation.WEIGHING and vehicle is not None:
-            tare = self._storage.find_active_tare(vehicle, weighed_at, trailer)
+            if request.tare_resolved:
+                tare = request.tare
+            else:
+                tare = self._storage.find_active_tare(vehicle, weighed_at, trailer)
             if tare is not None:
                 netto = weight_kg - tare.tare_value
 
@@ -250,6 +256,10 @@ class AutoOperationRunner:
             operator=(request.operator or "").strip() or None,
             message=None,
             photos=[photo_meta(p) for p in photos],
+            # номер документа АИС (контракт v2) едет с записью любым путём —
+            # weigh_result или offline_sync после разрыва: центр закрепит его
+            # за записью в одной транзакции (идемпотентность команд АИС)
+            ais_ref=request.ais_ref,
         )
         # локальная запись до отправки результата: обрыв связи не теряет
         # операцию, доставка гарантируется досылкой (см. докстринг модуля)
@@ -273,6 +283,7 @@ class AutoOperationRunner:
             trailer_number=trailer,
             source=WeighingSource.AIS,
             message=message,
+            ais_ref=request.ais_ref,
         )
 
     @staticmethod
@@ -294,5 +305,6 @@ class AutoOperationRunner:
                 trailer_number=trailer,
                 source=WeighingSource.AIS,
                 message=message,
+                ais_ref=request.ais_ref,
             ),
         )

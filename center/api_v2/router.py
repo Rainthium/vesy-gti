@@ -144,14 +144,27 @@ def create_api_v2_router(
     ) -> dict[str, Any]:
         """Выполнить команду на весах и собрать тело ответа (без repeated)."""
         request_id = uuid4()
+        # действующая тара по авторитетному реестру центра — в команду агенту
+        # (агент 0.4.17 применяет её вместо своей реплики; старые агенты поле
+        # не знают и подставляют по реплике)
+        tare_hint = await asyncio.to_thread(
+            _db,
+            lambda s: repo.resolve_tare_hint(
+                s, command.operation, command.vehicle, command.trailer
+            ),
+        )
         weigh_request = WeighRequest(
             request_id=request_id,
             operation=command.operation,
             vehicle_number=command.vehicle,
             trailer_number=command.trailer,
             operator=command.operator,
+            ais_ref=command.ais_ref,
+            tare=tare_hint.tare,
+            tare_resolved=tare_hint.resolved,
         )
-        # номер документа АИС уедет в транзакцию сохранения записи (WS-сервер)
+        # номер документа АИС уедет в транзакцию сохранения записи (WS-сервер):
+        # агент 0.4.17 вернёт его в самой записи, старым агентам его помнит хаб
         hub.remember_ais_ref(request_id, command.ais_ref)
         audit_details: dict[str, Any] = {
             "request": command.model_dump(mode="json"),

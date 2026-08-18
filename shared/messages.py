@@ -119,6 +119,11 @@ class WeighingRecord(BaseModel):
     # метаданные снимков: едут с записью и в weigh_result, и в offline_sync;
     # сами файлы агент загружает отдельно по HTTP (см. decisions 08.08.2026)
     photos: list[PhotoMeta] = Field(default_factory=list)
+    # номер документа АИС «СВХ» (WEI…/TAR…) из команды v2 (агент 0.4.17): едет
+    # с записью любым путём — weigh_result, offline_sync после разрыва, после
+    # рестарта центра, — центр закрепляет его за записью одной транзакцией
+    # (идемпотентность контракта v2). У офлайн-операций и команд v1 — None
+    ais_ref: str | None = None
 
 
 class TareRecord(BaseModel):
@@ -225,6 +230,16 @@ class WeighRequest(BaseModel):
     # в запись — печатается на весовой карточке с обеих сторон
     operator: str | None = None
     timeout_s: float | None = None  # тайм-аут всей операции; None — из конфига агента
+    # номер документа АИС (контракт v2): агент 0.4.17 сохраняет его в записи и
+    # возвращает в weigh_result/offline_sync; старые агенты поле не знают —
+    # центр тогда связывает номер по памяти хаба (request_id)
+    ais_ref: str | None = None
+    # действующая тара сцепки по авторитетному реестру центра (агент 0.4.17):
+    # ``tare_resolved`` = центр искал тару, результат в ``tare`` (может быть
+    # None — «действующей тары нет»); агент тогда не ходит в свою реплику,
+    # которая могла отстать. Старые агенты подставляют по реплике, как раньше
+    tare: TareRecord | None = None
+    tare_resolved: bool = False
 
 
 class UpdateCommand(BaseModel):

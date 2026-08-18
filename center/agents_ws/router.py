@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from starlette.websockets import WebSocketDisconnect
 
 from center.agents_ws.hub import AgentHub, AgentLink
+from center.api_v2.schemas import AIS_REF_RE
 from center.db import repo
 from center.db.models import AgentStatus
 from shared.messages import (
@@ -60,6 +61,24 @@ class _WebSocketLink:
 
     async def send_text(self, data: str) -> None:
         await self._websocket.send_text(data)
+
+
+def _trusted_ais_ref(from_record: str | None, remembered: str | None) -> str | None:
+    """Номер документа АИС для связки: из записи агента (0.4.17), иначе из памяти хаба.
+
+    Номер из записи — эхо нашей же команды, но приходит извне: проверяем формат
+    (WEI/TAR + 9 цифр), расхождение с памятью хаба — в лог.
+    """
+    if from_record and not AIS_REF_RE.match(from_record):
+        logger.warning("номер документа АИС в записи агента не по формату: %r", from_record)
+        from_record = None
+    if from_record and remembered and from_record != remembered:
+        logger.warning(
+            "номер документа АИС в записи (%s) не совпал с памятью команды (%s) — берём из записи",
+            from_record,
+            remembered,
+        )
+    return from_record or remembered
 
 
 def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIRouter:
@@ -166,8 +185,11 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
 
                 elif isinstance(message, WeighResult):
                     # номер документа АИС команды v2 — в ту же транзакцию, что
-                    # и запись (идемпотентность контракта v2); у v1 его нет
-                    ais_ref = hub.take_ais_ref(message.request_id)
+                    # и запись (идемпотентность контракта v2). Агент 0.4.17
+                    # несёт его в самой записи; старые агенты — нет, тогда
+                    # берём из памяти хаба по request_id (память чистим всегда)
+                    remembered = hub.take_ais_ref(message.request_id)
+                    ais_ref = _trusted_ais_ref(message.record.ais_ref, remembered)
                     saved = await asyncio.to_thread(
                         _db,
                         lambda s, m=message, ref=ais_ref: repo.save_weighing_record(
@@ -226,9 +248,13 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                     accepted = []
                     any_taring = False
                     for record in message.records:
+                        # запись команды v2, дошедшая досылкой после разрыва
+                        # (агент 0.4.17), несёт номер документа АИС сама
                         await asyncio.to_thread(
                             _db,
-                            lambda s, r=record: repo.save_weighing_record(s, scale_id, r, r.photos),
+                            lambda s, r=record: repo.save_weighing_record(
+                                s, scale_id, r, r.photos, ais_ref=_trusted_ais_ref(r.ais_ref, None)
+                            ),
                         )
                         # ack и за новые, и за повторные записи: агент должен
                         # пометить их synced в любом случае (идемпотентность)

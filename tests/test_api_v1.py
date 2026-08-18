@@ -956,3 +956,25 @@ class TestAisClient:
         )
         assert result.returncode == 0
         assert "--vehicle" in result.stdout
+
+
+class TestTareHintToAgent:
+    """17.08.2026: v1 тоже передаёт агенту действующую тару по реестру центра
+    (агент 0.4.17 применяет её вместо реплики; старые агенты поле игнорируют)."""
+
+    def test_weighing_carries_resolved_tare(self, api_env: ApiEnv) -> None:
+        taring = _seed_taring(api_env)
+        link = ScriptedAgentLink(api_env.hub, api_env.scale_id, _make_record())
+        api_env.hub.attach(api_env.scale_id, link)
+        _post(api_env, vehicle_number="01KG777AAA")
+        sent = link.requests[0]
+        assert sent.tare_resolved is True
+        assert sent.tare is not None and sent.tare.weighing_uuid == taring.uuid
+        assert sent.ais_ref is None  # у v1 номера документа АИС нет
+
+    def test_taring_and_no_vehicle_have_no_hint(self, api_env: ApiEnv) -> None:
+        link = ScriptedAgentLink(api_env.hub, api_env.scale_id, _make_record())
+        api_env.hub.attach(api_env.scale_id, link)
+        _post(api_env, operation="taring", vehicle_number="01KG777AAA")
+        _post(api_env)  # без номера ТС
+        assert [r.tare_resolved for r in link.requests] == [False, False]

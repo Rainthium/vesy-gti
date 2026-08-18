@@ -517,6 +517,27 @@ class TestCommand:
         assert rows[-1]["record_uuid"] == doc["id"]
         assert rows[-1]["request"]["ais_ref"] == "WEI000094176"
 
+    def test_command_carries_ais_ref_and_tare_hint(self, api_env: ApiEnv) -> None:
+        """Агенту уходят номер документа АИС и действующая тара по реестру центра
+        (tare_resolved); без действующей тары — resolved с tare=None; тарированию
+        подсказка не нужна."""
+        taring = _seed_taring(api_env)
+        link = _attach_agent(api_env, _make_record())
+        _post(api_env)
+        sent = link.requests[0]
+        assert sent.ais_ref == "WEI000094176"
+        assert sent.tare_resolved is True
+        assert sent.tare is not None
+        assert sent.tare.weighing_uuid == taring.uuid
+        assert sent.tare.tare_value == 15300.0
+        assert sent.tare.trailer_number == "01KG500AB"
+
+        _post(api_env, ais_ref="WEI000094177", trailer_number="01KG999ZZ")  # другая сцепка
+        assert link.requests[1].tare_resolved is True and link.requests[1].tare is None
+
+        _post(api_env, ais_ref="TAR000012207", operation="taring")
+        assert link.requests[2].tare_resolved is False and link.requests[2].tare is None
+
     def test_photo_available_when_file_delivered(self, api_env: ApiEnv) -> None:
         photos = [PhotoMeta(role=CameraRole.FRONT, filename="f.jpg", sha256=SHA_A, size_bytes=1)]
         _attach_agent(api_env, _make_record(), photos=photos)

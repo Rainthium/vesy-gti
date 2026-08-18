@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS weighings_local (
     operator TEXT,
     message TEXT,
     synced INTEGER NOT NULL DEFAULT 0 CHECK (synced IN (0, 1)),
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    ais_ref TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_weighings_local_pending
@@ -137,6 +138,7 @@ CREATE TRIGGER IF NOT EXISTS weighings_local_no_update
         AND NEW.netto IS OLD.netto AND NEW.source = OLD.source
         AND NEW.operator IS OLD.operator AND NEW.message IS OLD.message
         AND NEW.created_at = OLD.created_at
+        AND NEW.ais_ref IS OLD.ais_ref
         AND (NEW.synced = OLD.synced OR (OLD.synced = 0 AND NEW.synced = 1))
     )
 BEGIN
@@ -176,6 +178,10 @@ _DROP_PHOTO_TRIGGER = "DROP TRIGGER IF EXISTS weighing_photos_local_no_update"
 _DROP_PHOTO_INDEX = "DROP INDEX IF EXISTS idx_photos_local_upload"
 _PHOTO_TRIGGER_MARK = "file_removed"  # признак нового тела триггера
 _PHOTO_INDEX_MARK = "attempts"  # признак нового состава индекса
+# запись 0.4.17: колонка ais_ref (номер документа АИС, контракт v2) — тоже под
+# защитой триггера неизменяемости; старый триггер сносим и пересоздаём
+_DROP_WEIGHING_TRIGGER = "DROP TRIGGER IF EXISTS weighings_local_no_update"
+_WEIGHING_TRIGGER_MARK = "ais_ref"
 
 # Колонки очереди/ретеншна, добавляемые к старой таблице фото
 _PHOTO_COLUMNS = {
@@ -272,15 +278,34 @@ class AgentStorage:
                         self._conn.execute(
                             f"ALTER TABLE weighing_photos_local ADD COLUMN {column} {definition}"
                         )
-                self._drop_if_outdated(
-                    "trigger",
-                    "weighing_photos_local_no_update",
-                    _PHOTO_TRIGGER_MARK,
-                    _DROP_PHOTO_TRIGGER,
-                )
-                self._drop_if_outdated(
-                    "index", "idx_photos_local_upload", _PHOTO_INDEX_MARK, _DROP_PHOTO_INDEX
-                )
+            # журнал старой схемы (до 0.4.17): колонка номера документа АИС —
+            # доказательные поля не трогаем, старые записи остаются без номера
+            weighing_columns = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(weighings_local)").fetchall()
+            }
+            if weighing_columns and "ais_ref" not in weighing_columns:
+                self._conn.execute("ALTER TABLE weighings_local ADD COLUMN ais_ref TEXT")
+            # устаревшие тела триггеров/индексов сносим БЕЗУСЛОВНО (сам метод —
+            # no-op, если объект актуален или его нет): так самолечение не зависит
+            # от чужой миграции, а падение службы между ALTER TABLE и DROP
+            # TRIGGER не оставит старый триггер навсегда — при следующем старте
+            # его пересоздаст _SCHEMA
+            self._drop_if_outdated(
+                "trigger",
+                "weighings_local_no_update",
+                _WEIGHING_TRIGGER_MARK,
+                _DROP_WEIGHING_TRIGGER,
+            )
+            self._drop_if_outdated(
+                "trigger",
+                "weighing_photos_local_no_update",
+                _PHOTO_TRIGGER_MARK,
+                _DROP_PHOTO_TRIGGER,
+            )
+            self._drop_if_outdated(
+                "index", "idx_photos_local_upload", _PHOTO_INDEX_MARK, _DROP_PHOTO_INDEX
+            )
             self._conn.executescript(_SCHEMA)
 
     def _drop_if_outdated(self, kind: str, name: str, mark: str, drop_sql: str) -> None:
@@ -314,8 +339,8 @@ class AgentStorage:
                     uuid, operation, code, massa, unit, stable, weighed_at,
                     vehicle_number, trailer_number, tare_value,
                     tare_weighing_uuid, netto, source, operator, message,
-                    synced, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                    synced, created_at, ais_ref
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                 """,
                 (
                     str(record.uuid),
@@ -334,6 +359,7 @@ class AgentStorage:
                     record.operator,
                     record.message,
                     datetime.now(UTC).isoformat(),
+                    record.ais_ref,
                 ),
             )
             self._conn.executemany(
@@ -827,4 +853,5 @@ class AgentStorage:
             source=WeighingSource(row["source"]),
             operator=row["operator"],
             message=row["message"],
+            ais_ref=row["ais_ref"],
         )

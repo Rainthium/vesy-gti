@@ -6,6 +6,7 @@
 
 import hashlib
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import delete, func, or_, select
@@ -525,6 +526,29 @@ def load_scale_settings(session: Session, scale_id: int) -> ScaleSettingsPayload
         baudrate=baudrate,
         verification=verification,
     )
+
+
+@dataclass(frozen=True)
+class TareHint:
+    """Подсказка агенту: искал ли центр тару и что нашёл (WeighRequest.tare*)."""
+
+    tare: TareRecord | None
+    resolved: bool
+
+
+def resolve_tare_hint(
+    session: Session, operation: Operation, vehicle_number: str | None, trailer_number: str | None
+) -> TareHint:
+    """Действующая тара сцепки для команды агенту (17.08.2026).
+
+    Реестр центра авторитетен, реплика на весовом ПК могла отстать: агент
+    0.4.17 при ``resolved`` берёт тару из команды (в том числе «нет тары»),
+    старые агенты поле не знают и подставляют по реплике, как раньше.
+    Тарированию тара не нужна — ``resolved`` False.
+    """
+    if operation is not Operation.WEIGHING or not vehicle_number:
+        return TareHint(tare=None, resolved=False)
+    return TareHint(tare=find_active_tare(session, vehicle_number, trailer_number), resolved=True)
 
 
 def find_active_tare(
