@@ -144,6 +144,14 @@ class TestAccess:
         )
         assert env.client.post(f"/panel/releases/agents/{env.scale_id}/update").status_code == 403
 
+    def test_header_shows_display_name_not_login(self, env: ReleasesEnv) -> None:
+        """Шапка — как на остальных экранах: ФИО пользователя, а не логин
+        (первая версия подставляла логин из проверки прав — заметил Игорь)."""
+        _login(env)
+        page = env.client.get("/panel/releases").text
+        assert "Айгуль Диспетчер" in page
+        assert f'<div class="user-name">{PANEL_LOGIN}</div>' not in page
+
     def test_dispatcher_has_no_tab(self, env: ReleasesEnv) -> None:
         _login(env, admin=False)
         page = env.client.get("/panel/").text

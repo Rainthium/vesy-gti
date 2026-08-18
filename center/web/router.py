@@ -1452,10 +1452,11 @@ def create_panel_router(
         return RedirectResponse(f"/panel/releases?note={quote(note)}", status_code=303)
 
     @router.get("/releases", response_class=HTMLResponse)
-    async def releases_page(request: Request, admin: PanelAdmin) -> HTMLResponse:
+    async def releases_page(request: Request, user: PanelUser, admin: PanelAdmin) -> HTMLResponse:
         """Экран «Релизы агентов» (макет center-releases): каталог версий с
         каналами и ход раскатки по объектам. Только админ — здесь
-        перезапускаются службы всех весов."""
+        перезапускаются службы всех весов. ``user`` — отображаемое имя для
+        шапки (как на остальных экранах), ``admin`` — только проверка прав."""
         if releases_dir is None:
             raise HTTPException(status_code=404, detail="каталог релизов не настроен")
         connected = set(hub.connected_scale_ids())
@@ -1475,7 +1476,7 @@ def create_panel_router(
         return render(
             "releases.html",
             request,
-            user=admin,
+            user=user,
             catalog=catalog,
             targets=targets,
             agents=agents,
