@@ -1050,6 +1050,22 @@ form.report-filters { flex-direction: column; align-items: stretch; gap: 10px; }
 .dyn-toggle { font-size: 13px; }
 .dyn-toggle .btn-row { margin: 0; }
 .dynamics-table td, .dynamics-table th { padding-top: 7px; padding-bottom: 7px; }
+/* таблица по отрезкам под графиками свёрнута по умолчанию (просьба Игоря 18.08.2026) */
+.dyn-details { border-top: 1px solid var(--surface-2); }
+.dyn-details > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 12px 20px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--primary);
+  user-select: none;
+}
+.dyn-details > summary::-webkit-details-marker { display: none; }
+.dyn-details > summary::before { content: "▸"; display: inline-block; width: 16px; color: var(--faint); }
+.dyn-details[open] > summary::before { content: "▾"; }
+.dyn-details > summary:hover { color: var(--primary-dark); }
+.dyn-details > summary small { font-weight: 500; color: var(--muted); }
 
 table.report-table td.cell-site { font-weight: 700; }
 table.report-table td.cell-strong { font-weight: 700; }

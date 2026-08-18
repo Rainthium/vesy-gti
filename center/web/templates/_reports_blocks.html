@@ -129,7 +129,9 @@
 </div>
 {% endmacro %}
 
-{% macro dynamics_block(report, charts, step_label, query) %}
+{% macro dynamics_block(report, charts, step_label, query, table_open=False) %}
+{# table_open — таблица по отрезкам раскрыта сразу (печатная версия:
+   свёрнутый <details> на бумагу не попадает); на экране по умолчанию свёрнута #}
 <section class="table-card dynamics" id="dinamika">
   <div class="card-title rollout-title">
     <span>Динамика <small>{{ step_label }}</small></span>
@@ -147,22 +149,26 @@
     <div class="chart-box"><div class="chart-title">Взвешиваний</div>{{ charts.dynamics_weighings | safe }}</div>
     <div class="chart-box"><div class="chart-title">Нетто, т</div>{{ charts.dynamics_netto | safe }}</div>
   </div>
-  <div class="journal-scroll">
-  <table class="journal report-table dynamics-table">
-    <thead><tr><th>Отрезок</th><th class="num">Взвешиваний</th><th class="num">Тарирований</th><th class="num">Офлайн</th><th class="num">Нетто, т</th></tr></thead>
-    <tbody>
-    {% for point in report.dynamics.points %}
-    <tr>
-      <td class="cell-muted">{{ bucket_title(point.bucket, report.dynamics.step) }}</td>
-      <td class="num">{{ point.totals.weighings | fmt_kg }}</td>
-      <td class="num">{{ point.totals.tarings | fmt_kg }}</td>
-      <td class="num">{{ point.totals.offline | fmt_kg }}</td>
-      <td class="num">{{ point.totals.netto_kg | fmt_t }}</td>
-    </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
+  <details class="dyn-details" {{ 'open' if table_open else '' }}>
+    {% set n = report.dynamics.points | length %}
+    <summary>Таблица {{ step_label }} <small>({{ n }} {{ n | plural_ru('отрезок', 'отрезка', 'отрезков') }})</small></summary>
+    <div class="journal-scroll">
+    <table class="journal report-table dynamics-table">
+      <thead><tr><th>Отрезок</th><th class="num">Взвешиваний</th><th class="num">Тарирований</th><th class="num">Офлайн</th><th class="num">Нетто, т</th></tr></thead>
+      <tbody>
+      {% for point in report.dynamics.points %}
+      <tr>
+        <td class="cell-muted">{{ bucket_title(point.bucket, report.dynamics.step) }}</td>
+        <td class="num">{{ point.totals.weighings | fmt_kg }}</td>
+        <td class="num">{{ point.totals.tarings | fmt_kg }}</td>
+        <td class="num">{{ point.totals.offline | fmt_kg }}</td>
+        <td class="num">{{ point.totals.netto_kg | fmt_t }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </details>
 </section>
 {% endmacro %}
 

@@ -180,6 +180,7 @@ def create_panel_router(
     templates.env.filters["fmt_hours"] = report_view.fmt_hours
     templates.env.filters["fmt_delta"] = report_view.fmt_delta
     templates.env.filters["fmt_pct_change"] = report_view.fmt_pct_change
+    templates.env.filters["plural_ru"] = _plural_ru
     templates.env.globals["expires"] = queries.tare_expires_at
     # метка старта процесса — сброс браузерного кэша статики при деплое
     templates.env.globals["static_v"] = str(int(datetime.now(UTC).timestamp()))

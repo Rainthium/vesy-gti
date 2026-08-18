@@ -160,6 +160,16 @@ class TestReportPage:
         today = date.today().strftime("%d.%m.%Y")  # будущее обрезано до сегодня
         assert today in response.text and "2099" not in response.text.split("<main")[1]
 
+    def test_dynamics_table_collapsed_on_screen_open_in_print(self, env: ReportsEnv) -> None:
+        """Таблица по отрезкам под графиками свёрнута (просьба Игоря 18.08.2026);
+        в печатной версии раскрыта — свёрнутый <details> на бумагу не попадает."""
+        _login(env)
+        page = env.client.get(f"/panel/reports?{PERIOD_QS}").text
+        assert '<details class="dyn-details" >' in page
+        assert "Таблица по дням" in page and "10 отрезков" in page
+        printed = env.client.get(f"/panel/reports/print?{PERIOD_QS}").text
+        assert '<details class="dyn-details" open>' in printed
+
     def test_split_toggle(self, env: ReportsEnv) -> None:
         _login(env)
         page = env.client.get(f"/panel/reports?{PERIOD_QS}").text
