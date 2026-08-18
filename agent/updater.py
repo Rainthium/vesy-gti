@@ -163,17 +163,30 @@ del "%BASE%\update.zip" 2>nul
 """
 )
 
+# Подмена папки — с повторами: переименование app срывается, пока кто-то
+# держит в ней файл (боевой урок Джалал-Абада 18.08.2026: открытая в
+# Проводнике папка агента при AnyDesk-сессии, антивирус, дочитывающий
+# распакованные файлы, или процесс, не успевший выйти за 5 с). Шесть попыток
+# по 5 с — полминуты; только потом откат к прежней версии.
 UPDATE_BAT_SWAP = r"""echo [%date% %time%] остановка службы __SERVICE__ >> "%BASE%\logs\update.log"
 "%BASE%\nssm.exe" stop __SERVICE__ >> "%BASE%\logs\update.log" 2>&1
 ping -n 6 127.0.0.1 >nul
 rmdir /s /q "%BASE%\app_old" 2>nul
+set SWAP_TRIES=0
+:swap_retry
 move "%BASE%\app" "%BASE%\app_old" >> "%BASE%\logs\update.log" 2>&1
-if errorlevel 1 (
+if not errorlevel 1 goto swapped
+set /a SWAP_TRIES+=1
+if %SWAP_TRIES% geq 6 (
     echo [%date% %time%] ОШИБКА: app занята, обновление прервано >> "%BASE%\logs\update.log"
     "%BASE%\nssm.exe" start __SERVICE__ >> "%BASE%\logs\update.log" 2>&1
     schtasks /Delete /TN __TASK__ /F >nul 2>&1
     exit /b 1
 )
+echo [%date% %time%] app занята, повтор %SWAP_TRIES% из 6 через 5 с >> "%BASE%\logs\update.log"
+ping -n 6 127.0.0.1 >nul
+goto swap_retry
+:swapped
 move "%BASE%\app_new" "%BASE%\app" >> "%BASE%\logs\update.log" 2>&1
 if not exist "%BASE%\app\ves-agent.exe" (
     echo [%date% %time%] ОШИБКА: новая версия не встала, откат >> "%BASE%\logs\update.log"

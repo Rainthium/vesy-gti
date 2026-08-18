@@ -542,7 +542,9 @@ class TestUnpackFallback:
         # успех распаковки решают коды возврата инструментов (ревью: tar,
         # упавший на середине, мог успеть положить exe — считать по exist
         # нельзя); плюс контрольная проверка exe перед подменой
-        assert with_unpack.count("if errorlevel 1 (") >= 3, (
+        # (tar и PowerShell — по одному блоку; подмена папки с 18.08.2026 —
+        # цикл повторов `if not errorlevel 1 goto swapped`)
+        assert with_unpack.count("if errorlevel 1 (") >= 2, (
             "нет проверок кодов возврата tar/PowerShell"
         )
         assert 'if not exist "%BASE%\\app_new\\ves-agent.exe"' in with_unpack
@@ -553,6 +555,11 @@ class TestUnpackFallback:
         for text in (with_unpack, without):
             assert 'nssm.exe" stop ves-agent-2' in text
             assert "schtasks /Delete /TN ves-agent-2-update /F" in text
+            # подмена папки с повторами (урок 18.08.2026: открытый Проводник
+            # держал app — одна попытка откатывала на старую версию)
+            assert ":swap_retry" in text and "goto swap_retry" in text
+            assert "if %SWAP_TRIES% geq 6 (" in text
+            assert text.index(":swap_retry") < text.index('move "%BASE%\\app_new" "%BASE%\\app"')
 
     def test_unpack_block_has_no_parens_in_if_echo(self) -> None:
         """Внутри блоков if (...) в bat нельзя использовать скобки в echo —
