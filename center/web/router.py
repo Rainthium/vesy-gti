@@ -425,6 +425,11 @@ def create_panel_router(
         обновляются тем же опросом, что и сетка объектов)."""
         scales = await asyncio.to_thread(_db, lambda s: queries.dashboard_scales(s, scope))
         today = await asyncio.to_thread(_db, lambda s: queries.weighings_today(s, scope))
+        # объёмы «сегодня / 7 дней / месяц» с Δ (просьба Игоря 18.08.2026):
+        # один запрос по журналу, окна — бишкекские сутки, как в «Отчётах»
+        volumes = await asyncio.to_thread(
+            _db, lambda s: reports.volume_summary(s, scope, today=datetime.now(BISHKEK).date())
+        )
         update_targets = await asyncio.to_thread(_db, lambda s: _update_targets(s, scales))
         equipment = _equipment_map(scales)
         alerts = monitor.active_alerts(scope) if monitor is not None else []
@@ -462,6 +467,7 @@ def create_panel_router(
             "all_good": not alerts
             and all(item.agent is None or online_map.get(item.scale.id) for item in scales),
             "update_targets": update_targets,
+            "volumes": volumes,
         }
 
     @router.get("/", response_class=HTMLResponse)

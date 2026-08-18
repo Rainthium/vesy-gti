@@ -999,6 +999,18 @@ table.rollout .narrow-select { height: 30px; padding: 0 8px; min-width: 90px; }
 table.rollout .status-detail { max-width: 360px; white-space: normal; }
 table.rollout .channel-form { margin-left: 0; }
 
+/* объёмы на дашборде: карточки-ссылки в отчёт за период (18.08.2026) */
+.volume-row .kpi-card { text-decoration: none; color: inherit; display: block; }
+.volume-card:hover { border-color: var(--green-border); box-shadow: var(--shadow-pop); }
+.volume-card .kpi-k-sub { font-weight: 500; color: var(--faint); }
+.volume-card .kpi-v { font-size: 26px; }
+.volume-card .kpi-unit { font-size: 13px; color: var(--muted); font-weight: 600; }
+.volume-card .kpi-sub b { color: var(--text); font-weight: 700; }
+.volume-card .kpi-sub .delta-pill { padding: 1px 7px; font-size: 11px; margin-right: 4px; }
+.volume-link { background: var(--green-soft); border-color: var(--green-border); }
+.volume-link .kpi-k { color: var(--primary-dark); }
+.kpi-v--text { font-size: 20px; color: var(--primary); }
+
 /* --- экран «Отчёты» (макет center-reports, этап 4) --- */
 .page-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 .page-actions .btn-outline { height: 40px; }

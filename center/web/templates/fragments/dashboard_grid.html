@@ -11,6 +11,30 @@
     {% endfor %}
   </div>
 
+  {# объёмы за периоды — сводка из «Отчётов» на первом экране (просьба Игоря
+     18.08.2026): карточки ведут в отчёт за тот же период #}
+  {% from "_reports_blocks.html" import delta_pill %}
+  {% set volume_presets = {'today': 'today', 'week': '7d', 'month': 'month'} %}
+  <div class="kpi-row volume-row">
+    {% for v in volumes %}
+    <a class="kpi-card volume-card" href="/panel/reports?preset={{ volume_presets[v.key] }}" title="Открыть отчёт за период">
+      <div class="kpi-k">{{ v.label }} <span class="kpi-k-sub">· {{ v.period.label }}</span></div>
+      <div class="kpi-v">{{ v.weighings }} <span class="kpi-unit">{{ v.weighings | plural_ru('взвешивание', 'взвешивания', 'взвешиваний') }}</span></div>
+      <div class="kpi-sub">нетто <b>{{ v.netto_kg | fmt_t }} т</b> · тарирований {{ v.tarings }} · офлайн {{ v.offline }}</div>
+      {% if v.previous %}
+      <div class="kpi-sub">{{ delta_pill(v.weighings_delta) }} к {{ v.previous.label }}: {{ v.prev_weighings }} · {{ v.prev_netto_kg | fmt_t }} т</div>
+      {% else %}
+      <div class="kpi-sub">по состоявшимся операциям с 00:00</div>
+      {% endif %}
+    </a>
+    {% endfor %}
+    <a class="kpi-card volume-card volume-link" href="/panel/reports">
+      <div class="kpi-k">Отчёты</div>
+      <div class="kpi-v kpi-v--text">Подробно →</div>
+      <div class="kpi-sub">по объектам, динамика, ручные операции, надёжность, экспорт в Excel</div>
+    </a>
+  </div>
+
   {% if alerts %}
   <div class="alerts-card">
     <div class="alerts-head">Активные алерты · {{ alerts | length }}</div>

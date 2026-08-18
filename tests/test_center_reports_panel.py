@@ -106,6 +106,29 @@ class TestAccess:
         assert 'href="/panel/reports"' in page
 
 
+class TestDashboardVolumes:
+    def test_dashboard_shows_volume_cards(self, env: ReportsEnv) -> None:
+        """Полоска объёмов на дашборде: три периода + ссылка в «Отчёты»."""
+        _login(env)
+        page = env.client.get("/panel/").text
+        assert 'class="kpi-row volume-row"' in page
+        for label in ("Сегодня", "7 дней", "Этот месяц"):
+            assert label in page
+        assert 'href="/panel/reports?preset=7d"' in page
+        assert 'href="/panel/reports?preset=month"' in page
+        assert "Подробно →" in page
+        # HTMX-фрагмент несёт ту же полоску (обновляется вместе со счётчиками)
+        fragment = env.client.get("/panel/fragments/dashboard").text
+        assert 'class="kpi-row volume-row"' in fragment
+
+    def test_dashboard_volumes_scoped(self, env: ReportsEnv) -> None:
+        _login(env)
+        _bind_to_site(env, env.seed.site_c)  # объект без операций
+        page = env.client.get("/panel/").text
+        strip = page.split('class="kpi-row volume-row"')[1].split("Активные алерты")[0]
+        assert "нетто <b>0,0 т</b>" in strip
+
+
 class TestReportPage:
     def test_page_shows_seed_numbers(self, env: ReportsEnv) -> None:
         _login(env)

@@ -1049,6 +1049,93 @@ def reliability_by_site(
     return result
 
 
+# --- объёмы для дашборда -----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class VolumeCard:
+    """Карточка объёмов на дашборде: период, счётчики и прошлый период для Δ."""
+
+    key: str  # today | week | month
+    label: str
+    period: Period
+    weighings: int
+    tarings: int
+    offline: int
+    netto_kg: float
+    previous: Period | None = None
+    prev_weighings: int | None = None
+    prev_netto_kg: float | None = None
+
+    @property
+    def weighings_delta(self) -> Delta | None:
+        if self.prev_weighings is None:
+            return None
+        return Delta(self.weighings, self.prev_weighings)
+
+
+def volume_summary(session: Session, site_id: int | None, *, today: date) -> list[VolumeCard]:
+    """Объёмы «сегодня / 7 дней / этот месяц» одним запросом (дашборд, этап 4).
+
+    Дашборд опрашивается каждые 10 с, поэтому все пять окон (три текущих
+    и два прошлых для Δ) считаются одним проходом по журналу с FILTER по
+    окну; правила те же, что у отчёта (состоявшиеся операции, момент по
+    Бишкеку, сторно парой).
+    """
+    week = Period(today - timedelta(days=6), today)
+    month = Period(today.replace(day=1), today)
+    windows: dict[str, Period] = {
+        "today": Period(today, today),
+        "week": week,
+        "prev_week": Period(today - timedelta(days=13), today - timedelta(days=7)),
+        "month": month,
+        "prev_month": previous_period(month, unit_months=1),
+    }
+    span = Period(
+        min(p.date_from for p in windows.values()), max(p.date_to for p in windows.values())
+    )
+    columns: list[Any] = []
+    for key, period in windows.items():
+        in_window = and_(moment_col >= period.start, moment_col < period.end)
+        columns.extend(
+            [
+                func.count(Weighing.id).filter(in_window, _IS_WEIGHING).label(f"{key}_w"),
+                func.count(Weighing.id).filter(in_window, _IS_TARING).label(f"{key}_t"),
+                func.count(Weighing.id).filter(in_window, _IS_OFFLINE).label(f"{key}_o"),
+                func.coalesce(func.sum(Weighing.netto).filter(in_window, _IS_WEIGHING), 0.0).label(
+                    f"{key}_n"
+                ),
+            ]
+        )
+    row = session.execute(
+        select(*columns)
+        .select_from(Weighing)
+        .join(Scale, Scale.id == Weighing.scale_id)
+        .where(*_base_filter(span, site_id))
+    ).one()
+    values = row._mapping
+
+    def card(key: str, label: str, prev_key: str | None) -> VolumeCard:
+        return VolumeCard(
+            key=key,
+            label=label,
+            period=windows[key],
+            weighings=int(values[f"{key}_w"]),
+            tarings=int(values[f"{key}_t"]),
+            offline=int(values[f"{key}_o"]),
+            netto_kg=float(values[f"{key}_n"]),
+            previous=windows[prev_key] if prev_key else None,
+            prev_weighings=int(values[f"{prev_key}_w"]) if prev_key else None,
+            prev_netto_kg=float(values[f"{prev_key}_n"]) if prev_key else None,
+        )
+
+    return [
+        card("today", "Сегодня", None),
+        card("week", "7 дней", "prev_week"),
+        card("month", "Этот месяц", "prev_month"),
+    ]
+
+
 # --- сравнение с прошлым периодом --------------------------------------------
 
 

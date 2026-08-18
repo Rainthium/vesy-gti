@@ -660,6 +660,41 @@ class TestComparisonAndReport:
         assert all(p.totals.operations == 0 for p in only_c.dynamics.points)
 
 
+class TestVolumeSummary:
+    def test_cards_one_query(self, db: sessionmaker[Session], seed: Seed) -> None:  # noqa: F811
+        """Объёмы дашборда: сегодня / 7 дней / месяц с прошлым периодом для Δ."""
+        with db() as session:
+            cards = {
+                c.key: c for c in reports.volume_summary(session, None, today=date(2026, 8, 10))
+            }
+        today, week, month = cards["today"], cards["week"], cards["month"]
+        assert today.period == reports.Period(date(2026, 8, 10), date(2026, 8, 10))
+        assert today.weighings == 1 and today.previous is None  # 10.08 23:59 по Бишкеку
+        assert week.period == reports.Period(date(2026, 8, 4), date(2026, 8, 10))
+        # A: 04, 05, 06 (офлайн), 08, 10 + B: 09 = 6; сторно-пара 04.08 не считается
+        assert (week.weighings, week.offline, week.tarings) == (6, 1, 0)
+        assert week.netto_kg == pytest.approx(14000 + 22000)
+        assert week.previous == reports.Period(date(2026, 7, 28), date(2026, 8, 3))
+        assert week.prev_weighings == 4  # A: 31.07, 02, 03 + B: 02
+        delta = week.weighings_delta
+        assert delta is not None and delta.change == pytest.approx(0.5)
+        assert month.period == reports.Period(date(2026, 8, 1), date(2026, 8, 10))
+        assert month.weighings == 9 and month.tarings == 1
+        assert month.previous == reports.Period(date(2026, 7, 1), date(2026, 7, 10))
+        assert month.prev_weighings == 0 and month.weighings_delta is not None
+        assert month.weighings_delta.change is None
+
+    def test_cards_respect_site(self, db: sessionmaker[Session], seed: Seed) -> None:  # noqa: F811
+        with db() as session:
+            cards = {
+                c.key: c
+                for c in reports.volume_summary(session, seed.site_b, today=date(2026, 8, 10))
+            }
+            empty = reports.volume_summary(session, seed.site_c, today=date(2026, 8, 10))
+        assert cards["month"].weighings == 2 and cards["week"].weighings == 1
+        assert all(c.weighings == 0 and c.netto_kg == 0 for c in empty)
+
+
 class TestRefusalHelpers:
     def test_refusal_scale_mapping(self) -> None:
         index = reports.ScaleIndex(site_of={5: 1, 7: 2}, legacy={("10.0.0.1", 2): 7})
