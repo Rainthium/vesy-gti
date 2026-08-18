@@ -20,7 +20,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 from urllib.parse import quote
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -208,11 +208,37 @@ def create_panel_router(
             location += f"?next={quote(path, safe='/')}"
         return HTTPException(status_code=303, headers={"Location": location})
 
-    def current_user(request: Request) -> str:
-        user = request.session.get("panel_user")
-        if not user:
+    def _drop_session(request: Request) -> None:
+        # единая точка «убить сессию»: чистим всё, включая флэши (токен агента)
+        request.session.clear()
+
+    async def _session_state(request: Request) -> users_admin.SessionState:
+        """Состояние учётки по БД для живой сессии — один запрос на HTTP-запрос
+        (кэш в request.state): активна ли, админ ли, объект, штамп пароля.
+
+        Сессия выбивается, если учётку отключили ИЛИ сменили пароль (штамп в
+        cookie не совпал с БД): смена пароля разлогинивает всех, кто сидел под
+        этой учёткой (вопрос Игоря 18.08.2026). Старые cookie без штампа (до
+        этой версии) тоже отправляются на вход — один раз.
+        """
+        cached = getattr(request.state, "panel_state", None)
+        if cached is not None:
+            return cast(users_admin.SessionState, cached)
+        login = request.session.get("panel_login")
+        stamp = request.session.get("panel_stamp")
+        if not login or not stamp:
+            _drop_session(request)
             raise _login_redirect(request)
-        return str(user)
+        state = await asyncio.to_thread(_db, lambda s: users_admin.session_state(s, str(login)))
+        if not state.active or state.stamp != stamp:
+            _drop_session(request)
+            raise _login_redirect(request)
+        request.state.panel_state = state
+        return state
+
+    async def current_user(request: Request) -> str:
+        await _session_state(request)
+        return str(request.session.get("panel_user") or request.session.get("panel_login"))
 
     PanelUser = Annotated[str, Depends(current_user)]
 
@@ -222,18 +248,10 @@ def create_panel_router(
         Права берём из БД на каждый запрос, как и у админа: смена
         привязки или роли применяется сразу, без перевхода. Админ видит
         все объекты; остальные — только свой, если он задан (решение
-        11.08.2026, перед тиражом на 13 объектов).
+        11.08.2026, перед тиражом на 13 объектов). Отключённая учётка и
+        сменённый пароль — на вход, а не «видно всё».
         """
-        login = request.session.get("panel_login")
-        if not login:
-            raise _login_redirect(request)
-        active, site_id = await asyncio.to_thread(
-            _db, lambda s: users_admin.visible_site_id(s, str(login))
-        )
-        if not active:
-            # учётку отключили при живой сессии — на вход, а не «видно всё»
-            raise _login_redirect(request)
-        return site_id
+        return (await _session_state(request)).site_id
 
     PanelScope = Annotated[int | None, Depends(current_scope)]
 
@@ -268,26 +286,22 @@ def create_panel_router(
         request.session["panel_user"] = user.full_name or user.login
         request.session["panel_login"] = user.login
         request.session["panel_role"] = user.role.value
+        request.session["panel_stamp"] = users_admin.session_stamp(user.pw_hash)
         logger.info("панель: вход %s (%s)", user.login, user.role.value)
         return RedirectResponse(_safe_next_path(next) or "/panel/", status_code=303)
 
     @router.post("/logout")
     def logout(request: Request) -> RedirectResponse:
-        request.session.pop("panel_user", None)
-        request.session.pop("panel_login", None)
-        request.session.pop("panel_role", None)
+        _drop_session(request)
         return RedirectResponse("/panel/login", status_code=303)
 
     async def current_admin(request: Request) -> str:
         """Логин администратора; права проверяются по БД, не по сессии —
         разжалованный или отключённый админ теряет экран сразу."""
-        login = request.session.get("panel_login")
-        if not login:
-            raise _login_redirect(request)
-        ok = await asyncio.to_thread(_db, lambda s: users_admin.is_active_admin(s, str(login)))
-        if not ok:
+        state = await _session_state(request)
+        if not state.is_admin:
             raise HTTPException(status_code=403, detail="Доступ только администраторам")
-        return str(login)
+        return str(request.session.get("panel_login"))
 
     PanelAdmin = Annotated[str, Depends(current_admin)]
 
@@ -1564,8 +1578,13 @@ def create_panel_router(
         )
         if error is None:
             logger.info("панель (%s): пароль пользователя id=%d сброшен", admin, user_id)
+            # чужие сессии этой учётки выбьет несовпадение штампа; свою (если
+            # админ сменил пароль себе) — переподписываем, чтобы не разлогинить
+            fresh = await asyncio.to_thread(_db, lambda s: users_admin.session_state(s, admin))
+            if fresh.stamp:
+                request.session["panel_stamp"] = fresh.stamp
             await _push_operators()
-            return _users_redirect("пароль изменён")
+            return _users_redirect("пароль изменён — открытые сессии этой учётки закрыты")
         return _users_redirect(error)
 
     @router.post("/users/{user_id}/toggle")

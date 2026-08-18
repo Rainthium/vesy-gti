@@ -134,6 +134,15 @@ def create_app(
         а не на главную (боевой урок 13.08.2026).
         """
         operator = request.session.get("operator")
+        if operator:
+            # сессия живёт, пока учётка активна и пароль тот же, что при входе:
+            # смена пароля/блокировка выбивает уже вошедшего (0.4.18); cookie
+            # прежних версий без логина и штампа — на вход один раз
+            login = request.session.get("operator_login")
+            stamp = request.session.get("operator_stamp")
+            if not login or not stamp or services.operator_stamp(str(login)) != stamp:
+                request.session.clear()
+                operator = None
         if not operator:
             if request.headers.get("hx-request"):
                 # HTMX-опрос (журнал/пилюли каждые 5 с) с протухшей сессией:
@@ -209,6 +218,8 @@ def create_app(
                 next=safe_next_path(next) or "",
             )
         request.session["operator"] = display_name
+        request.session["operator_login"] = login.strip()
+        request.session["operator_stamp"] = services.operator_stamp(login.strip())
         logger.info("вход оператора: %s", display_name)
         return RedirectResponse(safe_next_path(next) or "/", status_code=303)
 
@@ -495,7 +506,16 @@ def create_app(
 
     @app.websocket("/ws/state")
     async def ws_state(websocket: WebSocket) -> None:
-        if not websocket.session.get("operator"):
+        # тот же критерий, что у current_operator: активная учётка и тот же пароль
+        ws_login = websocket.session.get("operator_login")
+        ws_stamp = websocket.session.get("operator_stamp")
+        session_ok = bool(
+            websocket.session.get("operator")
+            and ws_login
+            and ws_stamp
+            and services.operator_stamp(str(ws_login)) == ws_stamp
+        )
+        if not session_ok:
             await websocket.close(code=4401)  # не вошёл — соединение не для него
             return
         await websocket.accept()

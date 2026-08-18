@@ -1242,3 +1242,35 @@ class TestOperatorsPushOnMutations:
         assert note_part in _note_from(response)
         assert push_env.link.sent == [], "рассылка ушла при неуспешной мутации"
         assert push_env.other_link.sent == []
+
+
+class TestSessionState:
+    """0.4.18: состояние сессии по БД одним запросом и штамп пароля."""
+
+    def test_stamp_follows_password_and_state_reflects_role(self, db_session: Session) -> None:
+        from center.web import users_admin
+
+        error = users_admin.create_user(
+            db_session,
+            login="s.user",
+            password="first-pass-123",
+            full_name="Сессия Тест",
+            role=UserRole.DISPATCHER,
+            site_id=None,
+        )
+        assert error is None
+        state = users_admin.session_state(db_session, "s.user")
+        assert state.active and not state.is_admin and state.stamp
+        assert len(state.stamp) == 16
+        assert state.stamp == users_admin.session_state(db_session, "s.user").stamp
+        user = db_session.execute(select(User).where(User.login == "s.user")).scalar_one()
+        assert users_admin.set_password(db_session, user.id, "second-pass-123") is None
+        changed = users_admin.session_state(db_session, "s.user")
+        assert changed.stamp is not None and changed.stamp != state.stamp
+        # штамп — производная sha256 от хеша, не сам хеш и не пароль
+        assert changed.stamp not in user.pw_hash and "second-pass" not in changed.stamp
+        # отключённая учётка — неактивна, штампа нет
+        assert users_admin.toggle_active(db_session, user.id, actor_login="root") is None
+        gone = users_admin.session_state(db_session, "s.user")
+        assert not gone.active and gone.stamp is None
+        assert users_admin.session_state(db_session, "nobody").active is False

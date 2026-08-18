@@ -243,6 +243,16 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                             message.version,
                             message.error,
                         )
+                        # отказ — событием мониторинга: видно в «Событиях» панели
+                        # и в Telegram, а не только в логе центра
+                        # (урок Джалал-Абада 18.08.2026: центр молчал, пока bat
+                        # не смог перезапустить службу)
+                        await asyncio.to_thread(
+                            _db,
+                            lambda s, m=message: repo.record_update_failure(
+                                s, scale_id, m.version, m.error or "без подробностей"
+                            ),
+                        )
 
                 elif isinstance(message, OfflineSync):
                     accepted = []

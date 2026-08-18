@@ -96,6 +96,7 @@ class FakeServices:
 
     def __init__(self) -> None:
         self.online = True  # связь с центром (правило режимов №3)
+        self.stamps: dict[str, str | None] = {OPERATOR_LOGIN: "stamp-1"}
         self.scale = ScaleState(status=ScaleStatus.OK, weight_kg=1460.0, stable=True)
         self.snapshot_ok = True
         self.pending = 0
@@ -188,6 +189,11 @@ class FakeServices:
         if (login, password) == (OPERATOR_LOGIN, OPERATOR_PASSWORD):
             return OPERATOR_NAME
         return None
+
+    def operator_stamp(self, login: str) -> str | None:
+        # штамп пароля активной учётки; тесты меняют его, имитируя смену пароля
+        # или блокировку (None)
+        return self.stamps.get(login)
 
     def reopen_port(self) -> None:
         self.reopen_called = True
@@ -1213,3 +1219,29 @@ class TestOperatorStorage:
         dump = b"".join(p.read_bytes() for p in tmp_path.glob("agent.db*"))
         assert secret.encode() not in dump
         assert b"pbkdf2$" in dump
+
+
+class TestSessionFollowsPassword:
+    """0.4.18: сессия оператора живёт, пока учётка активна и пароль тот же —
+    смена пароля (реплика из центра) или блокировка выбивают вошедшего."""
+
+    def test_password_change_logs_out(
+        self, operator_client: TestClient, services: FakeServices
+    ) -> None:
+        assert operator_client.get("/", follow_redirects=False).status_code == 200
+        services.stamps[OPERATOR_LOGIN] = "stamp-2"  # пароль сменили
+        response = operator_client.get("/", follow_redirects=False)
+        assert response.status_code == 303 and response.headers["Location"].startswith("/login")
+        # HTMX-опрос с выбитой сессией — HX-Redirect, а не форма внутри фрагмента
+        response = operator_client.get("/fragments/status", headers={"HX-Request": "true"})
+        assert response.status_code == 200 and response.headers.get("HX-Redirect") == "/login"
+        # повторный вход — с новым штампом сессия снова живёт
+        do_login(operator_client)
+        assert operator_client.get("/", follow_redirects=False).status_code == 200
+
+    def test_blocked_account_logs_out(
+        self, operator_client: TestClient, services: FakeServices
+    ) -> None:
+        services.stamps[OPERATOR_LOGIN] = None  # учётка заблокирована/удалена
+        response = operator_client.get("/equipment", follow_redirects=False)
+        assert response.status_code == 303 and "/login" in response.headers["Location"]

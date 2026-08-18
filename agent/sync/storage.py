@@ -16,6 +16,7 @@
 поток цикла взвешивания и поток синхронизации).
 """
 
+import hashlib
 import sqlite3
 import threading
 from collections.abc import Iterable
@@ -815,6 +816,21 @@ class AgentStorage:
             )
             for row in rows
         ]
+
+    def operator_stamp(self, login: str) -> str | None:
+        """Штамп текущего пароля активной учётки (производная от хеша) или None.
+
+        Сессия оператора хранит штамп на момент входа и сверяет его на каждом
+        запросе: смена пароля (в центре — реплика привозит новый хеш) или
+        блокировка учётки выбивают уже вошедшего (0.4.18).
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT pw_hash FROM local_users WHERE login = ? AND is_active = 1", (login,)
+            ).fetchone()
+        if row is None:
+            return None
+        return hashlib.sha256(str(row["pw_hash"]).encode()).hexdigest()[:16]
 
     def verify_operator(self, login: str, password: str) -> str | None:
         """Проверить пароль; вернуть отображаемое имя оператора или None.

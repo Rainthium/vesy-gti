@@ -65,6 +65,8 @@ from center.db.models import (
     AgentOperator,
     AgentStatus,
     Camera,
+    MonitoringEvent,
+    MonitoringSeverity,
     Scale,
     ScaleKind,
     Site,
@@ -94,6 +96,7 @@ from shared.messages import (
     ScaleConfigUpdate,
     ScaleSettingsPayload,
     TareRegistryUpdate,
+    UpdateStatus,
     WeighingRecord,
     WeighRequest,
     WeighResult,
@@ -1971,3 +1974,30 @@ class TestAgentsWsHeartbeatAck:
             ws.send_text(_heartbeat_json())
             # ответа нет: после барьера первым идёт tare_registry, не ack
             _hello_old_and_registry(ws)
+
+
+class TestUpdateStatusEvents:
+    def test_failed_update_becomes_monitoring_event(self, ws_env: WsEnv) -> None:
+        """Отказ автообновления (в т.ч. доклад сторожка агента 0.4.18) — событие
+        мониторинга warning: видно в «Событиях» и уходит в Telegram."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            ws.send_text(
+                UpdateStatus(
+                    agent_id="agent-1", version="0.4.18", ok=False, error="служба не перезапущена"
+                ).model_dump_json()
+            )
+            ws.send_text(
+                UpdateStatus(agent_id="agent-1", version="0.4.18", ok=True).model_dump_json()
+            )
+            _hello_and_registry(ws)
+        with ws_env.factory() as session:
+            events = (
+                session.execute(select(MonitoringEvent).order_by(MonitoringEvent.id))
+                .scalars()
+                .all()
+            )
+        assert [e.kind for e in events] == ["update_failed"]
+        assert events[0].scale_id == ws_env.scale_id
+        assert events[0].severity is MonitoringSeverity.WARNING
+        assert "до 0.4.18 не выполнено" in events[0].message
+        assert "служба не перезапущена" in events[0].message

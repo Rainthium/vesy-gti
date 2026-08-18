@@ -124,6 +124,9 @@ class CenterClient:
         self._sync_in_flight = False
         self._session_connected = False  # для сброса backoff в run()
         self._operators_reported_at = 0.0  # monotonic последнего operators_report
+        # незапрошенные сообщения центру (доклад сторожка автообновления и т.п.):
+        # кладутся в любой момент, уходят с ближайшим heartbeat живого соединения
+        self._outbox: list[str] = []
 
     @property
     def connected(self) -> bool:
@@ -198,12 +201,26 @@ class CenterClient:
                 equipment=self._equipment_status(),
             )
             await connection.send(heartbeat.model_dump_json())
+            await self._flush_outbox(connection)
             # записи, появившиеся при живом соединении (например, после
             # ручного режима) досылаются без ожидания
             # реконнекта — подталкиваем очередь вместе с heartbeat
             await self._send_pending(connection)
             if time.monotonic() - self._operators_reported_at >= OPERATORS_REPORT_INTERVAL_S:
                 await self._send_operators_report(connection)
+
+    def post_message(self, message: UpdateStatus) -> None:
+        """Положить сообщение центру в очередь исходящих (шлётся с ближайшим
+        heartbeat, при отсутствии связи — после реконнекта). Сейчас так уходит
+        доклад сторожка автообновления: bat не перезапустил службу."""
+        self._outbox.append(message.model_dump_json())
+
+    async def _flush_outbox(self, connection: websockets.ClientConnection) -> None:
+        # снимаем из очереди только ПОСЛЕ успешной отправки: обрыв между
+        # heartbeat и send не теряет одноразовый доклад — уйдёт после реконнекта
+        while self._outbox:
+            await connection.send(self._outbox[0])
+            self._outbox.pop(0)
 
     async def _receive_loop(self, connection: websockets.ClientConnection) -> None:
         async for raw in connection:

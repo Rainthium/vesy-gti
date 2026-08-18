@@ -290,6 +290,9 @@ class AgentUpdater:
         self._install_dir = install_dir
         self._lock = asyncio.Lock()
         self._watchdog_handle: asyncio.TimerHandle | None = None
+        # доклад центру вне ответа на команду (сторожок): main.py подставляет
+        # CenterClient.post_message; None — только лог (тесты, dev)
+        self.notify: Callable[[UpdateStatus], None] | None = None
 
     async def handle(self, command: UpdateCommand) -> UpdateStatus:
         """Выполнить команду обновления; вернуть отчёт для центра."""
@@ -442,17 +445,22 @@ class AgentUpdater:
         """Агент жив спустя UPDATE_WATCHDOG_S после запуска bat — не обновились.
 
         Успешное обновление за это время остановило бы службу (и этот
-        процесс вместе с ней). Раз живы — bat не справился (чаще всего
-        распаковка) и службу не тронул. bat с центром не разговаривает,
-        поэтому хотя бы пишем в свой лог: он виден со страницы «Журнал
-        агента» панели, а центр продолжает показывать прежнюю версию.
+        процесс вместе с ней). Раз живы — bat не справился (распаковка,
+        занятая папка, антивирус) и службу не тронул. bat с центром не
+        разговаривает, поэтому докладывает сторожок: в свой лог (виден со
+        страницы «Журнал агента») и центру через ``notify`` — событием в
+        «Событиях» панели и в Telegram (боевой урок Джалал-Абада 18.08.2026:
+        центр видел только «уже выполняется» и молчание).
         """
-        logger.error(
-            "автообновление до %s: спустя %d мин служба так и не была перезапущена — "
-            "обновление, судя по всему, не прошло; подробности в logs/update.log",
-            version,
-            int(UPDATE_WATCHDOG_S // 60),
+        message = (
+            f"автообновление до {version}: спустя {int(UPDATE_WATCHDOG_S // 60)} мин служба "
+            "так и не была перезапущена — обновление не прошло; подробности в logs/update.log"
         )
+        logger.error(message)
+        if self.notify is not None:
+            self.notify(
+                UpdateStatus(agent_id=self._agent_id, version=version, ok=False, error=message)
+            )
 
     @staticmethod
     def _extract_via_tools(archive: Path, base: Path) -> bool:

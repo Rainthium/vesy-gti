@@ -19,7 +19,10 @@ from center.db.models import (
     AgentOperator,
     AgentStatus,
     Camera,
+    MonitoringEvent,
+    MonitoringSeverity,
     Scale,
+    Site,
     TareRegistry,
     User,
     UserRole,
@@ -197,6 +200,30 @@ def save_weighing_record(
         session.add(WeighingEvent(weighing_id=row.id, event_type=EVENT_WEIGHING_COMPLETED))
     session.commit()
     return True
+
+
+def record_update_failure(session: Session, scale_id: int, version: str, error: str) -> None:
+    """Отказ автообновления агента → событие мониторинга (warning, без антидребезга).
+
+    Успех обновления виден по смене версии; отказ раньше жил только в логе
+    центра и agent.log — теперь он в «Событиях» и уходит в Telegram.
+    """
+    scale = session.get(Scale, scale_id)
+    site = session.get(Site, scale.site_id) if scale is not None else None
+    title = (
+        f"{site.name} · {scale.name}"
+        if site is not None and scale is not None
+        else f"весы {scale_id}"
+    )
+    session.add(
+        MonitoringEvent(
+            scale_id=scale_id,
+            kind="update_failed",
+            severity=MonitoringSeverity.WARNING,
+            message=f"{title}: автообновление агента до {version} не выполнено — {error}",
+        )
+    )
+    session.commit()
 
 
 # --- контракт v2 с АИС «СВХ» (согласован 17.08.2026) ---

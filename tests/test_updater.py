@@ -745,10 +745,16 @@ class TestUpdateWatchdog:
             await asyncio.sleep(0.1)
             return status
 
+        reported: list[UpdateStatus] = []
+        updater.notify = reported.append
         with caplog.at_level("ERROR", logger="agent.updater"):
             status = asyncio.run(run())
         assert status.ok is True
         assert any("так и не была перезапущена" in r.getMessage() for r in caplog.records)
+        # 0.4.18: сторожок докладывает и центру — не только в свой лог
+        assert len(reported) == 1
+        assert reported[0].ok is False and reported[0].version == status.version
+        assert "так и не была перезапущена" in (reported[0].error or "")
 
 
 # ---------------------------------------------------------------------------

@@ -2300,3 +2300,69 @@ class TestRecordAisBlock:
         # обычный фильтр «Вручную (офлайн)» по-прежнему показывает запись
         response = panel_env.client.get("/panel/journal", params={"source": "local_offline"})
         assert "01KG999OFF" in response.text
+
+
+class TestPasswordChangeKillsSessions:
+    """Смена пароля выбивает все живые сессии этой учётки (штамп пароля в
+    cookie сессии проверяется по БД на каждый запрос) — вопрос Игоря
+    18.08.2026: учётку временно давали другому человеку."""
+
+    @staticmethod
+    def _user_id(env: PanelEnv, login: str) -> int:
+        with env.factory() as session:
+            return session.execute(select(User.id).where(User.login == login)).scalar_one()
+
+    def test_other_session_logged_out_after_password_change(self, panel_env: PanelEnv) -> None:
+        from center.web import users_admin
+
+        _login(panel_env)  # «другой человек» сидит под учёткой
+        assert panel_env.client.get("/panel/").status_code == 200
+        with panel_env.factory() as session:
+            assert (
+                users_admin.set_password(
+                    session, self._user_id(panel_env, PANEL_LOGIN), "new-password-123"
+                )
+                is None
+            )
+        response = panel_env.client.get("/panel/", follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"].startswith("/panel/login")
+        # cookie очищена — HTMX-фрагменты тоже больше не отдаются
+        assert (
+            panel_env.client.get("/panel/fragments/dashboard", follow_redirects=False).status_code
+            != 200
+        )
+        # с новым паролем вход снова работает
+        response = panel_env.client.post(
+            "/panel/login",
+            data={"login": PANEL_LOGIN, "password": "new-password-123"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303 and response.headers["location"] == "/panel/"
+        assert panel_env.client.get("/panel/").status_code == 200
+
+    def test_admin_changing_own_password_keeps_session(self, panel_env: PanelEnv) -> None:
+        _make_admin(panel_env)
+        _login(panel_env)
+        user_id = self._user_id(panel_env, PANEL_LOGIN)
+        response = panel_env.client.post(
+            f"/panel/users/{user_id}/password",
+            data={"password": "brand-new-pass-1"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert panel_env.client.get("/panel/users").status_code == 200  # сессия жива
+
+    def test_admin_route_requires_fresh_stamp(self, panel_env: PanelEnv) -> None:
+        """Админский маршрут после смены пароля админу другим способом — на вход,
+        а не 403 и не работа под старым паролем."""
+        from center.web import users_admin
+
+        _make_admin(panel_env)
+        _login(panel_env)
+        with panel_env.factory() as session:
+            users_admin.set_password(
+                session, self._user_id(panel_env, PANEL_LOGIN), "reset-by-cli-1"
+            )
+        response = panel_env.client.get("/panel/users", follow_redirects=False)
+        assert response.status_code == 303 and "/panel/login" in response.headers["location"]

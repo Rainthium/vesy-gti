@@ -11,9 +11,11 @@
   в истории входов и в будущей репликации операторов на агентов).
 """
 
+import hashlib
 import logging
 import re
 import secrets
+from dataclasses import dataclass
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -235,12 +237,42 @@ def block_agent_operator(session: Session, scale_id: int, login: str) -> str | N
     return None
 
 
-def is_active_admin(session: Session, login: str) -> bool:
-    """Актуальная проверка прав по БД (сессия могла пережить разжалование)."""
+def session_stamp(pw_hash: str) -> str:
+    """Штамп пароля для сессии: производная от хеша (не сам хеш — cookie сессии
+    подписана, но читаема). Меняется вместе с паролем: живые сессии с прежним
+    штампом центр выбивает — смена пароля разлогинивает всех, кто им пользовался
+    (вопрос Игоря 18.08.2026: учётку давали другому человеку)."""
+    return hashlib.sha256(pw_hash.encode()).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class SessionState:
+    """Что панель проверяет по БД на КАЖДЫЙ запрос живой сессии."""
+
+    active: bool
+    is_admin: bool
+    site_id: int | None  # None — видно всё (админ или пользователь без привязки)
+    stamp: str | None  # штамп текущего пароля; None — пользователя нет/отключён
+
+
+def session_state(session: Session, login: str) -> SessionState:
     user = session.execute(
         select(User).where(User.login == login, User.is_active)
     ).scalar_one_or_none()
-    return user is not None and user.role is UserRole.ADMIN
+    if user is None:
+        return SessionState(active=False, is_admin=False, site_id=None, stamp=None)
+    is_admin = user.role is UserRole.ADMIN
+    return SessionState(
+        active=True,
+        is_admin=is_admin,
+        site_id=None if is_admin else user.site_id,
+        stamp=session_stamp(user.pw_hash),
+    )
+
+
+def is_active_admin(session: Session, login: str) -> bool:
+    """Актуальная проверка прав по БД (сессия могла пережить разжалование)."""
+    return session_state(session, login).is_admin
 
 
 def visible_site_id(session: Session, login: str) -> tuple[bool, int | None]:
@@ -257,11 +289,5 @@ def visible_site_id(session: Session, login: str) -> tuple[bool, int | None]:
     сессии — уволенный сотрудник с открытой вкладкой видел бы все
     объекты (находка ревью 11.08.2026).
     """
-    user = session.execute(
-        select(User).where(User.login == login, User.is_active)
-    ).scalar_one_or_none()
-    if user is None:
-        return False, None
-    if user.role is UserRole.ADMIN:
-        return True, None
-    return True, user.site_id
+    state = session_state(session, login)
+    return state.active, state.site_id

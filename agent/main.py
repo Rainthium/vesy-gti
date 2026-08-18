@@ -336,6 +336,9 @@ class AgentRuntime:
     def verify_operator(self, login: str, password: str) -> str | None:
         return self._storage.verify_operator(login, password)
 
+    def operator_stamp(self, login: str) -> str | None:
+        return self._storage.operator_stamp(login)
+
     def reopen_port(self) -> None:
         # принудительный перезапуск потока чтения (автопереоткрытие и так есть)
         self._driver.stop()
@@ -451,6 +454,7 @@ def build_runtime(
         token=config.center.token,
         busy=runner.busy,
     )
+    # сторожок обновления докладывает центру через клиента (он создаётся ниже)
 
     # SettingsManager собирается ниже (ему нужен manual, а manual — клиенту);
     # колбэк связывает их через late-binding
@@ -481,6 +485,7 @@ def build_runtime(
             str(log_path) if log_path else "агент запущен не службой (вывод в консоль)",
         ),
     )
+    updater.notify = client.post_message
     uploader = PhotoUploader(
         storage,
         base_url=http_base_url(config.center.url),

@@ -1484,3 +1484,22 @@ class TestAisRefTriggerMigration:
             self._assert_protected(storage)
         finally:
             storage.close()
+
+
+class TestOperatorStamp:
+    """0.4.18: штамп пароля учётки для сессий интерфейса оператора."""
+
+    def test_stamp_changes_with_password_and_vanishes_when_blocked(
+        self, storage: AgentStorage
+    ) -> None:
+        storage.upsert_operator("op1", "password-one", "Оператор Один")
+        first = storage.operator_stamp("op1")
+        assert first is not None and len(first) == 16
+        assert storage.operator_stamp("op1") == first  # стабилен, пока пароль тот же
+        storage.upsert_operator("op1", "password-two", "Оператор Один")
+        second = storage.operator_stamp("op1")
+        assert second is not None and second != first
+        # заблокированная снимком центра учётка — штампа нет (сессию выбьет)
+        storage.replace_center_operators([make_operator("op1", is_active=False)])
+        assert storage.operator_stamp("op1") is None
+        assert storage.operator_stamp("nobody") is None

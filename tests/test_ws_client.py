@@ -66,6 +66,7 @@ from shared.messages import (
     ScaleSettingsPayload,
     TareRecord,
     TareRegistryUpdate,
+    UpdateStatus,
     WeighingRecord,
     WeighRequest,
     WeighResult,
@@ -588,6 +589,22 @@ def test_record_added_mid_session_is_pushed_with_heartbeat() -> None:
                 OfflineSyncAck(accepted_uuids=[late.uuid]).model_dump_json()
             )
             await wait_until(lambda: storage.pending_count() == 0)
+
+    run_scenario(scenario())
+
+
+def test_posted_message_is_sent_with_heartbeat() -> None:
+    """post_message (доклад сторожка автообновления) уходит с ближайшим heartbeat
+    живой сессии — без ответа на команду и без реконнекта."""
+
+    async def scenario() -> None:
+        async with Scene() as scene:
+            await scene.center.expect(Hello)
+            scene.client.post_message(
+                UpdateStatus(agent_id="agent-1", version="0.4.18", ok=False, error="сторожок")
+            )
+            status = await scene.center.expect(UpdateStatus)
+            assert status.ok is False and status.error == "сторожок"
 
     run_scenario(scenario())
 

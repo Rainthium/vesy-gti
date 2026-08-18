@@ -83,6 +83,7 @@ KIND_LABELS = {
     "photo_backlog": "Снимки",
     "disk_low": "Диск",
     "ais_events": "События АИС",
+    "update_failed": "Обновление",
 }
 
 

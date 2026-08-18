@@ -250,6 +250,9 @@ class DemoServices:
     def verify_operator(self, login: str, password: str) -> str | None:
         return "А. Осмонов" if (login, password) == ("operator", "operator") else None
 
+    def operator_stamp(self, login: str) -> str | None:
+        return "demo-stamp" if login == "operator" else None
+
     def reopen_port(self) -> None:
         print("демо: переоткрытие порта")
 
