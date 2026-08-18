@@ -296,7 +296,14 @@ def mark_commanded(
     return row
 
 
-def mark_send_failed(session: Session, agent_id: int, version: str, error: str) -> None:
+def mark_send_failed(
+    session: Session,
+    agent_id: int,
+    version: str,
+    error: str,
+    *,
+    now: datetime | None = None,
+) -> None:
     """Команда не ушла (агент отвалился между проверкой и отправкой): строка
     отмечена заранее — вернуть попытку и записать причину."""
     row = get_agent_update(session, agent_id, version)
@@ -305,7 +312,7 @@ def mark_send_failed(session: Session, agent_id: int, version: str, error: str) 
     row.status = AgentUpdateStatus.FAILED
     row.error = f"команда не отправлена: {error}"
     row.attempts = max(0, row.attempts - 1)
-    row.updated_at = datetime.now(UTC)
+    row.updated_at = now or datetime.now(UTC)
     session.commit()
 
 
@@ -537,12 +544,16 @@ class RolloutService:
         return sent
 
     def _mark(self, item: RolloutPlan) -> None:
+        # часы движка (self.now) — и в план, и в отметки: иначе повтор по
+        # stale_after считался бы от другого времени, чем сам план
         with self.session_factory() as session:
-            mark_commanded(session, item.agent_id, item.release.version, origin=ORIGIN_AUTO)
+            mark_commanded(
+                session, item.agent_id, item.release.version, origin=ORIGIN_AUTO, now=self.now()
+            )
 
     def _unmark(self, item: RolloutPlan, error: str) -> None:
         with self.session_factory() as session:
-            mark_send_failed(session, item.agent_id, item.release.version, error)
+            mark_send_failed(session, item.agent_id, item.release.version, error, now=self.now())
 
     def _plan(self) -> list[RolloutPlan]:
         now = self.now()
