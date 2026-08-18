@@ -983,3 +983,18 @@ table.users .cell-input.narrow { max-width: 76px; }
   cursor: pointer;
 }
 .btn-outline:hover { border-color: var(--green-border); color: var(--primary); }
+
+/* --- экран «Релизы агентов» (макет center-releases) --- */
+table.releases td.cell-version { font-weight: 800; font-size: 14px; }
+table.releases td.cell-notes { white-space: nowrap; width: 34%; }
+table.releases .notes-form { display: flex; gap: 6px; align-items: center; }
+table.releases .notes-form .cell-input { flex: 1 1 160px; min-width: 160px; max-width: none; }
+table.releases tr.row-off td { opacity: .55; }
+table.releases tr.row-off td .cell-sub { opacity: 1; }
+.mono.sha { background: var(--surface-2); border-radius: 6px; padding: 3px 8px; }
+.release-upload input[type="file"] { padding: 6px 12px; height: auto; background: #fff; }
+.rollout-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.rollout-title small { margin-left: 0; }
+table.rollout .narrow-select { height: 30px; padding: 0 8px; min-width: 90px; }
+table.rollout .status-detail { max-width: 360px; white-space: normal; }
+table.rollout .channel-form { margin-left: 0; }

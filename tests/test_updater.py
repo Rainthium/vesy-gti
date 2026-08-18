@@ -916,3 +916,234 @@ class TestServiceName:
         text = (install_dir / "self-update.bat").read_bytes().decode("utf-8")
         assert 'nssm.exe" stop ves-agent-2' in text
         assert spawn_calls == [(install_dir / "self-update.bat", install_dir, "ves-agent-2-update")]
+
+
+# ---------------------------------------------------------------------------
+# Самопроверка и автооткат (0.4.19): контекст, маркеры, блок bat
+# ---------------------------------------------------------------------------
+
+
+class TestSelfCheckProtocol:
+    def test_bat_waits_for_marker_and_rolls_back(self) -> None:
+        """После nssm start bat ждёт update-check.ok/.fail до 72×5 с; по fail
+        или молчанию — откат: app → app_failed, app_old → app, rollback-файл
+        с версией и причиной, служба стартует прежней версией."""
+        text = updater_module.update_bat("ves-agent", unpack=False, version="9.9.9")
+        assert "__VERSION__" not in text
+        assert ":check_wait" in text and "if %CHECK_TRIES% geq 72 goto check_timeout" in text
+        assert 'if exist "%BASE%\\update-check.ok" goto check_ok' in text
+        assert 'if exist "%BASE%\\update-check.fail" goto check_fail' in text
+        # порядок: старт службы → ожидание → откат → уборка задачи в самом конце
+        start = text.index('nssm.exe" start ves-agent')
+        assert start < text.index(":check_wait") < text.index(":rollback")
+        assert text.rindex("schtasks /Delete /TN ves-agent-update /F") > text.index(":done")
+        assert 'move "%BASE%\\app" "%BASE%\\app_failed"' in text
+        assert 'move "%BASE%\\app_old" "%BASE%\\app"' in text
+        assert '> "%BASE%\\update-rollback.txt" (echo 9.9.9&echo %REASON%)' in text
+        # причину из update-check.fail bat не читает (cmd и UTF-8) и файл не
+        # трогает — её доложит прежняя версия
+        assert "set /p" not in text
+        assert 'del "%BASE%\\update-check.fail"' not in text
+        # «exe не встал» после подмены — тот же общий откат
+        assert 'if exist "%BASE%\\app\\ves-agent.exe" goto start_new' in text
+        assert text.count("goto rollback") >= 3
+
+    def test_bat_echo_lines_have_no_parens_in_if_blocks(self) -> None:
+        """Внутри блоков if (...) скобки в echo ломают cmd — их там нет."""
+        text = updater_module.update_bat("ves-agent", unpack=True, version="1.2.3")
+        depth = 0
+        for line in text.splitlines():
+            stripped = line.strip()
+            if depth > 0 and stripped.startswith("echo"):
+                assert "(" not in stripped and ")" not in stripped, line
+            depth += stripped.count("(") - stripped.count(")")
+        assert depth == 0
+
+    def test_context_written_before_spawn(
+        self,
+        install_dir: Path,
+        release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
+        spawn_calls: list[tuple[Path, Path, str]],
+    ) -> None:
+        """Перед запуском bat агент пишет update-context.json (откуда/куда,
+        шёл ли индикатор) и убирает хвосты прежних попыток."""
+        (install_dir / "update-check.ok").write_text("stale")
+        (install_dir / "update-rollback.txt").write_text("stale")
+        payload = _make_release_zip()
+        base_url, _ = release_server(payload)
+        updater = AgentUpdater(
+            agent_id="agent-1",
+            base_url=base_url,
+            token=TOKEN,
+            busy=lambda: False,
+            install_dir=install_dir,
+            indicator_ok=lambda: True,
+        )
+        status = _handle(updater, _make_command(payload))
+        assert status.ok is True, status.error
+        context = updater_module.read_update_context(install_dir)
+        assert context is not None
+        assert context.to_version == NEW_VERSION
+        assert context.from_version == agent.__version__
+        assert context.expect_indicator is True
+        assert not (install_dir / "update-check.ok").exists()
+        assert not (install_dir / "update-rollback.txt").exists()
+        text = (install_dir / "self-update.bat").read_bytes().decode("utf-8")
+        assert f"ждём самопроверку {NEW_VERSION}" in text
+        assert spawn_calls != []
+
+    def test_context_absent_when_update_refused(self, install_dir: Path) -> None:
+        """Отказ до spawn (та же версия) контекста не оставляет."""
+        updater = _make_updater("http://127.0.0.1:1", install_dir)
+        status = _handle(updater, _make_command(_make_release_zip(), version=agent.__version__))
+        assert status.ok is False
+        assert updater_module.read_update_context(install_dir) is None
+
+    def test_indicator_probe_failure_means_not_expected(
+        self,
+        install_dir: Path,
+        release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
+        spawn_calls: list[tuple[Path, Path, str]],
+    ) -> None:
+        """Упавший колбэк состояния драйвера — expect_indicator=False, а не срыв обновления."""
+
+        def boom() -> bool:
+            raise RuntimeError("driver")
+
+        payload = _make_release_zip()
+        base_url, _ = release_server(payload)
+        updater = AgentUpdater(
+            agent_id="agent-1",
+            base_url=base_url,
+            token=TOKEN,
+            busy=lambda: False,
+            install_dir=install_dir,
+            indicator_ok=boom,
+        )
+        assert _handle(updater, _make_command(payload)).ok is True
+        context = updater_module.read_update_context(install_dir)
+        assert context is not None and context.expect_indicator is False
+
+    def test_read_rollback_merges_fail_details(self, tmp_path: Path) -> None:
+        """Причина отката: строка bat + подробности из update-check.fail;
+        битые файлы читаются как есть, пустой rollback — «без причины»."""
+        (tmp_path / "update-rollback.txt").write_text(
+            "9.9.9\r\nсамопроверка новой версии не пройдена\r\n", encoding="utf-8"
+        )
+        (tmp_path / "update-check.fail").write_text(
+            "нет связи с центром за 120 с\n", encoding="utf-8"
+        )
+        assert updater_module.read_rollback(tmp_path) == (
+            "9.9.9",
+            "самопроверка новой версии не пройдена: нет связи с центром за 120 с",
+        )
+        (tmp_path / "update-check.fail").unlink()
+        (tmp_path / "update-rollback.txt").write_bytes(b"")
+        assert updater_module.read_rollback(tmp_path) == ("", "откат без указания причины")
+        updater_module.clear_update_markers(tmp_path)
+        assert updater_module.read_rollback(tmp_path) is None
+
+    def test_safe_reason_strips_cmd_specials(self) -> None:
+        """Причина в bat-переменную и echo: без скобок, &|<>^%! и переводов строк."""
+        raw = "нет связи (центр) & порт <9090> | %PATH% ^ !\nвторая строка"
+        cleaned = updater_module.safe_reason(raw)
+        assert "(" not in cleaned and ")" not in cleaned
+        for ch in "&|<>^%!\n":
+            assert ch not in cleaned
+        assert "нет связи центр" in cleaned and "вторая строка" in cleaned
+        assert updater_module.safe_reason("   ") == "причина не указана"
+
+    def test_context_roundtrip_and_broken(self, tmp_path: Path) -> None:
+        context = updater_module.UpdateContext(
+            from_version="0.4.18",
+            to_version="0.4.19",
+            started_at="2026-08-18T10:00:00+00:00",
+            expect_indicator=True,
+        )
+        updater_module.write_update_context(tmp_path, context)
+        assert updater_module.read_update_context(tmp_path) == context
+        (tmp_path / "update-context.json").write_text("{broken", encoding="utf-8")
+        assert updater_module.read_update_context(tmp_path) is None
+        updater_module.clear_update_markers(tmp_path, context=True)
+        assert not (tmp_path / "update-context.json").exists()
+
+
+class TestReviewFixes1808:
+    def test_rollback_survives_missing_app_dir(self) -> None:
+        """Ревью: `move app_new app` не прошёл — папки app нет; откат обязан
+        вернуть app_old → app, а не сдаться на `move app app_failed`."""
+        text = updater_module.update_bat("ves-agent", unpack=False, version="9.9.9")
+        retry = text.index(":rollback_retry")
+        guard = text.index('if not exist "%BASE%\\app" goto rollback_swap')
+        assert retry < guard < text.index('move "%BASE%\\app" "%BASE%\\app_failed"')
+        stuck = text.index(":rollback_stuck")
+        assert 'if not exist "%BASE%\\app" move "%BASE%\\app_old" "%BASE%\\app"' in text[stuck:]
+
+    def test_unpack_early_exits_drop_context(self) -> None:
+        """Ранние выходы распаковки (служба не тронута) убирают update-context.json —
+        иначе прежняя версия при следующем рестарте доложила бы ложное «не состоялось»."""
+        text = updater_module.update_bat("ves-agent", unpack=True, version="9.9.9")
+        unpack_part = text[: text.index('nssm.exe" stop')]
+        assert unpack_part.count("exit /b 1") == 4
+        assert unpack_part.count('del "%BASE%\\update-context.json" 2>nul') == 4
+
+    def test_watchdog_removes_context(
+        self, install_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        updater = _make_updater("http://127.0.0.1:1", install_dir)
+        updater_module.write_update_context(
+            install_dir,
+            updater_module.UpdateContext("0.4.18", "9.9.9", "2026-08-18T10:00:00+00:00", False),
+        )
+        with caplog.at_level("ERROR"):
+            updater._watchdog("9.9.9", install_dir)
+        assert updater_module.read_update_context(install_dir) is None
+        assert "служба так и не была перезапущена" in caplog.text
+
+    def test_bad_version_format_rejected(self, install_dir: Path) -> None:
+        """Версия из команды идёт в bat дословно — только X.Y.Z."""
+        updater = _make_updater("http://127.0.0.1:1", install_dir)
+        status = _handle(updater, _make_command(_make_release_zip(), version="9.9.9)&calc"))
+        assert status.ok is False and "формат версии" in (status.error or "")
+
+    def test_waits_for_selfcheck_then_proceeds(
+        self,
+        install_dir: Path,
+        release_server: Callable[[bytes], tuple[str, list[RecordedRequest]]],
+        spawn_calls: list[tuple[Path, Path, str]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Пока идёт самопроверка предыдущего обновления — ждём; кончилась — идём."""
+        monkeypatch.setattr(updater_module, "SELFCHECK_POLL_S", 0.01)
+        payload = _make_release_zip()
+        base_url, _ = release_server(payload)
+        updater = _make_updater(base_url, install_dir)
+        polls = {"n": 0}
+
+        def hold() -> tuple[str, bool] | None:
+            polls["n"] += 1
+            if polls["n"] < 4:
+                return "идёт самопроверка после предыдущего обновления", False
+            return None
+
+        updater.selfcheck_hold = hold
+        status = _handle(updater, _make_command(payload))
+        assert status.ok is True, status.error
+        assert polls["n"] >= 4 and spawn_calls != []
+
+    def test_selfcheck_failed_refuses_immediately(self, install_dir: Path) -> None:
+        updater = _make_updater("http://127.0.0.1:1", install_dir)
+        updater.selfcheck_hold = lambda: ("новая версия не прошла самопроверку — идёт откат", True)
+        status = _handle(updater, _make_command(_make_release_zip()))
+        assert status.ok is False and "идёт откат" in (status.error or "")
+        assert not (install_dir / "update-download.zip").exists()
+
+    def test_selfcheck_wait_times_out(
+        self, install_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(updater_module, "SELFCHECK_POLL_S", 0.01)
+        monkeypatch.setattr(updater_module, "SELFCHECK_WAIT_S", 0.03)
+        updater = _make_updater("http://127.0.0.1:1", install_dir)
+        updater.selfcheck_hold = lambda: ("идёт самопроверка после предыдущего обновления", False)
+        status = _handle(updater, _make_command(_make_release_zip()))
+        assert status.ok is False and "повторите позже" in (status.error or "")

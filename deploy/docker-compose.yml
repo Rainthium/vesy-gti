@@ -87,9 +87,10 @@ services:
       AGENT_RELEASES_DIR: /data/releases
     volumes:
       - photos:/data/photos
-      # релизы агента для автообновления: кладутся с рабочей машины
-      # командой из deploy/README.md («Автообновление агентов»)
-      - ./releases:/data/releases:ro
+      # релизы агента для автообновления: загружаются через панель
+      # («Релизы агентов») или кладутся с рабочей машины scp — README §9;
+      # запись нужна панели, поэтому том не :ro (с 18.08.2026)
+      - ./releases:/data/releases
     depends_on:
       postgres:
         condition: service_healthy

@@ -64,10 +64,11 @@ from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Все 12 таблиц схемы центра (architecture §5 + мониторинг этапа 2)
+# Все таблицы схемы центра (architecture §5 + мониторинг этапа 2 + раскатка)
 ALL_TABLES = (
     "agent_operators",
     "agent_releases",
+    "agent_updates",
     "audit_log",
     "monitoring_events",
     "sites",
@@ -82,7 +83,7 @@ ALL_TABLES = (
     "weighing_events",
 )
 
-HEAD_REVISION = "a7b8c9d0e1f2"  # outbox событий в АИС «СВХ» (17.08.2026)
+HEAD_REVISION = "b8c9d0e1f2a3"  # автовыкат агентов по каналам (18.08.2026)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64

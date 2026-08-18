@@ -49,6 +49,20 @@
 себе сторожок: спустя UPDATE_WATCHDOG_S после запуска bat живой процесс
 пишет ошибку в свой лог — его видно со страницы «Журнал агента» панели.
 
+Самопроверка и автооткат (0.4.19, architecture §7а): перед запуском bat
+агент пишет ``update-context.json`` (какую версию ставим, шёл ли индикатор).
+Новая версия при старте видит контекст со своей версией и проверяет себя
+(agent/selfcheck.py: веб-порт, связь с центром, поток индикатора) → пишет
+``update-check.ok`` и докладывает центру ``installed`` — или
+``update-check.fail`` с причиной. bat после ``nssm start`` ждёт маркер до
+6 минут: ok — готово; fail или молчание (новая версия падает на старте) —
+откат: app → app_failed, app_old → app, ``update-rollback.txt`` (версия и
+причина), служба запускается прежней версией, и уже ОНА при старте
+докладывает центру ``rolled_back`` (событие «Обновление» в панели и
+Telegram). Контекст с чужой to_version при старте (bat не смог подменить
+папку и перезапустил прежнюю версию) — доклад «обновление не состоялось».
+Механизм включается при обновлении С 0.4.19: bat пишет обновляющийся агент.
+
 Несколько агентов на одном ПК (объект с двумя весами, решение
 11.08.2026): имя службы не зашито — install-service.bat записывает его
 в ``service.txt`` рядом с конфигом, отсюда же берётся имя одноразовой
@@ -61,6 +75,7 @@
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import shutil
@@ -70,6 +85,8 @@ import urllib.parse
 import urllib.request
 import zipfile
 from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 
 import agent
@@ -84,12 +101,25 @@ BUSY_POLL_S = 2.0
 SPAWN_DELAY_S = 2.0  # пауза перед запуском self-update.bat: успеть отправить статус
 SCHTASKS_TIMEOUT_S = 30.0
 UPDATE_WATCHDOG_S = 900.0  # живой процесс спустя 15 мин после bat = обновление не прошло
+SELFCHECK_WAIT_S = 420.0  # ждём конца самопроверки предыдущего обновления (bat ждёт 6 мин)
+SELFCHECK_POLL_S = 2.0
 UPDATE_ARCHIVE_NAME = "update.zip"  # проверенный архив, который распакует bat
 DEFAULT_SERVICE_NAME = "ves-agent"  # раскладка до 11.08.2026 (один агент на ПК)
 SERVICE_NAME_FILE = "service.txt"  # пишет install-service.bat при установке
+# Файлы протокола «агент ↔ self-update.bat» в каталоге установки (0.4.19):
+# контекст пишет обновляющийся агент перед запуском bat, маркеры — новая
+# версия по итогам самопроверки, rollback-файл — bat при откате
+UPDATE_CONTEXT_FILE = "update-context.json"
+CHECK_OK_FILE = "update-check.ok"
+CHECK_FAIL_FILE = "update-check.fail"
+ROLLBACK_FILE = "update-rollback.txt"
+# причина отказа попадает в bat-переменную и в файл через echo: без
+# спецсимволов cmd (скобки, &|<>^%!) и в одну строку
+_REASON_SAFE_RE = re.compile(r"[^\w\s.,:;/\-—–]", re.UNICODE)
 # имя службы попадает в командную строку bat и в аргументы schtasks —
 # пускаем только безопасный набор (ни пробелов, ни кавычек, ни %&|)
 SERVICE_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+VERSION_RE = re.compile(r"\d{1,4}\.\d{1,4}\.\d{1,4}")
 
 UPDATE_BAT_HEADER = r"""@echo off
 chcp 65001 >nul
@@ -125,12 +155,14 @@ rmdir /s /q "%BASE%\app_new" 2>nul
 if exist "%BASE%\app_unpack" (
   echo [%date% %time%] ОШИБКА: app_unpack занята, обновление прервано >> "%BASE%\logs\update.log"
   del "%BASE%\update.zip" 2>nul
+  del "%BASE%\update-context.json" 2>nul
   schtasks /Delete /TN __TASK__ /F >nul 2>&1
   exit /b 1
 )
 if exist "%BASE%\app_new" (
   echo [%date% %time%] ОШИБКА: app_new занята, обновление прервано >> "%BASE%\logs\update.log"
   del "%BASE%\update.zip" 2>nul
+  del "%BASE%\update-context.json" 2>nul
   schtasks /Delete /TN __TASK__ /F >nul 2>&1
   exit /b 1
 )
@@ -146,6 +178,7 @@ if errorlevel 1 (
     echo [%date% %time%] ОШИБКА: распаковка не прошла, служба не тронута >> "%BASE%\logs\update.log"
     rmdir /s /q "%BASE%\app_unpack" 2>nul
     del "%BASE%\update.zip" 2>nul
+    del "%BASE%\update-context.json" 2>nul
     schtasks /Delete /TN __TASK__ /F >nul 2>&1
     exit /b 1
   )
@@ -156,6 +189,7 @@ if not exist "%BASE%\app_new\ves-agent.exe" (
   echo [%date% %time%] ОШИБКА: распаковка не удалась, служба не тронута >> "%BASE%\logs\update.log"
   rmdir /s /q "%BASE%\app_new" 2>nul
   del "%BASE%\update.zip" 2>nul
+  del "%BASE%\update-context.json" 2>nul
   schtasks /Delete /TN __TASK__ /F >nul 2>&1
   exit /b 1
 )
@@ -168,10 +202,12 @@ del "%BASE%\update.zip" 2>nul
 # Проводнике папка агента при AnyDesk-сессии, антивирус, дочитывающий
 # распакованные файлы, или процесс, не успевший выйти за 5 с). Шесть попыток
 # по 5 с — полминуты; только потом откат к прежней версии.
+# Если после подмены в app нет exe — общий путь отката (метка :rollback ниже).
 UPDATE_BAT_SWAP = r"""echo [%date% %time%] остановка службы __SERVICE__ >> "%BASE%\logs\update.log"
 "%BASE%\nssm.exe" stop __SERVICE__ >> "%BASE%\logs\update.log" 2>&1
 ping -n 6 127.0.0.1 >nul
 rmdir /s /q "%BASE%\app_old" 2>nul
+rmdir /s /q "%BASE%\app_failed" 2>nul
 set SWAP_TRIES=0
 :swap_retry
 move "%BASE%\app" "%BASE%\app_old" >> "%BASE%\logs\update.log" 2>&1
@@ -188,12 +224,83 @@ ping -n 6 127.0.0.1 >nul
 goto swap_retry
 :swapped
 move "%BASE%\app_new" "%BASE%\app" >> "%BASE%\logs\update.log" 2>&1
-if not exist "%BASE%\app\ves-agent.exe" (
-    echo [%date% %time%] ОШИБКА: новая версия не встала, откат >> "%BASE%\logs\update.log"
-    move "%BASE%\app_old" "%BASE%\app" >> "%BASE%\logs\update.log" 2>&1
-)
+if exist "%BASE%\app\ves-agent.exe" goto start_new
+echo [%date% %time%] ОШИБКА: новая версия не встала, откат >> "%BASE%\logs\update.log"
+set "REASON=новая версия не встала: в app нет ves-agent.exe"
+goto rollback
+:start_new
 "%BASE%\nssm.exe" start __SERVICE__ >> "%BASE%\logs\update.log" 2>&1
 echo [%date% %time%] служба запущена >> "%BASE%\logs\update.log"
+"""
+
+# Самопроверка новой версии и автооткат (architecture §7а, агент 0.4.19).
+# После запуска службы bat ждёт маркер от нового агента: update-check.ok —
+# веб-порт открыт, связь с центром есть, индикатор шлёт (если шёл до
+# обновления); update-check.fail — самопроверка не пройдена (первая строка —
+# причина). Нет маркера за 6 минут (72 × 5 с) — новая версия не поднялась
+# (падает на старте, nssm перезапускает её по кругу) — тоже откат.
+# Откат: служба стоп → app → app_failed (остаётся для разбора) → app_old →
+# app → запись update-rollback.txt (версия и причина: прочитает и доложит
+# центру прежняя версия) → служба старт. Задача планировщика убирается в
+# любом исходе (:done). Никаких «(» в текстах echo внутри блоков if.
+UPDATE_BAT_VERIFY = r"""rem самопроверка новой версии __VERSION__
+echo [%date% %time%] ждём самопроверку __VERSION__ >> "%BASE%\logs\update.log"
+set CHECK_TRIES=0
+:check_wait
+if exist "%BASE%\update-check.ok" goto check_ok
+if exist "%BASE%\update-check.fail" goto check_fail
+set /a CHECK_TRIES+=1
+if %CHECK_TRIES% geq 72 goto check_timeout
+ping -n 6 127.0.0.1 >nul
+goto check_wait
+:check_ok
+echo [%date% %time%] самопроверка пройдена, обновление завершено >> "%BASE%\logs\update.log"
+del "%BASE%\update-check.ok" 2>nul
+del "%BASE%\update-context.json" 2>nul
+goto done
+:check_fail
+set "REASON=самопроверка новой версии не пройдена"
+echo [%date% %time%] %REASON% - подробности в update-check.fail >> "%BASE%\logs\update.log"
+goto rollback
+:check_timeout
+set "REASON=новая версия не подтвердила запуск за 6 минут"
+echo [%date% %time%] %REASON% >> "%BASE%\logs\update.log"
+goto rollback
+:rollback
+echo [%date% %time%] откат на прежнюю версию >> "%BASE%\logs\update.log"
+"%BASE%\nssm.exe" stop __SERVICE__ >> "%BASE%\logs\update.log" 2>&1
+ping -n 6 127.0.0.1 >nul
+rem update-check.fail не трогаем: подробности причины из него прочитает
+rem и доложит центру прежняя версия (cmd читает UTF-8 ненадёжно)
+del "%BASE%\update-check.ok" 2>nul
+del "%BASE%\update-context.json" 2>nul
+rmdir /s /q "%BASE%\app_failed" 2>nul
+set BACK_TRIES=0
+:rollback_retry
+if not exist "%BASE%\app" goto rollback_swap
+move "%BASE%\app" "%BASE%\app_failed" >> "%BASE%\logs\update.log" 2>&1
+if not errorlevel 1 goto rollback_swap
+set /a BACK_TRIES+=1
+if %BACK_TRIES% geq 6 goto rollback_stuck
+echo [%date% %time%] app занята, повтор отката %BACK_TRIES% из 6 >> "%BASE%\logs\update.log"
+ping -n 6 127.0.0.1 >nul
+goto rollback_retry
+:rollback_swap
+move "%BASE%\app_old" "%BASE%\app" >> "%BASE%\logs\update.log" 2>&1
+if exist "%BASE%\app\ves-agent.exe" goto rollback_done
+echo [%date% %time%] ОШИБКА: прежняя версия не вернулась, оставим новую >> "%BASE%\logs\update.log"
+move "%BASE%\app_failed" "%BASE%\app" >> "%BASE%\logs\update.log" 2>&1
+:rollback_done
+> "%BASE%\update-rollback.txt" (echo __VERSION__&echo %REASON%)
+"%BASE%\nssm.exe" start __SERVICE__ >> "%BASE%\logs\update.log" 2>&1
+echo [%date% %time%] откат выполнен, служба запущена >> "%BASE%\logs\update.log"
+goto done
+:rollback_stuck
+echo [%date% %time%] ОШИБКА: app занята, откат не удался, старт как есть >> "%BASE%\logs\update.log"
+if not exist "%BASE%\app" move "%BASE%\app_old" "%BASE%\app" >> "%BASE%\logs\update.log" 2>&1
+> "%BASE%\update-rollback.txt" (echo __VERSION__&echo %REASON% - откат не удался, папка app занята)
+"%BASE%\nssm.exe" start __SERVICE__ >> "%BASE%\logs\update.log" 2>&1
+:done
 rem уборка одноразовой задачи планировщика, которой запущен этот скрипт
 schtasks /Delete /TN __TASK__ /F >nul 2>&1
 """
@@ -233,15 +340,108 @@ def task_name(service: str) -> str:
     return f"{service}-update"
 
 
-def update_bat(service: str, *, unpack: bool = True) -> str:
+def update_bat(service: str, *, unpack: bool = True, version: str = "") -> str:
     """Текст self-update.bat для службы ``service``.
 
     ``unpack=True`` (обычный путь) — bat сам распаковывает update.zip
     доверенными инструментами; ``unpack=False`` — раскладку app_new уже
-    сделал агент (на ПК нет ни tar, ни Expand-Archive).
+    сделал агент (на ПК нет ни tar, ни Expand-Archive). ``version`` —
+    устанавливаемая версия: попадает в лог и в update-rollback.txt.
     """
-    template = UPDATE_BAT_HEADER + (UPDATE_BAT_UNPACK if unpack else "") + UPDATE_BAT_SWAP
-    return template.replace("__SERVICE__", service).replace("__TASK__", task_name(service))
+    template = (
+        UPDATE_BAT_HEADER
+        + (UPDATE_BAT_UNPACK if unpack else "")
+        + UPDATE_BAT_SWAP
+        + UPDATE_BAT_VERIFY
+    )
+    return (
+        template.replace("__SERVICE__", service)
+        .replace("__TASK__", task_name(service))
+        .replace("__VERSION__", version)
+    )
+
+
+def safe_reason(text: str) -> str:
+    """Причина отказа в одну строку без спецсимволов cmd (см. _REASON_SAFE_RE)."""
+    cleaned = _REASON_SAFE_RE.sub(" ", " ".join(text.split()))
+    return " ".join(cleaned.split())[:300] or "причина не указана"
+
+
+def install_base() -> Path | None:
+    """Каталог установки (родитель app/ с exe) замороженной сборки; dev — None."""
+    if not getattr(sys, "frozen", False):
+        return None
+    return Path(sys.executable).resolve().parent.parent
+
+
+@dataclass(frozen=True)
+class UpdateContext:
+    """Что знал обновляющийся агент перед запуском self-update.bat.
+
+    Читает новая версия при старте: если ``to_version`` — она сама, значит
+    идёт самопроверка после обновления; ``expect_indicator`` — до обновления
+    индикатор шёл, и от новой версии ждём того же (молчащий индикатор при
+    выключенных весах откатом считать нельзя).
+    """
+
+    from_version: str
+    to_version: str
+    started_at: str  # ISO 8601 UTC, для лога
+    expect_indicator: bool
+
+
+def write_update_context(base: Path, context: UpdateContext) -> None:
+    (base / UPDATE_CONTEXT_FILE).write_text(
+        json.dumps(asdict(context), ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def read_update_context(base: Path) -> UpdateContext | None:
+    """Контекст обновления или None (нет файла / битый — как нет)."""
+    path = base / UPDATE_CONTEXT_FILE
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return UpdateContext(
+            from_version=str(raw["from_version"]),
+            to_version=str(raw["to_version"]),
+            started_at=str(raw.get("started_at", "")),
+            expect_indicator=bool(raw.get("expect_indicator", False)),
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def clear_update_markers(base: Path, *, context: bool = False) -> None:
+    """Убрать маркеры самопроверки и rollback-файл (перед новым обновлением
+    и после доклада); ``context=True`` — и контекст тоже."""
+    names = [CHECK_OK_FILE, CHECK_FAIL_FILE, ROLLBACK_FILE]
+    if context:
+        names.append(UPDATE_CONTEXT_FILE)
+    for name in names:
+        (base / name).unlink(missing_ok=True)
+
+
+def read_rollback(base: Path) -> tuple[str, str] | None:
+    """(версия, причина) из update-rollback.txt; подробности — из update-check.fail."""
+    path = base / ROLLBACK_FILE
+    if not path.exists():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    version = lines[0].strip() if lines else ""
+    reason = lines[1].strip() if len(lines) > 1 else ""
+    reason = reason or "откат без указания причины"
+    fail = base / CHECK_FAIL_FILE
+    if fail.exists():
+        try:
+            details = fail.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+        except OSError:
+            details = []
+        if details and details[0].strip() and details[0].strip() not in reason:
+            reason = f"{reason}: {details[0].strip()}"
+    return version, reason
 
 
 def unpack_via_bat_available() -> bool:
@@ -281,6 +481,7 @@ class AgentUpdater:
         token: str,
         busy: Callable[[], bool],
         install_dir: Path | None = None,
+        indicator_ok: Callable[[], bool] | None = None,
     ) -> None:
         self._agent_id = agent_id
         self._base_url = base_url.rstrip("/")
@@ -288,11 +489,18 @@ class AgentUpdater:
         self._busy = busy
         # каталог установки (C:/vesy-agent): родитель папки app с exe
         self._install_dir = install_dir
+        # идёт ли поток индикатора сейчас — попадает в контекст обновления:
+        # новая версия обязана его сохранить (самопроверка), None — не знаем
+        self._indicator_ok = indicator_ok
         self._lock = asyncio.Lock()
         self._watchdog_handle: asyncio.TimerHandle | None = None
         # доклад центру вне ответа на команду (сторожок): main.py подставляет
         # CenterClient.post_message; None — только лог (тесты, dev)
         self.notify: Callable[[UpdateStatus], None] | None = None
+        # «сейчас нельзя»: идёт самопроверка после предыдущего обновления
+        # (agent/selfcheck.py hold_reason) — второй bat поверх первого перепутал
+        # бы маркеры и папки; None — не проверять (тесты, dev)
+        self.selfcheck_hold: Callable[[], tuple[str, bool] | None] | None = None
 
     async def handle(self, command: UpdateCommand) -> UpdateStatus:
         """Выполнить команду обновления; вернуть отчёт для центра."""
@@ -319,6 +527,10 @@ class AgentUpdater:
     async def _run(self, command: UpdateCommand) -> None:
         if command.version == agent.__version__:
             raise UpdateError(f"версия {command.version} уже установлена")
+        # версия подставляется в bat дословно (echo __VERSION__): только X.Y.Z
+        if not VERSION_RE.fullmatch(command.version):
+            raise UpdateError(f"неверный формат версии в команде: {command.version!r}")
+        await self._wait_selfcheck()
         if not getattr(sys, "frozen", False) and self._install_dir is None:
             raise UpdateError("не замороженная сборка (dev-запуск) — обновление вручную")
 
@@ -369,10 +581,31 @@ class AgentUpdater:
                 raise UpdateError("весы заняты операцией дольше 10 минут — повторите позже")
 
             logger.info("обновление до %s: служба %s", command.version, service)
+            # контекст для самопроверки новой версии (0.4.19): что ставим и
+            # шёл ли индикатор; хвосты прежних попыток (маркеры, rollback-файл)
+            # убираем — иначе bat принял бы старый update-check.ok за новый
+            clear_update_markers(base)
+            expect_indicator = False
+            if self._indicator_ok is not None:
+                try:
+                    expect_indicator = bool(self._indicator_ok())
+                except Exception:  # состояние драйвера не должно срывать обновление
+                    expect_indicator = False
+            write_update_context(
+                base,
+                UpdateContext(
+                    from_version=agent.__version__,
+                    to_version=command.version,
+                    started_at=datetime.now(UTC).isoformat(timespec="seconds"),
+                    expect_indicator=expect_indicator,
+                ),
+            )
             bat = base / "self-update.bat"
             # cmd требует CRLF
             bat.write_bytes(
-                update_bat(service, unpack=unpack_in_bat).replace("\n", "\r\n").encode("utf-8")
+                update_bat(service, unpack=unpack_in_bat, version=command.version)
+                .replace("\n", "\r\n")
+                .encode("utf-8")
             )
             # spawn — отложенно: у ws_client есть 2 секунды отправить update_status
             # центру ДО того, как nssm stop убьёт агента (иначе успешные
@@ -383,17 +616,39 @@ class AgentUpdater:
             if self._watchdog_handle is not None:
                 self._watchdog_handle.cancel()
             self._watchdog_handle = loop.call_later(
-                UPDATE_WATCHDOG_S, self._watchdog, command.version
+                UPDATE_WATCHDOG_S, self._watchdog, command.version, base
             )
         except BaseException:
             # не захламлять весовой ПК: отменённое обновление убирает архив,
-            # подготовленный для bat, и заранее распакованную app_new
-            # (следующая команда скачает и распакует заново)
+            # подготовленный для bat, заранее распакованную app_new и контекст
+            # самопроверки (следующая команда скачает и распакует заново)
             staged.unlink(missing_ok=True)
             shutil.rmtree(base / "app_new", ignore_errors=True)
+            (base / UPDATE_CONTEXT_FILE).unlink(missing_ok=True)
             raise
         finally:
             archive.unlink(missing_ok=True)
+
+    async def _wait_selfcheck(self) -> None:
+        """Не начинать новое обновление, пока предыдущее не завершено целиком.
+
+        Самопроверка новой версии длится минуты, bat ждёт её маркер; команда
+        на следующую версию в это окно (админ переназначил канал) должна
+        подождать — иначе второй bat стартовал бы поверх первого. Провал
+        самопроверки — отказ сразу: bat вот-вот откатит и остановит службу.
+        """
+        if self.selfcheck_hold is None:
+            return
+        waited = 0.0
+        while True:
+            hold = self.selfcheck_hold()
+            if hold is None:
+                return
+            reason, terminal = hold
+            if terminal or waited >= SELFCHECK_WAIT_S:
+                raise UpdateError(f"{reason} — повторите позже")
+            await asyncio.sleep(SELFCHECK_POLL_S)
+            waited += SELFCHECK_POLL_S
 
     def _download(self, command: UpdateCommand, target: Path) -> None:
         url = self._base_url + urllib.parse.quote(command.url_path)
@@ -441,7 +696,7 @@ class AgentUpdater:
                 if path.is_absolute() or path.drive or path.root or ".." in path.parts:
                     raise UpdateError(f"подозрительный путь в архиве: {member}")
 
-    def _watchdog(self, version: str) -> None:
+    def _watchdog(self, version: str, base: Path | None = None) -> None:
         """Агент жив спустя UPDATE_WATCHDOG_S после запуска bat — не обновились.
 
         Успешное обновление за это время остановило бы службу (и этот
@@ -450,8 +705,12 @@ class AgentUpdater:
         разговаривает, поэтому докладывает сторожок: в свой лог (виден со
         страницы «Журнал агента») и центру через ``notify`` — событием в
         «Событиях» панели и в Telegram (боевой урок Джалал-Абада 18.08.2026:
-        центр видел только «уже выполняется» и молчание).
+        центр видел только «уже выполняется» и молчание). Контекст
+        самопроверки убирается: иначе при следующем рестарте службы (может
+        быть через недели) прежняя версия доложила бы ложное «не состоялось».
         """
+        if base is not None:
+            (base / UPDATE_CONTEXT_FILE).unlink(missing_ok=True)
         message = (
             f"автообновление до {version}: спустя {int(UPDATE_WATCHDOG_S // 60)} мин служба "
             "так и не была перезапущена — обновление не прошло; подробности в logs/update.log"

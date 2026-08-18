@@ -202,28 +202,48 @@ def save_weighing_record(
     return True
 
 
+def scale_title(session: Session, scale_id: int) -> str:
+    """«Объект · весы» для сообщений о весах (или «весы N», если не нашлись)."""
+    scale = session.get(Scale, scale_id)
+    site = session.get(Site, scale.site_id) if scale is not None else None
+    if site is not None and scale is not None:
+        return f"{site.name} · {scale.name}"
+    return f"весы {scale_id}"
+
+
+def record_update_event(
+    session: Session,
+    scale_id: int,
+    message: str,
+    *,
+    severity: MonitoringSeverity = MonitoringSeverity.WARNING,
+    kind: str = "update_failed",
+    commit: bool = True,
+) -> None:
+    """Событие мониторинга об автообновлении агента (без антидребезга):
+    отказ/откат — warning, успешная установка — ok. Видно в «Событиях» и
+    уходит в Telegram; раньше исход жил только в логах."""
+    session.add(
+        MonitoringEvent(
+            scale_id=scale_id,
+            kind=kind,
+            severity=severity,
+            message=f"{scale_title(session, scale_id)}: {message}",
+        )
+    )
+    if commit:
+        session.commit()
+
+
 def record_update_failure(session: Session, scale_id: int, version: str, error: str) -> None:
-    """Отказ автообновления агента → событие мониторинга (warning, без антидребезга).
+    """Отказ автообновления агента → событие мониторинга (warning).
 
     Успех обновления виден по смене версии; отказ раньше жил только в логе
     центра и agent.log — теперь он в «Событиях» и уходит в Telegram.
     """
-    scale = session.get(Scale, scale_id)
-    site = session.get(Site, scale.site_id) if scale is not None else None
-    title = (
-        f"{site.name} · {scale.name}"
-        if site is not None and scale is not None
-        else f"весы {scale_id}"
+    record_update_event(
+        session, scale_id, f"автообновление агента до {version} не выполнено — {error}"
     )
-    session.add(
-        MonitoringEvent(
-            scale_id=scale_id,
-            kind="update_failed",
-            severity=MonitoringSeverity.WARNING,
-            message=f"{title}: автообновление агента до {version} не выполнено — {error}",
-        )
-    )
-    session.commit()
 
 
 # --- контракт v2 с АИС «СВХ» (согласован 17.08.2026) ---

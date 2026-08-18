@@ -26,6 +26,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 from starlette.websockets import WebSocketDisconnect
 
+from center import rollout
 from center.agents_ws.hub import AgentHub, AgentLink
 from center.api_v2.schemas import AIS_REF_RE
 from center.db import repo
@@ -150,6 +151,19 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                             s, agent_id, AgentStatus.ONLINE, version=m.version
                         ),
                     )
+                    # журнал раскатки (автовыкат по каналам): hello с целевой
+                    # версией подтверждает установку, hello с прежней после
+                    # «установлено» — откат без доклада
+                    changed = await asyncio.to_thread(
+                        _db,
+                        lambda s, m=message: rollout.note_agent_hello(
+                            s, agent_id, scale_id, m.version
+                        ),
+                    )
+                    for row in changed:
+                        logger.info(
+                            "весы %d: раскатка %s → %s", scale_id, row.version, row.status.value
+                        )
                     # раздача при каждом подключении: реестр тар, затем
                     # операторы и настройки весов (если заданы в центре).
                     # Снимки с секретами — только агентам, понимающим их:
@@ -230,7 +244,20 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                     )
 
                 elif isinstance(message, UpdateStatus):
-                    if message.ok:
+                    if message.stage == "installed":
+                        logger.info(
+                            "весы %d: автообновление до %s — самопроверка пройдена",
+                            scale_id,
+                            message.version,
+                        )
+                    elif message.stage == "rolled_back":
+                        logger.error(
+                            "весы %d: автообновление до %s — ОТКАТ: %s",
+                            scale_id,
+                            message.version,
+                            message.error,
+                        )
+                    elif message.ok:
                         logger.info(
                             "весы %d: автообновление до %s запущено агентом",
                             scale_id,
@@ -243,16 +270,14 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                             message.version,
                             message.error,
                         )
-                        # отказ — событием мониторинга: видно в «Событиях» панели
-                        # и в Telegram, а не только в логе центра
-                        # (урок Джалал-Абада 18.08.2026: центр молчал, пока bat
-                        # не смог перезапустить службу)
-                        await asyncio.to_thread(
-                            _db,
-                            lambda s, m=message: repo.record_update_failure(
-                                s, scale_id, m.version, m.error or "без подробностей"
-                            ),
-                        )
+                    # журнал раскатки + событие мониторинга: отказ и откат
+                    # видны в «Событиях» панели и в Telegram, а не только в
+                    # логе центра (урок Джалал-Абада 18.08.2026: центр молчал,
+                    # пока bat не смог перезапустить службу); успех — ok-событие
+                    await asyncio.to_thread(
+                        _db,
+                        lambda s, m=message: rollout.apply_update_status(s, agent_id, scale_id, m),
+                    )
 
                 elif isinstance(message, OfflineSync):
                     accepted = []

@@ -22,7 +22,7 @@ from shared import (
     parse_agent_message,
     parse_center_message,
 )
-from shared.messages import AgentOperatorInfo, OperatorsReport
+from shared.messages import AgentOperatorInfo, OperatorsReport, UpdateStatus
 
 
 class TestEnums:
@@ -122,6 +122,28 @@ class TestAgentMessages:
         msg = WeighRequest(request_id=uuid4(), operation=Operation.WEIGHING)
         with pytest.raises(ValidationError):
             parse_agent_message(msg.model_dump_json())
+
+    def test_update_status_stages(self) -> None:
+        """Стадии автообновления (0.4.19): старый агент шлёт без stage —
+        разбирается как started; новые стадии несут running_version."""
+        legacy = parse_agent_message(
+            '{"type": "update_status", "agent_id": "a", "version": "0.4.19", "ok": true}'
+        )
+        assert isinstance(legacy, UpdateStatus)
+        assert legacy.stage == "started" and legacy.running_version is None
+        rolled = UpdateStatus(
+            agent_id="a",
+            version="0.4.20",
+            ok=False,
+            error="откат на 0.4.19: нет связи с центром",
+            stage="rolled_back",
+            running_version="0.4.19",
+        )
+        parsed = parse_agent_message(rolled.model_dump_json())
+        assert isinstance(parsed, UpdateStatus)
+        assert parsed.stage == "rolled_back" and parsed.running_version == "0.4.19"
+        with pytest.raises(ValidationError):
+            UpdateStatus(agent_id="a", version="1", ok=True, stage="verified")  # type: ignore[arg-type]
 
 
 class TestCenterMessages:

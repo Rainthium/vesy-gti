@@ -411,18 +411,71 @@ class MonitoringEvent(Base):
 
 
 class AgentRelease(Base):
-    """Релизы агентов для автообновления (architecture §7а, этап 2)."""
+    """Релиз агента в каталоге центра (architecture §7а, автовыкат 18.08.2026).
+
+    Артефакт — файл ``ves-agent-<версия>-win64.zip`` в AGENT_RELEASES_DIR
+    (``file_path`` — его имя); строка несёт канал раскатки (``None`` — не
+    назначен или архив: канал у одной версии на канал, перевод новой
+    снимает его с прежней), описание и кто/когда назначил.
+    """
 
     __tablename__ = "agent_releases"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     version: Mapped[str] = mapped_column(String(32), unique=True)
-    channel: Mapped[ReleaseChannel] = mapped_column(_str_enum(ReleaseChannel, "release_channel"))
+    channel: Mapped[ReleaseChannel | None] = mapped_column(
+        _str_enum(ReleaseChannel, "release_channel"), nullable=True, default=None
+    )
     file_path: Mapped[str] = mapped_column(Text)
     sha256: Mapped[str] = mapped_column(String(64))
     released_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, server_default=func.now()
     )
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, default=None)
+    notes: Mapped[str] = mapped_column(Text, default="", server_default="")
+    published_by: Mapped[str | None] = mapped_column(String(64), default=None)
+    channel_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+
+
+class AgentUpdateStatus(enum.StrEnum):
+    """Состояние установки релиза на агенте (журнал раскатки)."""
+
+    COMMANDED = "commanded"  # команда отправлена, ответа ещё нет
+    STARTED = "started"  # агент принял: архив проверен, служба перезапускается
+    INSTALLED = "installed"  # новая версия в работе (hello / самопроверка)
+    FAILED = "failed"  # отказ до рестарта или без отката
+    ROLLED_BACK = "rolled_back"  # самопроверка не прошла, bat вернул прежнюю
+
+
+class AgentUpdate(Base):
+    """Журнал раскатки: одна строка на пару (агент, версия).
+
+    Движок автовыката (center/rollout.py) по ней решает, кому слать
+    команду и кого больше не трогать (откат терминален до ручного повтора,
+    отказы повторяются ограниченно); панель показывает по ней «Раскатку».
+    """
+
+    __tablename__ = "agent_updates"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "version", name="uq_agent_updates_agent_version"),
+        Index("ix_agent_updates_version", "version"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id"))
+    version: Mapped[str] = mapped_column(String(32))
+    status: Mapped[AgentUpdateStatus] = mapped_column(
+        _str_enum(AgentUpdateStatus, "agent_update_status")
+    )
+    origin: Mapped[str] = mapped_column(String(16), default="auto", server_default="auto")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    commanded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    error: Mapped[str | None] = mapped_column(Text, default=None)
+    running_version: Mapped[str | None] = mapped_column(String(32), default=None)
+    note: Mapped[str | None] = mapped_column(Text, default=None)
 
 
 def weighing_checksum(

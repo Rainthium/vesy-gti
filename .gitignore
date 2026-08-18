@@ -27,6 +27,7 @@ dist/
 *.sqlite3
 *.db
 /photos_data/
+/releases_data/
 logs/
 *.log
 

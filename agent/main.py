@@ -42,18 +42,19 @@ from agent.diagnostics import default_log_path, read_log_tail
 from agent.drivers.base import ScaleState
 from agent.drivers.cas22 import Cas22Driver
 from agent.photos import THUMB_SUFFIX, PhotoLibrary
+from agent.selfcheck import UpdateSelfCheck
 from agent.settings import SettingsManager, merge_center_settings
 from agent.sync.photo_uploader import PhotoUploader
 from agent.sync.retention import PhotoRetention
 from agent.sync.storage import AgentStorage
 from agent.sync.ws_client import CenterClient, ClientConfig, run_forever
-from agent.updater import AgentUpdater
+from agent.updater import AgentUpdater, install_base
 from agent.web.app import create_app
 from agent.web.services import AgentInfo
 from agent.weighing.auto import AutoConfig, AutoOperationRunner
 from agent.weighing.manual import ManualOperationFlow, ManualPreview
 from agent.weighing.watcher import ScaleWatcher
-from shared.enums import CameraRole, Operation
+from shared.enums import CameraRole, Operation, ScaleStatus
 from shared.messages import (
     CameraStatus,
     ConfigStatus,
@@ -211,6 +212,9 @@ class AgentRuntime:
         self._preview_cameras: dict[CameraRole, CameraConfig] = {
             camera.role: camera for camera in config.camera_configs()
         }
+        # самопроверка после автообновления (0.4.19): собирается в build_runtime,
+        # run_agent подставляет web_ready и запускает задачу
+        self.selfcheck: UpdateSelfCheck | None = None
         self._info = AgentInfo(
             site_name=config.site_name,
             scale_name=config.scale_name,
@@ -453,6 +457,9 @@ def build_runtime(
         base_url=http_base_url(config.center.url),
         token=config.center.token,
         busy=runner.busy,
+        # шёл ли поток индикатора перед обновлением — новая версия обязана
+        # его сохранить (самопроверка 0.4.19, architecture §7а)
+        indicator_ok=lambda: driver.state.status is ScaleStatus.OK,
     )
     # сторожок обновления докладывает центру через клиента (он создаётся ниже)
 
@@ -486,6 +493,18 @@ def build_runtime(
         ),
     )
     updater.notify = client.post_message
+    # самопроверка после автообновления и доклад об откате (0.4.19): собирается
+    # здесь, чтобы обновление знало о ней (второе обновление не стартует, пока
+    # идёт проверка первого); web_ready подставит run_agent после старта uvicorn
+    selfcheck = UpdateSelfCheck(
+        install_base(),
+        agent_id=config.agent_id,
+        web_ready=lambda: False,
+        center_connected=lambda: client.connected,
+        indicator_ok=lambda: driver.state.status is ScaleStatus.OK,
+        notify=client.post_message,
+    )
+    updater.selfcheck_hold = selfcheck.hold_reason
     uploader = PhotoUploader(
         storage,
         base_url=http_base_url(config.center.url),
@@ -543,6 +562,7 @@ def build_runtime(
     # (менеджер собирается раньше); без подписки превью снимало бы по
     # локальному конфигу до рестарта службы (боевой урок К-К 14.08.2026)
     manager_ref[-1].set_preview(runtime)
+    runtime.selfcheck = selfcheck
     return runtime, driver, storage, client, uploader, camera_health, watcher, auto_config, streams
 
 
@@ -625,6 +645,13 @@ async def run_agent(
         tasks.append(asyncio.create_task(retention.run(), name="photo-retention"))
     else:
         logger.info("ретеншн локальных фото выключен (photo_retention_days = 0)")
+    # самопроверка после автообновления и доклад об откате (0.4.19): задача
+    # ЗАКАНЧИВАЕТСЯ за минуты, поэтому живёт вне списка выше — иначе её
+    # штатный выход остановил бы агента; в dev-запуске (не frozen) молчит
+    selfcheck = runtime.selfcheck
+    assert selfcheck is not None  # собран в build_runtime
+    selfcheck.web_ready = lambda: server.started
+    selfcheck_task = asyncio.create_task(selfcheck.run(), name="update-selfcheck")
     try:
         # веб-сервер завершается только по сигналу — ждём любую из задач
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -632,9 +659,10 @@ async def run_agent(
             task.result()  # поднять исключение упавшей задачи
     finally:
         server.should_exit = True
+        selfcheck_task.cancel()
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(selfcheck_task, *tasks, return_exceptions=True)
         driver.stop()
         streams.stop_all()
         storage.close()

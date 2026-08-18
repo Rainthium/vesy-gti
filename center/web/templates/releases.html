@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% block title %}Релизы агентов — Весовая система{% endblock %}
+{% block body %}
+{% set active_tab = 'releases' %}
+{% include "_header.html" %}
+{# Экран по макету center-releases.dc.html: каталог версий с каналами и ход
+   раскатки по объектам (architecture §7а). Только администратор. #}
+{% set channel_pills = {'pilot': 'pill-warn', 'stable': 'pill-ok'} %}
+{% set pilot = targets.get(channels[0]) %}
+{% set stable = targets.get(channels[1]) %}
+<main class="content content--wide">
+  <div class="page-head">
+    <h1>Релизы агентов</h1>
+    <span class="page-meta">версии, каналы pilot → stable и ход раскатки по объектам</span>
+  </div>
+  {% if note %}<div class="flash-note">{{ note }}</div>{% endif %}
+
+  <section class="table-card">
+    <div class="card-title">Загрузить новый релиз</div>
+    <form class="user-create release-upload" method="post" action="/panel/releases/upload" enctype="multipart/form-data">
+      <label>Архив релиза (zip из GitHub Actions)
+        <input type="file" name="file" accept=".zip,application/zip" required>
+      </label>
+      <button type="submit" class="btn-primary">Загрузить</button>
+    </form>
+    <div class="card-hint">Имя файла — <span class="mono">ves-agent-X.Y.Z-win64.zip</span>: версия берётся из имени, оглавление проверяется (внутри должен быть app/ves-agent.exe), выложенная версия не перезаписывается. Тот же файл можно положить на ВМ в каталог релизов вручную (deploy/README, §9) — он появится в списке сам. Загруженный релиз никуда не раскатывается, пока ему не назначен канал.</div>
+  </section>
+
+  <section class="table-card">
+    <div class="card-title">Версии
+      <small>канал у одной версии на канал: перевод новой версии снимает его с прежней; агенты канала pilot без своего релиза получают stable</small>
+    </div>
+    <div class="journal-scroll">
+    <table class="journal releases">
+      <thead><tr>
+        <th>Версия</th>
+        <th>Дата</th>
+        <th>Канал</th>
+        <th>sha256</th>
+        <th>Размер</th>
+        <th>Описание</th>
+        <th>Агентов</th>
+        <th class="num">Действия</th>
+      </tr></thead>
+      <tbody>
+      {% for r in catalog %}
+      {% set st = stats.get(r.version) %}
+      <tr class="{{ 'row-off' if not r.present else '' }}">
+        <td class="cell-version">{{ r.version }}{% if not r.present %}<div class="cell-sub">файла нет в каталоге</div>{% endif %}</td>
+        <td class="cell-muted">{{ r.released_at | fmt_dt if r.released_at else '—' }}</td>
+        <td>
+          {% if r.channel %}
+          <span class="pill {{ channel_pills.get(r.channel.value, '') }}"><span class="dot"></span>{{ r.channel.value }}</span>
+          {% if r.channel_changed_at %}<div class="cell-sub">с {{ r.channel_changed_at | fmt_dt }}{% if r.published_by %} · {{ r.published_by }}{% endif %}</div>{% endif %}
+          {% elif r.channel_changed_at %}
+          <span class="pill"><span class="dot"></span>архив</span>
+          {% else %}
+          <span class="pill"><span class="dot"></span>не назначен</span>
+          {% endif %}
+        </td>
+        <td><span class="mono sha" title="{{ r.sha256 }}">{{ r.sha_short }}</span></td>
+        <td class="cell-muted">{{ r.size_mb }}</td>
+        <td class="cell-notes">
+          <form method="post" action="/panel/releases/{{ r.version }}/notes" class="notes-form">
+            <input class="cell-input wide" name="notes" maxlength="500" value="{{ r.notes }}" placeholder="что изменилось">
+            <button type="submit" class="btn-row">Сохранить</button>
+          </form>
+        </td>
+        <td class="cell-muted">{{ st.on_version if st else 0 }}{% if st and st.trouble %} <span class="pill pill-err"><span class="dot"></span>сбоев: {{ st.trouble }}</span>{% endif %}</td>
+        <td class="cell-actions num">
+          {% if r.present %}
+            {% if r.channel and r.channel.value == 'stable' %}
+              <span class="cell-muted">текущий stable</span>
+              <form method="post" action="/panel/releases/{{ r.version }}/channel" class="inline-form">
+                <input type="hidden" name="channel" value="none">
+                <button type="submit" class="btn-row btn-row-danger" onclick="return confirm('Отозвать релиз {{ r.version }} из stable? Уже обновлённые агенты останутся на нём, новых команд не будет.')">Отозвать</button>
+              </form>
+            {% elif r.channel and r.channel.value == 'pilot' %}
+              <form method="post" action="/panel/releases/{{ r.version }}/channel" class="inline-form">
+                <input type="hidden" name="channel" value="stable">
+                <button type="submit" class="btn-row btn-row-primary" onclick="return confirm('Перевести релиз {{ r.version }} в stable? Все агенты канала stable на связи начнут обновляться (не больше чем по 3 одновременно).')">Перевести в stable</button>
+              </form>
+              <form method="post" action="/panel/releases/{{ r.version }}/channel" class="inline-form">
+                <input type="hidden" name="channel" value="none">
+                <button type="submit" class="btn-row btn-row-danger" onclick="return confirm('Отозвать релиз {{ r.version }} из pilot?')">Отозвать</button>
+              </form>
+            {% else %}
+              <form method="post" action="/panel/releases/{{ r.version }}/channel" class="inline-form">
+                <input type="hidden" name="channel" value="pilot">
+                <button type="submit" class="btn-row btn-row-primary" onclick="return confirm('Назначить релиз {{ r.version }} каналу pilot? Пилотные агенты на связи начнут обновляться.')">В pilot</button>
+              </form>
+              <form method="post" action="/panel/releases/{{ r.version }}/channel" class="inline-form">
+                <input type="hidden" name="channel" value="stable">
+                <button type="submit" class="btn-row" onclick="return confirm('Назначить релиз {{ r.version }} каналу stable, минуя pilot? Все агенты канала stable на связи начнут обновляться.')">В stable</button>
+              </form>
+            {% endif %}
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8" class="empty">Релизов нет — загрузите архив выше или положите его в каталог релизов на ВМ</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section class="table-card">
+    <div class="card-title rollout-title">
+      <span>Раскатка{% if pilot %} · pilot {{ pilot.version }}{% endif %}{% if stable %} · stable {{ stable.version }}{% endif %}</span>
+      <small>
+        {% if pilot %}
+          {% set on_pilot = stats.get(pilot.version, {}).get('on_version', 0) %}
+          {{ on_pilot }} {{ 'агент' if on_pilot % 10 == 1 and on_pilot % 100 != 11 else ('агента' if on_pilot % 10 in (2, 3, 4) and on_pilot % 100 not in (12, 13, 14) else 'агентов') }} на pilot-релизе{% if pilot_days is not none %} · в pilot {{ pilot_days }} дн.{% endif %} · перевод в stable — кнопкой после наблюдения
+        {% elif stable %}
+          pilot-релиза нет: все каналы получают stable {{ stable.version }}
+        {% else %}
+          релиз ни одному каналу не назначен — раскатка стоит
+        {% endif %}
+      </small>
+    </div>
+    <div class="journal-scroll">
+    <table class="journal rollout">
+      <thead><tr>
+        <th>Объект / весы</th>
+        <th>Канал</th>
+        <th>Текущая версия</th>
+        <th>Цель</th>
+        <th>Статус установки</th>
+        <th>Обновлено</th>
+        <th class="num">Действия</th>
+      </tr></thead>
+      <tbody>
+      {% for a in agents %}
+      <tr>
+        <td class="cell-vehicle">{{ a.site_name }}<div class="cell-sub">{{ a.scale_name }} · {{ 'онлайн' if a.online else 'офлайн' }}</div></td>
+        <td>
+          <form method="post" action="/panel/refs/agents/{{ a.agent_id }}/channel" class="inline-form channel-form">
+            <input type="hidden" name="back" value="releases">
+            <select name="channel" class="cell-input narrow-select" onchange="this.form.submit()">
+              {% for ch in channels %}
+              <option value="{{ ch.value }}" {{ 'selected' if ch == a.channel else '' }}>{{ ch.value }}</option>
+              {% endfor %}
+            </select>
+          </form>
+        </td>
+        <td class="cell-gross">{{ a.version or '—' }}</td>
+        <td class="cell-muted">{{ a.target.version if a.target else '—' }}</td>
+        <td>
+          <span class="pill {{ a.pill_class }}"><span class="dot"></span>{{ a.status_text }}</span>
+          {% if a.detail %}<div class="cell-sub status-detail" title="{{ a.detail }}">{{ a.detail }}</div>{% endif %}
+        </td>
+        <td class="cell-muted">{{ a.updated_at | fmt_dt if a.updated_at else '—' }}</td>
+        <td class="cell-actions num">
+          {% if a.can_command %}
+          <form method="post" action="/panel/releases/agents/{{ a.scale_id }}/update" class="inline-form">
+            <button type="submit" class="btn-row btn-row-primary"
+                    onclick="return confirm('Отправить агенту команду обновления до v{{ a.target.version }} сейчас? Служба будет перезапущена (несколько секунд простоя).')">
+              {{ 'Повторить' if a.status_key in ('failed', 'rolled_back') else 'Обновить сейчас' }}
+            </button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="empty">Агенты не заведены</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </section>
+  <p class="table-hint">Агент скачивает архив с центра, проверяет sha256 и оглавление, ставит новую версию рядом с текущей и после перезапуска проходит самопроверку (веб-порт, связь с центром, поток индикатора). При сбое — автоматический откат на прежнюю версию и событие «Обновление» в «Событиях» и Telegram (агенты 0.4.19 и новее). Раскатка идёт не больше чем по 3 агента одновременно; отказ повторяется до 3 раз с паузой полчаса, откат — только кнопкой «Повторить». Смена канала агента здесь — та же, что на «Справочниках».</p>
+</main>
+{% endblock %}

@@ -28,6 +28,7 @@ from center.events import EventBroker, EventPublisher, RabbitBroker
 from center.monitoring import MonitoringService, TelegramNotifier
 from center.photos.router import PhotosConfig, create_photos_router
 from center.releases_router import create_releases_router
+from center.rollout import RolloutService
 from center.web.router import create_panel_router
 
 logger = logging.getLogger(__name__)
@@ -111,9 +112,19 @@ def create_app() -> FastAPI:
     broker: EventBroker | None = RabbitBroker(rabbitmq_url) if rabbitmq_url else None
     publisher = EventPublisher(session_factory, broker, photos_dir=photos_config.photos_dir)
 
+    # каталог релизов агента (автообновление): архивы кладутся на ВМ или
+    # загружаются через панель; автовыкат по каналам pilot/stable — фоновая
+    # задача (architecture §7а): команду получают агенты на связи, чья
+    # версия ниже релиза их канала
+    releases_dir = Path(os.environ.get("AGENT_RELEASES_DIR", "./releases_data"))
+    rollout = RolloutService(session_factory, hub, releases_dir)
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        tasks = [asyncio.create_task(monitor.run(), name="monitoring")]
+        tasks = [
+            asyncio.create_task(monitor.run(), name="monitoring"),
+            asyncio.create_task(rollout.run(), name="agent-rollout"),
+        ]
         if notifier.enabled:
             tasks.append(asyncio.create_task(notifier.run(), name="telegram-notifier"))
         else:
@@ -163,8 +174,6 @@ def create_app() -> FastAPI:
     )
     static_dir = Path(__file__).parent / "web" / "static"
     app.mount("/panel/static", StaticFiles(directory=str(static_dir)), name="panel-static")
-    # каталог релизов агента (автообновление): архивы кладутся на ВМ
-    releases_dir = Path(os.environ.get("AGENT_RELEASES_DIR", "./releases_data"))
     app.include_router(create_agents_router(hub, session_factory))
     app.include_router(create_api_v1_router(hub, session_factory, api_v1_config))
     app.include_router(create_api_v2_router(hub, session_factory, api_v2_config))
@@ -184,4 +193,5 @@ def create_app() -> FastAPI:
     app.state.session_factory = session_factory
     app.state.monitor = monitor
     app.state.publisher = publisher
+    app.state.rollout = rollout
     return app

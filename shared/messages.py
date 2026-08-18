@@ -39,6 +39,11 @@ SECURE_SYNC_MIN_VERSION = (0, 4, 0)
 # по запросу центра (удалённая диагностика без захода в сеть объекта).
 LOG_TAIL_MIN_VERSION = (0, 4, 5)
 
+# Минимальная версия агента со стадиями автообновления (самопроверка →
+# ``installed``, откат → ``rolled_back``): центр не дублирует его доклады
+# событиями по hello и ждёт подтверждения самопроверкой, а не hello.
+UPDATE_STAGES_MIN_VERSION = (0, 4, 19)
+
 
 def _version_tuple(version: str | None) -> tuple[int, ...] | None:
     if not version:
@@ -53,6 +58,12 @@ def supports_secure_sync(version: str | None) -> bool:
     """Можно ли агенту этой версии слать снимки с секретами."""
     parts = _version_tuple(version)
     return parts is not None and parts >= SECURE_SYNC_MIN_VERSION
+
+
+def supports_update_stages(version: str | None) -> bool:
+    """Докладывает ли агент этой версии исход обновления сам (самопроверка/откат)."""
+    parts = _version_tuple(version)
+    return parts is not None and parts >= UPDATE_STAGES_MIN_VERSION
 
 
 def supports_log_tail(version: str | None) -> bool:
@@ -177,13 +188,27 @@ class OfflineSync(BaseModel):
 
 
 class UpdateStatus(BaseModel):
-    """Отчёт агента о ходе автообновления (для логов и панели центра)."""
+    """Отчёт агента о ходе автообновления (для логов и панели центра).
+
+    Стадии (агент 0.4.19, автовыкат по каналам — architecture §7а):
+    - ``started`` — ответ на команду: ``ok=True`` — архив проверен, служба
+      будет перезапущена; ``ok=False`` — отказ до рестарта (занято, sha256,
+      сторожок «служба не перезапущена»);
+    - ``installed`` — новая версия запустилась и прошла самопроверку
+      (веб-порт, связь с центром, поток индикатора);
+    - ``rolled_back`` — самопроверка не прошла или служба не поднялась:
+      self-update.bat вернул прежнюю версию, докладывает уже она
+      (``running_version`` — что работает сейчас, ``version`` — что ставили).
+    Старые агенты стадии не знают и шлют только ``started``.
+    """
 
     type: Literal["update_status"] = "update_status"
     agent_id: str
     version: str  # целевая версия из команды
     ok: bool  # True — обновление запущено (перезапуск службы пошёл)
     error: str | None = None
+    stage: Literal["started", "installed", "rolled_back"] = "started"
+    running_version: str | None = None  # какая версия работает в момент доклада
 
 
 class AgentOperatorInfo(BaseModel):

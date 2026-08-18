@@ -19,18 +19,19 @@ import io
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Annotated, Any, cast
 from urllib.parse import quote
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from center import rollout
 from center.agents_ws.hub import AgentHub, AgentHubError
 from center.db import repo
 from center.db.models import (
@@ -46,7 +47,12 @@ from center.db.models import (
     Weighing,
 )
 from center.monitoring import KIND_LABELS, ActiveAlert, MonitoringService, MonitoringThresholds
-from center.releases import AgentRelease, latest_release
+from center.releases import (
+    ReleaseError,
+    parse_release_filename,
+    store_release,
+    version_key,
+)
 from center.web import queries, refs_admin, users_admin
 from shared import card as weight_card
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
@@ -315,10 +321,29 @@ def create_panel_router(
             if (equipment := hub.equipment(item.scale.id)) is not None
         }
 
-    async def _latest_release() -> AgentRelease | None:
+    def _update_targets(
+        session: Session, scales: list[queries.DashboardScale]
+    ) -> dict[int, rollout.ReleaseInfo]:
+        """Весы → релиз канала агента, если он новее версии агента (кнопка
+        «Обновить до vX» на карточке; автовыкат шлёт то же самое сам)."""
         if releases_dir is None:
-            return None
-        return await asyncio.to_thread(latest_release, releases_dir)
+            return {}
+        targets = rollout.channel_targets(rollout.release_catalog(session, releases_dir))
+        result: dict[int, rollout.ReleaseInfo] = {}
+        for item in scales:
+            if item.agent is None:
+                continue
+            target = rollout.target_for(item.agent.channel, targets)
+            current = version_key(item.agent.version)
+            wanted = version_key(target.version) if target else None
+            if (
+                target is not None
+                and current is not None
+                and wanted is not None
+                and current < wanted
+            ):
+                result[item.scale.id] = target
+        return result
 
     def _dashboard_counters(
         scales: list[queries.DashboardScale],
@@ -392,6 +417,7 @@ def create_panel_router(
         обновляются тем же опросом, что и сетка объектов)."""
         scales = await asyncio.to_thread(_db, lambda s: queries.dashboard_scales(s, scope))
         today = await asyncio.to_thread(_db, lambda s: queries.weighings_today(s, scope))
+        update_targets = await asyncio.to_thread(_db, lambda s: _update_targets(s, scales))
         equipment = _equipment_map(scales)
         alerts = monitor.active_alerts(scope) if monitor is not None else []
         pending_events = await asyncio.to_thread(_db, repo.pending_event_stats)
@@ -427,7 +453,7 @@ def create_panel_router(
             ),
             "all_good": not alerts
             and all(item.agent is None or online_map.get(item.scale.id) for item in scales),
-            "release": await _latest_release(),
+            "update_targets": update_targets,
         }
 
     @router.get("/", response_class=HTMLResponse)
@@ -448,32 +474,64 @@ def create_panel_router(
         context = await _dashboard_context(scope)
         return render("fragments/dashboard_grid.html", request, user=user, **context)
 
+    async def _command_update(admin: str, scale_id: int) -> str:
+        """Послать агенту весов команду обновления до релиза его канала; вернуть заметку.
+
+        Ручная команда идёт в тот же журнал раскатки (origin=manual): движок
+        автовыката видит её в полёте и не дублирует; для агента после
+        отката это и есть «Повторить».
+        """
+        if releases_dir is None:
+            return "каталог релизов не настроен"
+
+        def _target(session: Session) -> tuple[int | None, rollout.ReleaseInfo | None, str | None]:
+            agent = _agent_of(session, scale_id)
+            if agent is None:
+                return None, None, None
+            targets = rollout.channel_targets(rollout.release_catalog(session, releases_dir))
+            return agent.id, rollout.target_for(agent.channel, targets), agent.version
+
+        agent_id, target, current = await asyncio.to_thread(_db, _target)
+        if agent_id is None:
+            return "у весов нет агента"
+        if target is None:
+            return "каналу агента релиз не назначен — назначьте его на экране «Релизы»"
+        current_key, wanted_key = version_key(current), version_key(target.version)
+        if current_key is not None and wanted_key is not None and current_key >= wanted_key:
+            # раскатка только вверх: понижение версии командой не делаем
+            # (даже прямым POST) — как и движок автовыката
+            return f"агент уже на версии {current} — релиз канала {target.version} не новее"
+        if not hub.connected(scale_id):
+            return "агент не в сети — обновление невозможно"
+        command = UpdateCommand(
+            version=target.version,
+            url_path=f"/agents/releases/{target.filename}",
+            sha256=target.sha256,
+            size_bytes=target.size_bytes,
+        )
+        try:
+            await hub.send_update_command(scale_id, command)
+        except AgentHubError as exc:
+            return str(exc)
+        await asyncio.to_thread(
+            _db,
+            lambda s: rollout.mark_commanded(
+                s, agent_id, target.version, origin=rollout.ORIGIN_MANUAL
+            ),
+        )
+        note = f"команда обновления до v{target.version} отправлена агенту"
+        logger.info("панель (%s): весы %d — %s", admin, scale_id, note)
+        return note
+
     @router.post("/scales/{scale_id}/update-agent")
     async def update_agent(request: Request, admin: PanelAdmin, scale_id: int) -> RedirectResponse:
-        """Разослать агенту команду автообновления до актуального релиза.
+        """Разослать агенту команду автообновления до релиза его канала.
 
         Только админ: перезапуск службы — простой весов, и запускать его
         чужому объекту по подобранному scale_id нельзя (находка ревью
         11.08.2026: прежде маршрут требовал лишь входа в панель).
         """
-        release = await _latest_release()
-        if release is None:
-            note = "релизы агента на центр не выложены"
-        elif not hub.connected(scale_id):
-            note = "агент не в сети — обновление невозможно"
-        else:
-            command = UpdateCommand(
-                version=release.version,
-                url_path=f"/agents/releases/{release.filename}",
-                sha256=release.sha256,
-                size_bytes=release.size_bytes,
-            )
-            try:
-                await hub.send_update_command(scale_id, command)
-                note = f"команда обновления до v{release.version} отправлена агенту"
-                logger.info("панель (%s): весы %d — %s", admin, scale_id, note)
-            except AgentHubError as exc:
-                note = str(exc)
+        note = await _command_update(admin, scale_id)
         return RedirectResponse(f"/panel/?update_note={quote(note)}", status_code=303)
 
     def _agent_of(session: Session, scale_id: int) -> Agent | None:
@@ -1373,17 +1431,165 @@ def create_panel_router(
         admin: PanelAdmin,
         agent_id: int,
         channel: Annotated[str, Form()],
+        back: Annotated[str, Form()] = "",
     ) -> RedirectResponse:
+        # та же форма живёт и на экране «Релизы» (back=releases) — возврат туда
+        redirect = _releases_redirect if back == "releases" else _refs_redirect
         parsed_channel = _parse_channel(channel)
         if parsed_channel is None:
-            return _refs_redirect("неизвестный канал")
+            return redirect("неизвестный канал")
         error = await asyncio.to_thread(
             _db, lambda s: refs_admin.set_agent_channel(s, agent_id, parsed_channel)
         )
         if error is None:
             logger.info("панель (%s): канал агента id=%d изменён", admin, agent_id)
-            return _refs_redirect("канал агента изменён")
-        return _refs_redirect(error)
+            return redirect("канал агента изменён")
+        return redirect(error)
+
+    # --- релизы агентов: каналы и раскатка (только администратор) ---
+
+    def _releases_redirect(note: str) -> RedirectResponse:
+        return RedirectResponse(f"/panel/releases?note={quote(note)}", status_code=303)
+
+    @router.get("/releases", response_class=HTMLResponse)
+    async def releases_page(request: Request, admin: PanelAdmin) -> HTMLResponse:
+        """Экран «Релизы агентов» (макет center-releases): каталог версий с
+        каналами и ход раскатки по объектам. Только админ — здесь
+        перезапускаются службы всех весов."""
+        if releases_dir is None:
+            raise HTTPException(status_code=404, detail="каталог релизов не настроен")
+        connected = set(hub.connected_scale_ids())
+        catalog, targets, agents = await asyncio.to_thread(
+            _db,
+            lambda s: rollout.rollout_overview(s, releases_dir, connected=connected),
+        )
+        stats = {info.version: rollout.release_stats(agents, info.version) for info in catalog}
+        now = datetime.now(UTC)
+        pilot = targets.get(ReleaseChannel.PILOT)
+        pilot_days = None
+        if pilot is not None and pilot.channel_changed_at is not None:
+            changed = pilot.channel_changed_at
+            if changed.tzinfo is None:
+                changed = changed.replace(tzinfo=UTC)
+            pilot_days = max(0, (now - changed).days)
+        return render(
+            "releases.html",
+            request,
+            user=admin,
+            catalog=catalog,
+            targets=targets,
+            agents=agents,
+            stats=stats,
+            pilot_days=pilot_days,
+            channels=list(ReleaseChannel),
+            note=request.query_params.get("note"),
+        )
+
+    @router.post("/releases/upload")
+    async def releases_upload(
+        request: Request,
+        admin: PanelAdmin,
+        file: Annotated[UploadFile, File()],
+    ) -> RedirectResponse:
+        """Загрузить архив релиза (тот же zip, что собирает GitHub Actions).
+
+        Имя файла — по шаблону ves-agent-X.Y.Z-win64.zip (версия берётся из
+        него), оглавление проверяется как у агента (app/ves-agent.exe, без
+        zip-slip), файл кладётся атомарно; версия не перезаписывается.
+        """
+        if releases_dir is None:
+            return _releases_redirect("каталог релизов не настроен")
+        # только basename: браузеры шлют имя без пути, но пути обоих стилей
+        # («/» и «\\») на всякий случай отрезаются — обход каталога невозможен
+        filename = PureWindowsPath(file.filename or "").name
+        version = parse_release_filename(filename)
+        if version is None:
+            return _releases_redirect(
+                "имя файла должно быть ves-agent-X.Y.Z-win64.zip — версия берётся из имени"
+            )
+        tmp = releases_dir / f".upload-{version}.tmp"
+        try:
+            releases_dir.mkdir(parents=True, exist_ok=True)
+            with tmp.open("wb") as out:
+                while chunk := await file.read(1 << 20):
+                    out.write(chunk)
+            release = await asyncio.to_thread(store_release, releases_dir, filename, tmp)
+        except ReleaseError as exc:
+            return _releases_redirect(f"релиз не принят: {exc}")
+        except OSError as exc:
+            logger.exception("панель (%s): загрузка релиза %s не удалась", admin, filename)
+            return _releases_redirect(f"релиз не сохранён: {exc}")
+        finally:
+            tmp.unlink(missing_ok=True)
+        await asyncio.to_thread(
+            _db, lambda s: rollout.register_release(s, releases_dir, release.version, by=admin)
+        )
+        logger.info("панель (%s): загружен релиз агента %s", admin, release.version)
+        return _releases_redirect(
+            f"релиз {release.version} загружен ({release.size_bytes // (1024 * 1024)} МБ, "
+            f"sha256 {release.sha256[:12]}…) — назначьте ему канал"
+        )
+
+    @router.post("/releases/{version}/channel")
+    async def releases_channel(
+        request: Request,
+        admin: PanelAdmin,
+        version: str,
+        channel: Annotated[str, Form()],
+    ) -> RedirectResponse:
+        """Назначить/снять канал: pilot, stable или none (отозвать)."""
+        if releases_dir is None:
+            return _releases_redirect("каталог релизов не настроен")
+        if version_key(version) is None:
+            return _releases_redirect("неверная версия")
+        parsed: ReleaseChannel | None
+        if channel == "none":
+            parsed = None
+        else:
+            parsed = _parse_channel(channel)
+            if parsed is None:
+                return _releases_redirect("неизвестный канал")
+        try:
+            await asyncio.to_thread(
+                _db,
+                lambda s: rollout.set_release_channel(s, releases_dir, version, parsed, by=admin),
+            )
+        except ReleaseError as exc:
+            return _releases_redirect(str(exc))
+        if parsed is None:
+            note = f"релиз {version} отозван: каналу больше не назначен, уже обновлённые остаются"
+        else:
+            note = (
+                f"релиз {version} назначен каналу {parsed.value} — агенты канала на связи "
+                "получат команду в течение минуты"
+            )
+        logger.info("панель (%s): %s", admin, note)
+        return _releases_redirect(note)
+
+    @router.post("/releases/{version}/notes")
+    async def releases_notes(
+        request: Request,
+        admin: PanelAdmin,
+        version: str,
+        notes: Annotated[str, Form()] = "",
+    ) -> RedirectResponse:
+        if releases_dir is None:
+            return _releases_redirect("каталог релизов не настроен")
+        if version_key(version) is None:
+            return _releases_redirect("неверная версия")
+        await asyncio.to_thread(
+            _db, lambda s: rollout.set_release_notes(s, releases_dir, version, notes, by=admin)
+        )
+        return _releases_redirect(f"описание релиза {version} сохранено")
+
+    @router.post("/releases/agents/{scale_id}/update")
+    async def releases_agent_update(
+        request: Request, admin: PanelAdmin, scale_id: int
+    ) -> RedirectResponse:
+        """«Обновить сейчас»/«Повторить» из блока раскатки — та же команда, что
+        кнопка на дашборде, возврат на экран релизов."""
+        note = await _command_update(admin, scale_id)
+        return _releases_redirect(note)
 
     # --- пользователи (только администратор; права сверяются с БД) ---
 
