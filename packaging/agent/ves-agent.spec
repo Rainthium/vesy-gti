@@ -43,6 +43,18 @@ a = Analysis(  # noqa: F821
         "uvicorn.lifespan",
         "uvicorn.lifespan.on",
         "uvicorn.lifespan.off",
+        # pyserial подгружает обработчики URL динамически
+        # (serial_for_url → importlib) — без явного перечисления замороженная
+        # сборка не знает протокол socket:// (боевой урок Аламедина 19.08.2026:
+        # поток индикатора приходит от UniServer по TCP, com0com на Windows 11
+        # не грузится). cp2110 не включаем — тянет библиотеку hid.
+        "serial.urlhandler",
+        "serial.urlhandler.protocol_socket",
+        "serial.urlhandler.protocol_loop",
+        "serial.urlhandler.protocol_rfc2217",
+        "serial.urlhandler.protocol_spy",
+        "serial.urlhandler.protocol_hwgrep",
+        "serial.urlhandler.protocol_alt",
     ],
     hookspath=[],
     # изолированный режим замороженного Python игнорирует PYTHONUTF8 —
