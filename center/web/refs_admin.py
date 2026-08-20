@@ -292,11 +292,14 @@ def save_scale_settings(
     cycle: CycleSettings,
     port: str,
     baudrate: int | None,
+    indicator_model: str = "",
 ) -> str | None:
     """Сохранить настройки весов (страница настроек, решение Игоря 10.08.2026).
 
     Цикл — полный набор в scales.thresholds; COM-порт/скорость —
-    в scales.port_cfg (пустой порт = порт остаётся локальным на весовом ПК).
+    в scales.port_cfg (пустой порт = порт остаётся локальным на весовом ПК);
+    indicator_model — подпись в интерфейсе агента (пустая = подписью
+    управляет локальный конфиг, 20.08.2026).
     Доставку агенту делает маршрут (push + при каждом hello).
     """
     scale = session.get(Scale, scale_id)
@@ -314,8 +317,12 @@ def save_scale_settings(
         return "COM-порт: не длиннее 64 символов"
     if baudrate is not None and not 300 <= baudrate <= 921600:
         return "скорость порта вне разумного диапазона"
+    indicator_model = indicator_model.strip()
+    if len(indicator_model) > 120:
+        return "модель индикатора: не длиннее 120 символов"
     scale.thresholds = values
     scale.port_cfg = {"port": port, "baudrate": baudrate or 9600} if port else None
+    scale.indicator_model = indicator_model or None
     session.commit()
     logger.info("справочники: настройки весов id=%d сохранены", scale_id)
     return None

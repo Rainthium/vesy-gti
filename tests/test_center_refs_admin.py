@@ -1384,6 +1384,45 @@ class TestSaveScaleSettings:
         db_session.refresh(scale)
         assert scale.port_cfg == {"port": "COM11", "baudrate": 9600}
 
+    def test_indicator_model_saved_and_cleared(self, db_session: Session) -> None:
+        """Подпись индикатора (20.08.2026) сохраняется с обрезкой пробелов;
+        пустая строка очищает до None (подписью правит локальный конфиг)."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        error = refs_admin.save_scale_settings(
+            db_session,
+            scale.id,
+            cycle=_make_cycle(),
+            port="",
+            baudrate=None,
+            indicator_model="  CAS CI-201A (весы SCS-80, 80 т)  ",
+        )
+        assert error is None
+        db_session.refresh(scale)
+        assert scale.indicator_model == "CAS CI-201A (весы SCS-80, 80 т)"
+        error = refs_admin.save_scale_settings(
+            db_session, scale.id, cycle=_make_cycle(), port="", baudrate=None, indicator_model=" "
+        )
+        assert error is None
+        db_session.refresh(scale)
+        assert scale.indicator_model is None
+
+    def test_indicator_model_too_long_rejected(self, db_session: Session) -> None:
+        """Подпись длиннее 120 символов отклоняется, БД не тронута."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        error = refs_admin.save_scale_settings(
+            db_session,
+            scale.id,
+            cycle=_make_cycle(),
+            port="",
+            baudrate=None,
+            indicator_model="X" * 121,
+        )
+        assert error is not None and "120" in error
+        db_session.refresh(scale)
+        assert scale.indicator_model is None and scale.thresholds is None
+
     @pytest.mark.parametrize(
         "field",
         [
@@ -1699,6 +1738,23 @@ class TestScaleSettingsRoutes:
         page = refs_env.client.get(f"/panel/refs/scales/{refs_env.scale_id}/settings")
         assert "COM11" in page.text
         assert "19200" in page.text
+
+    def test_post_indicator_model_roundtrip(self, refs_env: RefsEnv) -> None:
+        """Подпись индикатора сохраняется маршрутом и видна на GET (20.08.2026)."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        response = refs_env.client.post(
+            f"/panel/refs/scales/{refs_env.scale_id}/settings",
+            data=_settings_form(indicator_model="VESAR (весы SCS-80, 80 т)"),
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert "настройки сохранены" in _settings_note(response, refs_env.scale_id)
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None
+            assert scale.indicator_model == "VESAR (весы SCS-80, 80 т)"
+        page = refs_env.client.get(f"/panel/refs/scales/{refs_env.scale_id}/settings")
+        assert "VESAR (весы SCS-80, 80 т)" in page.text
 
     def test_post_validation_error_shown_as_note(self, refs_env: RefsEnv) -> None:
         """Ошибка валидации (порог заезда ниже порога пустых) → note, БД не тронута."""

@@ -59,6 +59,13 @@ class CameraPreviewLike(Protocol):
     def set_cameras(self, cameras: list[CameraConfig]) -> None: ...
 
 
+class AgentInfoLike(Protocol):
+    """Минимум от шапки веб-интерфейса (реализация — main.AgentRuntime):
+    подпись индикатора/весов из центра применяется без рестарта (20.08.2026)."""
+
+    def set_indicator_model(self, model: str) -> None: ...
+
+
 # ожидание живого индикатора после смены порта: живой cas22 шлёт поток
 # непрерывно, статус OK появляется за ~1-2 с после открытия порта; запас
 # покрывает пару циклов переоткрытия драйвера (rx_error_timeout_s=3 +
@@ -99,6 +106,8 @@ def merge_center_settings(config: AgentConfig, payload: ScaleSettingsPayload) ->
             port=payload.scale_port,
             baudrate=payload.baudrate or config.scale.baudrate,
         )
+    if payload.indicator_model:
+        updates["indicator_model"] = payload.indicator_model
     if not updates:
         return config
     return config.model_copy(update=updates)
@@ -126,9 +135,10 @@ class SettingsManager:
         self._camera_health = camera_health
         # потоки RTSP-камер: смена URL из центра пересоздаёт их на лету
         self._camera_streams = camera_streams
-        # превью веб-интерфейса подписывается отдельным шагом сборки:
+        # превью и шапка веб-интерфейса подписываются отдельным шагом сборки:
         # AgentRuntime создаётся ПОЗЖЕ менеджера (см. build_runtime)
         self._preview: CameraPreviewLike | None = None
+        self._info_sink: AgentInfoLike | None = None
         self._storage = storage
         # таймауты съёмки локального конфига по ролям: камеры из центра
         # наследуют их (см. merge_center_settings — та же логика при старте)
@@ -138,6 +148,10 @@ class SettingsManager:
     def set_preview(self, preview: CameraPreviewLike) -> None:
         """Подписать превью веб-интерфейса на смену камер из центра."""
         self._preview = preview
+
+    def set_info_sink(self, sink: AgentInfoLike) -> None:
+        """Подписать шапку веб-интерфейса на подпись индикатора из центра."""
+        self._info_sink = sink
 
     async def handle(self, update: ScaleConfigUpdate) -> ConfigStatus:
         """Обработчик для CenterClient: применить и сохранить снимок."""
@@ -175,6 +189,10 @@ class SettingsManager:
             if self._preview is not None:
                 self._preview.set_cameras(cameras)
             logger.info("настройки центра: камеры применены (%d)", len(cameras))
+
+        if settings.indicator_model and self._info_sink is not None:
+            self._info_sink.set_indicator_model(settings.indicator_model)
+            logger.info("настройки центра: подпись индикатора применена")
 
         status = ConfigStatus(ok=True)
         if settings.scale_port:

@@ -277,6 +277,16 @@ class FakePreview:
         self.cameras.append(cameras)
 
 
+class FakeInfoSink:
+    """Шапка веб-интерфейса: подпись индикатора из центра (20.08.2026)."""
+
+    def __init__(self) -> None:
+        self.models: list[str] = []
+
+    def set_indicator_model(self, model: str) -> None:
+        self.models.append(model)
+
+
 class ManagerEnv:
     """Собранный SettingsManager с фейками и памятью на диске (in-memory)."""
 
@@ -302,8 +312,10 @@ class ManagerEnv:
             storage=self.storage,
             local_camera_timeouts=local_camera_timeouts,
         )
-        # как в build_runtime: превью подписывается отдельным шагом сборки
+        # как в build_runtime: превью и шапка подписываются отдельным шагом
         self.manager.set_preview(self.preview)
+        self.info_sink = FakeInfoSink()
+        self.manager.set_info_sink(self.info_sink)
 
     def close(self) -> None:
         self.storage.close()
@@ -449,6 +461,31 @@ class TestManagerCameras:
         assert env.manual.cameras == []
         assert env.camera_health.cameras == []
         assert env.preview.cameras == []
+
+    def test_indicator_model_applied_and_persisted(self, env: ManagerEnv) -> None:
+        """Подпись индикатора из центра доезжает до шапки на лету и в снимок."""
+        status = env.handle(ScaleSettingsPayload(indicator_model="CAS CI-201A (весы SCS-80, 80 т)"))
+        assert status.ok is True
+        assert env.info_sink.models == ["CAS CI-201A (весы SCS-80, 80 т)"]
+        stored = env.stored_payload()
+        assert stored is not None
+        assert stored.indicator_model == "CAS CI-201A (весы SCS-80, 80 т)"
+
+    def test_indicator_model_none_leaves_header_untouched(self, env: ManagerEnv) -> None:
+        """None в поле — подписью продолжает управлять локальный конфиг."""
+        env.handle(ScaleSettingsPayload(cycle=make_cycle_settings()))
+        assert env.info_sink.models == []
+
+    def test_indicator_model_merge_on_start(self) -> None:
+        """merge_center_settings: подпись из снимка главнее локального конфига."""
+        config = make_agent_config()
+        merged = merge_center_settings(
+            config, ScaleSettingsPayload(indicator_model="VESAR (весы SCS-80, 80 т)")
+        )
+        assert merged.indicator_model == "VESAR (весы SCS-80, 80 т)"
+        # None — локальное значение остаётся
+        merged = merge_center_settings(config, ScaleSettingsPayload(cycle=make_cycle_settings()))
+        assert merged.indicator_model == config.indicator_model
 
     def test_without_preview_subscription_still_ok(self) -> None:
         """Менеджер без подписанного превью применяет камеры без ошибок

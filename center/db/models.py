@@ -123,6 +123,10 @@ class Scale(Base):
     legacy_ip: Mapped[str | None] = mapped_column(String(45), default=None)
     legacy_port: Mapped[int | None] = mapped_column(default=None)
     legacy_autoscale: Mapped[int | None] = mapped_column(default=None)
+    # модель индикатора/весов — подпись в интерфейсе агента (шапка,
+    # «Оборудование»); реплицируется агенту в снимке настроек (20.08.2026);
+    # NULL — подписью управляет локальный конфиг весового ПК
+    indicator_model: Mapped[str | None] = mapped_column(String(120), default=None)
     # свидетельство о поверке (одно на весы; печатается на весовой карточке
     # и реплицируется агенту в снимке настроек — офлайн-печать)
     verif_number: Mapped[str | None] = mapped_column(String(64), default=None)

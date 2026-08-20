@@ -1620,6 +1620,18 @@ class TestRepoLoadScaleSettings:
         assert settings.scale_port == "COM7"
         assert settings.baudrate is None
 
+    def test_indicator_model_only_makes_payload(self, repo_env: tuple[Session, int, int]) -> None:
+        """Одна подпись индикатора — уже непустой снимок (20.08.2026)."""
+        session, scale_id, _ = repo_env
+        scale = session.get(Scale, scale_id)
+        assert scale is not None
+        scale.indicator_model = "CAS CI-201A (весы SCS-80, 80 т)"
+        session.commit()
+        settings = repo.load_scale_settings(session, scale_id)
+        assert settings is not None
+        assert settings.indicator_model == "CAS CI-201A (весы SCS-80, 80 т)"
+        assert settings.cycle is None and settings.cameras is None
+
     def test_camera_without_urls_excluded(self, repo_env: tuple[Session, int, int]) -> None:
         """Камера из справочника без единого URL в снимок не входит; если
         других настроек нет — снимок пустой (None)."""

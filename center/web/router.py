@@ -1453,6 +1453,7 @@ def create_panel_router(
             has_center_cycle=bool(scale.thresholds),
             port=port_cfg.get("port") or "",
             baudrate=port_cfg.get("baudrate") or 9600,
+            indicator_model=scale.indicator_model or "",
             verif_number=scale.verif_number or "",
             verif_date=scale.verif_date.isoformat() if scale.verif_date else "",
             verif_until=scale.verif_until.isoformat() if scale.verif_until else "",
@@ -1473,6 +1474,7 @@ def create_panel_router(
         no_data_timeout_s: Annotated[float, Form()],
         port: Annotated[str, Form()] = "",
         baudrate: Annotated[str, Form()] = "",
+        indicator_model: Annotated[str, Form()] = "",
         verif_number: Annotated[str, Form()] = "",
         verif_date: Annotated[str, Form()] = "",
         verif_until: Annotated[str, Form()] = "",
@@ -1498,7 +1500,12 @@ def create_panel_router(
         error = await asyncio.to_thread(
             _db,
             lambda s: refs_admin.save_scale_settings(
-                s, scale_id, cycle=cycle, port=port, baudrate=parsed_baudrate
+                s,
+                scale_id,
+                cycle=cycle,
+                port=port,
+                baudrate=parsed_baudrate,
+                indicator_model=indicator_model,
             ),
         )
         if error is not None:

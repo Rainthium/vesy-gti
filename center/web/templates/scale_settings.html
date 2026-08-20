@@ -56,6 +56,16 @@
     </section>
 
     <section class="table-card">
+      <div class="card-title">Модель индикатора и весов</div>
+      <div class="settings-grid">
+        <label>Подпись в интерфейсе агента
+          <input name="indicator_model" maxlength="120" value="{{ indicator_model }}" placeholder="CAS CI-201A (весы SCS-80, 80 т)">
+        </label>
+      </div>
+      <div class="card-hint">Показывается оператору в шапке и на экране «Оборудование» (агент 0.4.24+). Пустое поле — подписью управляет локальный конфиг весового ПК.</div>
+    </section>
+
+    <section class="table-card">
       <div class="card-title">Свидетельство о поверке</div>
       <div class="settings-grid">
         <label>Номер свидетельства

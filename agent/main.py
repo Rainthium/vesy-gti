@@ -235,6 +235,11 @@ class AgentRuntime:
     def info(self) -> AgentInfo:
         return self._info
 
+    def set_indicator_model(self, model: str) -> None:
+        """Подпись индикатора из центра — в шапку и «Оборудование» на лету
+        (страница оператора покажет при следующей загрузке)."""
+        self._info = replace(self._info, indicator_model=model)
+
     def scale_state(self) -> ScaleState:
         return self._driver.state
 
@@ -587,6 +592,7 @@ def build_runtime(
     # (менеджер собирается раньше); без подписки превью снимало бы по
     # локальному конфигу до рестарта службы (боевой урок К-К 14.08.2026)
     manager_ref[-1].set_preview(runtime)
+    manager_ref[-1].set_info_sink(runtime)
     runtime.selfcheck = selfcheck
     return runtime, driver, storage, client, uploader, camera_health, watcher, auto_config, streams
 

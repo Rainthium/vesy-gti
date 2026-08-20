@@ -569,7 +569,14 @@ def load_scale_settings(session: Session, scale_id: int) -> ScaleSettingsPayload
             verified_on=scale.verif_date,
             valid_until=scale.verif_until,
         )
-    if cycle is None and port is None and cameras is None and verification is None:
+    indicator_model = scale.indicator_model or None
+    if (
+        cycle is None
+        and port is None
+        and cameras is None
+        and verification is None
+        and indicator_model is None
+    ):
         return None
     return ScaleSettingsPayload(
         cycle=cycle,
@@ -577,6 +584,7 @@ def load_scale_settings(session: Session, scale_id: int) -> ScaleSettingsPayload
         scale_port=port,
         baudrate=baudrate,
         verification=verification,
+        indicator_model=indicator_model,
     )
 
 

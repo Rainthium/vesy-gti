@@ -83,7 +83,7 @@ ALL_TABLES = (
     "weighing_events",
 )
 
-HEAD_REVISION = "e1f2a3b4c5d6"  # preview_url у камер (20.08.2026)
+HEAD_REVISION = "f2a3b4c5d6e7"  # indicator_model весов (20.08.2026)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64

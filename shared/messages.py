@@ -367,6 +367,9 @@ class ScaleSettingsPayload(BaseModel):
     baudrate: int | None = None
     # агенты до 0.4.9 поля не знают и молча отбрасывают (extra=ignore)
     verification: VerificationInfo | None = None
+    # подпись индикатора/весов в интерфейсе агента (агенты до 0.4.24
+    # отбрасывают); None — подписью управляет локальный конфиг
+    indicator_model: str | None = None
 
 
 class ScaleConfigUpdate(BaseModel):
