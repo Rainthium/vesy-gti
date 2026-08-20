@@ -62,6 +62,19 @@ def _fmt_date(value: datetime | None) -> str:
     return value.astimezone().strftime("%d.%m.%Y")
 
 
+def _fmt_dt(value: datetime | None) -> str:
+    """ДД.ММ.ГГГГ ЧЧ:ММ:СС в местном времени весового ПК (журнал объекта).
+
+    Тот же формат, что в журнале панели центра и в UniServer (запрос
+    Игоря 20.08.2026: одно время без даты в журнале недостаточно).
+    """
+    if value is None:
+        return "—"
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone().strftime("%d.%m.%Y %H:%M:%S")
+
+
 def _fmt_kg(value: float | None) -> str:
     """Вес с разделителем тысяч: 43310 → «43 310», None → «—»."""
     if value is None:
@@ -118,6 +131,7 @@ def create_app(
     templates = Jinja2Templates(directory=[str(TEMPLATES_DIR), str(weight_card.TEMPLATES_DIR)])
     templates.env.filters["fmt_time"] = _fmt_time
     templates.env.filters["fmt_date"] = _fmt_date
+    templates.env.filters["fmt_dt"] = _fmt_dt
     templates.env.filters["fmt_kg"] = _fmt_kg
     # версия в адресе статики: без неё браузер оператора продолжал бы
     # показывать старые стили после обновления агента (так и вышло с

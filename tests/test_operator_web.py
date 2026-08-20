@@ -486,6 +486,10 @@ class TestScreens:
         # запись без действующей тары: в колонке нетто прочерк, а не текст
         assert "нет тары" not in page.text
         assert "Вручную (офлайн)" in page.text
+        # колонка «Дата и время» — полные дата и время операции (запрос Игоря
+        # 20.08.2026); ожидание считаем той же местной зоной, что и фильтр
+        assert "Дата и время" in page.text
+        assert base_time.astimezone().strftime("%d.%m.%Y %H:%M:%S") in page.text
 
     def test_equipment_page(self, services: FakeServices, operator_client: TestClient) -> None:
         """«Оборудование»: индикатор, порт, версия агента, реестр, обе камеры."""

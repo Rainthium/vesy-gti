@@ -13,7 +13,7 @@
     <table class="journal">
       <thead>
         <tr>
-          <th>Время</th><th>Номер ТС</th><th>Прицеп</th><th>Фото</th><th>Операция</th>
+          <th>Дата и время</th><th>Номер ТС</th><th>Прицеп</th><th>Фото</th><th>Операция</th>
           <th class="num">Брутто, kg</th><th class="num">Тара, kg</th><th class="num">Нетто, kg</th>
           <th class="cell-print"></th><th>Источник</th><th class="cell-sync">Синхр.</th>
         </tr>
@@ -21,7 +21,7 @@
       <tbody>
         {% for row in journal_rows %}
         <tr>
-          <td class="cell-time">{{ row.record.weighed_at | fmt_time }}</td>
+          <td class="cell-time">{{ row.record.weighed_at | fmt_dt }}</td>
           <td class="cell-vehicle">{{ row.record.vehicle_number or '—' }}</td>
           <td>{{ row.record.trailer_number or '—' }}</td>
           <td class="cell-photos">
@@ -30,7 +30,7 @@
                  src="/photos/{{ row.record.uuid }}/{{ role }}.jpg?thumb=1"
                  alt="{{ 'перед' if role == 'front' else 'зад' }}"
                  data-full="/photos/{{ row.record.uuid }}/{{ role }}.jpg"
-                 data-caption="{{ row.record.vehicle_number or 'без номера' }} · {{ 'ПЕРЕД' if role == 'front' else 'ЗАД' }} · {{ row.record.weighed_at | fmt_time }}"
+                 data-caption="{{ row.record.vehicle_number or 'без номера' }} · {{ 'ПЕРЕД' if role == 'front' else 'ЗАД' }} · {{ row.record.weighed_at | fmt_dt }}"
                  onerror="var c = this.closest('td'); this.remove(); if (!c.querySelector('img')) c.classList.add('photos-missing');">
             {% else %}—
             {% endfor %}
