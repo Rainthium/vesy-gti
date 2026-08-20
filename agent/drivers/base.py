@@ -49,3 +49,26 @@ class ScaleDriver(Protocol):
     def zero(self) -> bool:
         """Обнулить весы, если протокол это поддерживает; вернуть успех."""
         ...
+
+
+class SerialScaleDriver(ScaleDriver, Protocol):
+    """Драйвер на последовательном порту, перенастраиваемый из центра.
+
+    Расширение контракта для агента: смена COM-порта со страницы
+    «Настройки» весов (SettingsManager) требует port_url/baudrate
+    и set_port. Реализации — Cas22Driver, VesarDriver.
+    """
+
+    @property
+    def port_url(self) -> str:
+        """Текущий адрес порта («COM4» либо pyserial-URL)."""
+        ...
+
+    @property
+    def baudrate(self) -> int:
+        """Текущая скорость порта."""
+        ...
+
+    def set_port(self, port_url: str, baudrate: int | None = None) -> None:
+        """Переключить порт/скорость: остановить чтение и запустить заново."""
+        ...

@@ -24,7 +24,7 @@ from typing import Protocol
 
 from agent.cameras.capture import DEFAULT_TIMEOUT_S, CameraConfig
 from agent.config import AgentConfig, CameraSection, CycleSection, ScaleSection
-from agent.drivers.cas22 import Cas22Driver
+from agent.drivers.base import SerialScaleDriver
 from agent.sync.storage import AgentStorage
 from agent.weighing.auto import AutoOperationRunner
 from agent.weighing.manual import ManualOperationFlow
@@ -110,7 +110,7 @@ class SettingsManager:
     def __init__(
         self,
         *,
-        driver: Cas22Driver,
+        driver: SerialScaleDriver,
         watcher: ScaleWatcher,
         runner: AutoOperationRunner,
         manual: ManualOperationFlow,

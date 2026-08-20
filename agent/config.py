@@ -32,8 +32,8 @@ class ScaleSection(_Section):
     """Весовой индикатор."""
 
     # Literal: опечатка в имени драйвера — ошибка при старте, а не тихий
-    # запуск cas22; реестр драйверов появится с новыми индикаторами (этап 2)
-    driver: Literal["cas22"] = "cas22"
+    # запуск cas22; реестр — agent/drivers/__init__.py (DRIVERS)
+    driver: Literal["cas22", "vesar"] = "cas22"
     port: str  # «COM5» либо pyserial-URL («socket://127.0.0.1:4001» — эмулятор)
     baudrate: int = 9600
 

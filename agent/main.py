@@ -40,8 +40,8 @@ from agent.cameras.stream import CameraStreams, shot_or_capture
 from agent.clock import CenterClock
 from agent.config import AgentConfig, load_config
 from agent.diagnostics import default_log_path, read_log_tail
-from agent.drivers.base import ScaleState
-from agent.drivers.cas22 import Cas22Driver
+from agent.drivers import create_driver
+from agent.drivers.base import ScaleState, SerialScaleDriver
 from agent.photos import THUMB_SUFFIX, PhotoLibrary
 from agent.selfcheck import UpdateSelfCheck
 from agent.settings import SettingsManager, merge_center_settings
@@ -186,7 +186,7 @@ class AgentRuntime:
         self,
         config: AgentConfig,
         *,
-        driver: Cas22Driver,
+        driver: SerialScaleDriver,
         storage: AgentStorage,
         client: CenterClient,
         manual: ManualOperationFlow,
@@ -415,7 +415,7 @@ def build_runtime(
     local_camera_timeouts: dict[CameraRole, float] | None = None,
 ) -> tuple[
     AgentRuntime,
-    Cas22Driver,
+    SerialScaleDriver,
     AgentStorage,
     CenterClient,
     PhotoUploader,
@@ -425,7 +425,7 @@ def build_runtime(
     CameraStreams,
 ]:
     """Собрать все кирпичи агента (без запуска фоновых задач)."""
-    driver = Cas22Driver(config.scale.port, baudrate=config.scale.baudrate)
+    driver = create_driver(config.scale.driver, config.scale.port, baudrate=config.scale.baudrate)
     storage = AgentStorage(config.storage.db_path)
     # время записей — по часам центра (heartbeat_ack), офлайн — по
     # последнему известному смещению из SQLite (вопрос Игоря 10.08.2026)
@@ -618,7 +618,7 @@ def apply_stored_settings(config: AgentConfig) -> AgentConfig:
     return merged
 
 
-async def watch_scale(watcher: ScaleWatcher, driver: Cas22Driver, interval_s: float) -> None:
+async def watch_scale(watcher: ScaleWatcher, driver: SerialScaleDriver, interval_s: float) -> None:
     """Фоновый опрос драйвера для наблюдателя платформы (5–10 раз/с)."""
     while True:
         watcher.tick(driver.state)
