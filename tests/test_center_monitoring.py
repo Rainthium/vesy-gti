@@ -113,7 +113,15 @@ def _seed_scale(
         site = Site(code=code, name=site_name)
         session.add(site)
         session.flush()
-        scale = Scale(site_id=site.id, name=scale_name, kind=ScaleKind.STATIC, driver="cas22")
+        scale = Scale(
+            site_id=site.id,
+            name=scale_name,
+            kind=ScaleKind.STATIC,
+            driver="cas22",
+            # привязка АИС уникальна per объект (уникальный индекс маршрута)
+            ais_object=f"a-{code}"[:16],
+            ais_scale_no=1,
+        )
         session.add(scale)
         session.flush()
         agent = Agent(scale_id=scale.id, token_hash=repo.hash_agent_token(f"tok-{code}"))

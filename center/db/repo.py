@@ -195,9 +195,21 @@ def save_weighing_record(
     if record.operation is Operation.TARING and record.vehicle_number and record.massa is not None:
         _upsert_tare(session, row, record)
     # офлайн-операция выполнена без АИС — единственный путь доставить её в АИС
-    # событие (контракт v2, раздел 7): outbox в той же транзакции, что и запись
+    # событие (контракт v2, раздел 7): outbox в той же транзакции, что и запись.
+    # Событие ставится ТОЛЬКО весам с привязкой АИС (ais_object): поток
+    # weighing.completed.* принадлежит АИС «СВХ», события непривязанных весов
+    # им не публикуются (вопрос Игоря 20.08.2026; будущая таможенная
+    # интеграция получит СВОЙ event_type со своими правилами — см. decisions)
     if record.source is WeighingSource.LOCAL_OFFLINE:
-        session.add(WeighingEvent(weighing_id=row.id, event_type=EVENT_WEIGHING_COMPLETED))
+        scale = session.get(Scale, scale_id)
+        if scale is not None and scale.ais_object:
+            session.add(WeighingEvent(weighing_id=row.id, event_type=EVENT_WEIGHING_COMPLETED))
+        else:
+            logger.info(
+                "запись %s: весы id=%d не привязаны к АИС — событие weighing.completed не ставится",
+                record.uuid,
+                scale_id,
+            )
     session.commit()
     return True
 

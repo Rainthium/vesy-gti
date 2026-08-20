@@ -51,7 +51,13 @@ def event_id_for(weighing_uuid: uuid.UUID, event_type: str) -> str:
 
 
 def routing_key_for(event_type: str, ais_object: str | None) -> str:
-    """``weighing.completed.<ais_object>``; непривязанные весы — ``unbound``."""
+    """``weighing.completed.<ais_object>``.
+
+    Фолбэк ``unbound`` — страховка на недостижимый случай: события
+    непривязанных весов не ставятся в outbox и отфильтровываются
+    публикатором до сборки ключа (20.08.2026), опубликован он быть
+    не должен никогда.
+    """
     return f"{event_type}.{ais_object or 'unbound'}"
 
 
@@ -252,6 +258,18 @@ class EventPublisher:
                 # записи нет (не должно случаться — FK) — закрываем строку с пометкой
                 await asyncio.to_thread(
                     self._mark_published, outbox.id, "запись операции не найдена"
+                )
+                continue
+            if not event.body.get("ais_object"):
+                # страховка второго слоя (первый — фильтр при постановке):
+                # поток weighing.completed.* принадлежит АИС «СВХ», события
+                # непривязанных весов в него не публикуются — иначе binding
+                # weighing.completed.# доставил бы АИС чужие объекты
+                await asyncio.to_thread(
+                    self._mark_published,
+                    outbox.id,
+                    "весы не привязаны к АИС («Справочники» → Привязка АИС v2) — "
+                    "событие не публикуется",
                 )
                 continue
             try:

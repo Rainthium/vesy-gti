@@ -859,6 +859,14 @@ def create_panel_router(
             card = queries.weighing_card(session, weighing_id, site_scope=scope)
             if card is None:
                 raise HTTPException(status_code=404)
+            scale = session.get(Scale, card.weighing.scale_id)
+            if scale is None or not scale.ais_object:
+                # поток weighing.completed.* — только для привязанных весов
+                # (вопрос Игоря 20.08.2026): событие не ставим, честно говорим
+                return (
+                    "весы не привязаны к АИС («Справочники» → Привязка АИС v2) — "
+                    "событие не отправлено"
+                )
             repo.enqueue_weighing_event(session, card.weighing)
             session.add(
                 AuditLog(
@@ -871,7 +879,7 @@ def create_panel_router(
             return "событие поставлено в очередь на отправку в АИС"
 
         note = await asyncio.to_thread(_db, enqueue)
-        logger.info("панель (%s): событие АИС по записи id=%d переотправлено", admin, weighing_id)
+        logger.info("панель (%s): событие АИС по записи id=%d — %s", admin, weighing_id, note)
         return RedirectResponse(
             f"/panel/journal/{weighing_id}?ais_note={quote(note)}", status_code=303
         )

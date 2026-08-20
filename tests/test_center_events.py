@@ -299,16 +299,34 @@ class TestPublisher:
         with factory() as session:
             assert repo.pending_event_stats(session)[scale_id][0] == 1
 
-    def test_unbound_scale_routing_key(
+    def test_unbound_scale_events_filtered(
         self, factory: sessionmaker[Session], tmp_path: Path
     ) -> None:
+        """Весы без привязки к АИС (вопрос Игоря 20.08.2026): офлайн-запись
+        событие НЕ ставит, а застрявшее в outbox событие (старые времена,
+        гонка со снятием привязки) публикатор закрывает БЕЗ отправки —
+        binding weighing.completed.# не должен доставить АИС чужие объекты."""
         scale_id = _seed_scale(factory, ais_object=None)
         with factory() as session:
             repo.save_weighing_record(session, scale_id, _record(WeighingSource.LOCAL_OFFLINE))
+        assert _pending(factory) == []  # фильтр первого слоя: событие не ставится
+
+        # второй слой: событие в outbox есть (поставлено до снятия привязки) —
+        # закрывается с пометкой, в брокер ничего не уходит
+        with factory() as session:
+            weighing = session.execute(select(Weighing)).scalars().first()
+            assert weighing is not None
+            repo.enqueue_weighing_event(session, weighing)
+            session.commit()
         broker = FakeBroker()
-        asyncio.run(_publisher(factory, broker, tmp_path).publish_pending())
-        assert broker.published[0].routing_key == "weighing.completed.unbound"
-        assert json.loads(broker.published[0].payload())["ais_object"] is None
+        published, failed = asyncio.run(_publisher(factory, broker, tmp_path).publish_pending())
+        assert broker.published == []
+        assert (published, failed) == (0, 0)
+        assert _pending(factory) == []  # строка закрыта
+        with factory() as session:
+            event = session.execute(select(WeighingEvent)).scalars().first()
+            assert event is not None and event.published_at is not None
+            assert event.last_error is not None and "не привязаны к АИС" in event.last_error
 
     def test_run_loop_publishes_and_backs_off(
         self, factory: sessionmaker[Session], tmp_path: Path

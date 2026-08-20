@@ -92,7 +92,7 @@
         {% if card.ais_ref %}документ <code>{{ card.ais_ref }}</code>{% elif w.source.value == 'local_offline' %}номер документа АИС ещё не сообщён — АИС заведёт его по событию и вернёт номер{% else %}команда без номера документа АИС (контракт v1){% endif %}
         {% if card.ais_event %}
         <span>· событие {{ card.ais_event.event_type }}:
-        {% if card.ais_event.published_at %}отправлено {{ card.ais_event.published_at | fmt_dt }}{% else %}в очереди на отправку{% if card.ais_event.attempts %} (попыток: {{ card.ais_event.attempts }}{% if card.ais_event.last_error and can_resend %}, последняя ошибка: {{ card.ais_event.last_error }}{% endif %}){% endif %}{% endif %}</span>
+        {% if card.ais_event.published_at and card.ais_event.last_error %}закрыто без отправки {{ card.ais_event.published_at | fmt_dt }}: {{ card.ais_event.last_error }}{% elif card.ais_event.published_at %}отправлено {{ card.ais_event.published_at | fmt_dt }}{% else %}в очереди на отправку{% if card.ais_event.attempts %} (попыток: {{ card.ais_event.attempts }}{% if card.ais_event.last_error and can_resend %}, последняя ошибка: {{ card.ais_event.last_error }}{% endif %}){% endif %}{% endif %}</span>
         {% elif w.source.value == 'local_offline' %}
         <span>· событие в АИС ещё не поставлено в очередь</span>
         {% endif %}

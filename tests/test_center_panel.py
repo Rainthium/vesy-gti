@@ -182,7 +182,15 @@ def _add_site_scale(
     site = Site(code=code, name=site_name)
     session.add(site)
     session.flush()
-    scale = Scale(site_id=site.id, name=scale_name, kind=ScaleKind.STATIC, driver="cas22")
+    scale = Scale(
+        site_id=site.id,
+        name=scale_name,
+        kind=ScaleKind.STATIC,
+        driver="cas22",
+        # привязка АИС уникальна per объект (уникальный индекс маршрута)
+        ais_object=f"a-{code}"[:16],
+        ais_scale_no=1,
+    )
     session.add(scale)
     session.flush()
     if with_agent:
@@ -2263,6 +2271,48 @@ class TestRecordAisBlock:
             assert len(audit) == 1 and (audit[0].details or {})["weighing_id"] == weighing_id
         followed = panel_env.client.get(response.headers["location"])
         assert "поставлено в очередь" in followed.text
+
+    def test_record_shows_closed_without_publish(self, panel_env: PanelEnv) -> None:
+        """Событие, закрытое публикатором БЕЗ отправки (весы не привязаны),
+        на карточке не выдаёт себя за отправленное (замечание ревью 20.08.2026)."""
+        _login(panel_env)
+        weighing_id = self._offline_record_id(panel_env)
+        with panel_env.factory() as session:
+            event = repo.latest_weighing_event(session, weighing_id)
+            assert event is not None
+            repo.mark_weighing_event_published(
+                session,
+                event.id,
+                datetime(2026, 8, 20, 15, 0, 0, tzinfo=UTC),
+                note="весы не привязаны к АИС («Справочники» → Привязка АИС v2) — "
+                "событие не публикуется",
+            )
+        response = panel_env.client.get(f"/panel/journal/{weighing_id}")
+        assert "закрыто без отправки" in response.text
+        assert "не привязаны к АИС" in response.text
+        assert "· событие weighing.completed:\n        отправлено" not in response.text
+
+    def test_resend_refused_for_unbound_scale(self, panel_env: PanelEnv) -> None:
+        """Весы без привязки к АИС: кнопка честно отказывает, событие не ставится
+        (поток weighing.completed.* — только для привязанных весов, 20.08.2026)."""
+        _make_admin(panel_env)
+        _login(panel_env)
+        weighing_id = self._offline_record_id(panel_env)
+        with panel_env.factory() as session:
+            scale = session.get(Scale, panel_env.scale_id)
+            assert scale is not None
+            scale.ais_object = None
+            scale.ais_scale_no = None
+            session.commit()
+            before = len(repo.pending_weighing_events(session))
+        response = panel_env.client.post(
+            f"/panel/journal/{weighing_id}/ais_event", follow_redirects=False
+        )
+        assert response.status_code == 303
+        followed = panel_env.client.get(response.headers["location"])
+        assert "не привязаны к АИС" in followed.text
+        with panel_env.factory() as session:
+            assert len(repo.pending_weighing_events(session)) == before
 
     def test_dispatcher_cannot_resend(self, panel_env: PanelEnv) -> None:
         _login(panel_env)
