@@ -334,6 +334,9 @@ class CameraSettings(BaseModel):
     role: CameraRole
     snapshot_url: str | None = Field(default=None, repr=False)
     rtsp_url: str | None = Field(default=None, repr=False)
+    # лёгкий кадр для превью оператора (суб-поток камеры, например ISAPI
+    # channels/102/picture); агенты до 0.4.21 поле молча отбрасывают
+    preview_url: str | None = Field(default=None, repr=False)
 
 
 class VerificationInfo(BaseModel):

@@ -232,7 +232,13 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     def main_page(request: Request, operator: Operator) -> HTMLResponse:
-        return render("main.html", request, operator=operator, **journal_context())
+        return render(
+            "main.html",
+            request,
+            operator=operator,
+            preview_interval_ms=services.preview_interval_ms(),
+            **journal_context(),
+        )
 
     @app.get("/equipment", response_class=HTMLResponse)
     def equipment_page(request: Request, operator: Operator) -> HTMLResponse:

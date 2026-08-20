@@ -153,6 +153,9 @@ class FakeServices:
     def camera_roles(self) -> list[CameraRole]:
         return self.roles
 
+    def preview_interval_ms(self) -> int:
+        return 2000
+
     def photo_roles(self, weighing_uuid: UUID) -> list[CameraRole]:
         return self.photo_roles_by_uuid.get(weighing_uuid, [])
 

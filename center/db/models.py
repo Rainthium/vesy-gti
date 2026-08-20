@@ -167,6 +167,9 @@ class Camera(Base):
     role: Mapped[CameraRole] = mapped_column(_str_enum(CameraRole, "camera_role"))
     snapshot_url: Mapped[str | None] = mapped_column(Text, default=None)
     rtsp_url: Mapped[str | None] = mapped_column(Text, default=None)
+    # лёгкий кадр для превью оператора (суб-поток, channels/102/picture);
+    # фото операций всегда снимаются по snapshot_url/rtsp_url
+    preview_url: Mapped[str | None] = mapped_column(Text, default=None)
 
     __table_args__ = (UniqueConstraint("scale_id", "role", name="uq_cameras_scale_role"),)
 

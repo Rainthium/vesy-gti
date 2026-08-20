@@ -88,6 +88,7 @@ def merge_center_settings(config: AgentConfig, payload: ScaleSettingsPayload) ->
                 role=camera.role,
                 snapshot_url=camera.snapshot_url,
                 rtsp_url=camera.rtsp_url,
+                preview_url=camera.preview_url,
                 timeout_s=local_timeouts.get(camera.role, DEFAULT_TIMEOUT_S),
             )
             for camera in payload.cameras
@@ -161,6 +162,7 @@ class SettingsManager:
                     role=camera.role,
                     snapshot_url=camera.snapshot_url,
                     rtsp_url=camera.rtsp_url,
+                    preview_url=camera.preview_url,
                     timeout_s=self._local_camera_timeouts.get(camera.role, DEFAULT_TIMEOUT_S),
                 )
                 for camera in settings.cameras

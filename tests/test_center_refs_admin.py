@@ -839,6 +839,65 @@ class TestUpsertCamera:
         assert error == "весы не найдены"
         assert db_session.execute(select(Camera)).scalar_one_or_none() is None
 
+    def test_preview_url_saved_and_cleared(self, db_session: Session) -> None:
+        """URL превью (лёгкий кадр суб-потока, 20.08.2026) сохраняется
+        и очищается пустой строкой; отсутствие параметра = не задан."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        error = refs_admin.upsert_camera(
+            db_session,
+            scale_id=scale.id,
+            role=CameraRole.FRONT,
+            snapshot_url="http://10.0.0.5/ISAPI/Streaming/channels/101/picture",
+            rtsp_url="",
+            preview_url="http://10.0.0.5/ISAPI/Streaming/channels/102/picture",
+        )
+        assert error is None
+        cameras = _cameras_of(db_session, scale.id)
+        assert cameras[0].preview_url == "http://10.0.0.5/ISAPI/Streaming/channels/102/picture"
+        error = refs_admin.upsert_camera(
+            db_session,
+            scale_id=scale.id,
+            role=CameraRole.FRONT,
+            snapshot_url="http://10.0.0.5/ISAPI/Streaming/channels/101/picture",
+            rtsp_url="",
+            preview_url="  ",
+        )
+        assert error is None
+        assert _cameras_of(db_session, scale.id)[0].preview_url is None
+
+    def test_preview_url_bad_scheme_rejected(self, db_session: Session) -> None:
+        """Превью — только HTTP-снапшот: rtsp:// и голый адрес отклоняются."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        for bad in ("rtsp://10.0.0.5/sub", "10.0.0.5/sub"):
+            error = refs_admin.upsert_camera(
+                db_session,
+                scale_id=scale.id,
+                role=CameraRole.FRONT,
+                snapshot_url="http://10.0.0.5/snap",
+                rtsp_url="",
+                preview_url=bad,
+            )
+            assert error is not None
+        assert _cameras_of(db_session, scale.id) == []
+
+    def test_preview_url_without_main_url_rejected(self, db_session: Session) -> None:
+        """Превью без основного URL отклоняется: снимок настроек такую камеру
+        не включает — до агента она не доехала бы (замечание ревью 20.08.2026)."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        error = refs_admin.upsert_camera(
+            db_session,
+            scale_id=scale.id,
+            role=CameraRole.FRONT,
+            snapshot_url="",
+            rtsp_url="",
+            preview_url="http://10.0.0.5/sub",
+        )
+        assert error is not None and "вместе с основным" in error
+        assert _cameras_of(db_session, scale.id) == []
+
 
 # ---------------------------------------------------------------------------
 # Агенты: create_agent / reissue_agent_token / set_agent_channel

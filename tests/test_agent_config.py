@@ -395,6 +395,47 @@ class TestBuildRuntime:
         finally:
             storage.close()
 
+    def test_preview_url_used_for_preview_and_speeds_up_polling(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Камера с preview_url (лёгкий кадр суб-потока, запрос Игоря
+        20.08.2026 для Аламедина): превью снимается по нему, опрос браузера
+        учащается до секунды; без preview_url всё по-старому (2 с)."""
+        config = AgentConfig.model_validate(
+            config_data(
+                storage={
+                    "db_path": str(tmp_path / "agent.sqlite3"),
+                    "photos_dir": str(tmp_path / "photos"),
+                }
+            )
+        )
+        runtime, _, storage, _, _, _, _, _, streams = build_runtime(config)
+        streams.stop_all()
+        try:
+            assert runtime.preview_interval_ms() == 2000
+            captured: list[str] = []
+
+            def fake_capture(camera: CameraConfig, *, ffmpeg_path: str) -> CameraShot:
+                captured.append(camera.snapshot_url or "")
+                return CameraShot(role=camera.role, jpeg=b"\xff\xd8", captured_at=datetime.now(UTC))
+
+            monkeypatch.setattr("agent.main.capture", fake_capture)
+            runtime.set_cameras(
+                [
+                    CameraConfig(
+                        role=CameraRole.FRONT,
+                        snapshot_url="http://u:p@10.9.9.9/ch101",
+                        preview_url="http://u:p@10.9.9.9/ch102",
+                    )
+                ]
+            )
+            assert runtime.preview_interval_ms() == 1000
+            runtime.camera_snapshot(CameraRole.FRONT)
+            # превью пошло с лёгкого URL, основной остался для фото операций
+            assert captured == ["http://u:p@10.9.9.9/ch102"]
+        finally:
+            storage.close()
+
     def test_camera_snapshot_unknown_role_raises(self, tmp_path: Path) -> None:
         config = AgentConfig.model_validate(
             config_data(

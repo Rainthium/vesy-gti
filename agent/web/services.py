@@ -59,6 +59,10 @@ class AgentServices(Protocol):
         """Настроенные камеры (обычно front и rear)."""
         ...
 
+    def preview_interval_ms(self) -> int:
+        """Период опроса превью браузером: 1000 при лёгком preview_url, иначе 2000."""
+        ...
+
     def photo_roles(self, weighing_uuid: UUID) -> list[CameraRole]:
         """Роли снимков записи журнала (по журналу, не по наличию файлов)."""
         ...

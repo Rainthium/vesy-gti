@@ -95,7 +95,7 @@
       document.querySelectorAll('.camera img').forEach(function (img) {
         img.src = img.src.split('?')[0] + '?t=' + Date.now();
       });
-    }, 2000);
+    }, {{ preview_interval_ms | default(2000) }});
   })();
 </script>
 {% endblock %}

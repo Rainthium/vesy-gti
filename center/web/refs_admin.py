@@ -246,17 +246,30 @@ def upsert_camera(
     role: CameraRole,
     snapshot_url: str,
     rtsp_url: str,
+    preview_url: str = "",
 ) -> str | None:
     """Создать/обновить камеру весов по роли; пустые URL допустимы
-    (камера остаётся в справочнике, но пути к ней не заданы)."""
+    (камера остаётся в справочнике, но пути к ней не заданы).
+
+    preview_url — лёгкий кадр только для превью оператора (суб-поток,
+    channels/102/picture): превью на агенте учащается до раза в секунду;
+    фото операций всегда идут с основного URL.
+    """
     if session.get(Scale, scale_id) is None:
         return "весы не найдены"
     snapshot_url = snapshot_url.strip()
     rtsp_url = rtsp_url.strip()
+    preview_url = preview_url.strip()
     if snapshot_url and not snapshot_url.startswith(("http://", "https://")):
         return "snapshot-URL должен начинаться с http:// или https://"
     if rtsp_url and not rtsp_url.startswith("rtsp://"):
         return "RTSP-URL должен начинаться с rtsp://"
+    if preview_url and not preview_url.startswith(("http://", "https://")):
+        return "URL превью должен начинаться с http:// или https://"
+    if preview_url and not snapshot_url and not rtsp_url:
+        # снимок настроек не включает камеру без основного URL — превью
+        # до агента не доехало бы, а пилюля «настроен» вводила бы в заблуждение
+        return "URL превью задаётся только вместе с основным URL камеры"
     camera = session.execute(
         select(Camera).where(Camera.scale_id == scale_id, Camera.role == role)
     ).scalar_one_or_none()
@@ -265,6 +278,7 @@ def upsert_camera(
         session.add(camera)
     camera.snapshot_url = snapshot_url or None
     camera.rtsp_url = rtsp_url or None
+    camera.preview_url = preview_url or None
     session.commit()
     # URL камер содержат пароли — в лог только факт изменения (правило №7)
     logger.info("справочники: камера %s весов id=%d обновлена", role.value, scale_id)

@@ -216,6 +216,9 @@ class DemoServices:
     def camera_roles(self) -> list[CameraRole]:
         return [CameraRole.FRONT, CameraRole.REAR]
 
+    def preview_interval_ms(self) -> int:
+        return 2000
+
     def photo_roles(self, weighing_uuid: UUID) -> list[CameraRole]:
         # в демо снимки есть у всех операций, кроме самой старой
         return (

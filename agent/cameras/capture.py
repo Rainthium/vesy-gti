@@ -45,11 +45,17 @@ class CameraConfig:
 
     Если задан ``snapshot_url`` — используется HTTP-snapshot,
     иначе ``rtsp_url`` через ffmpeg. Хотя бы один должен быть задан.
+
+    ``preview_url`` — необязательный лёгкий кадр ТОЛЬКО для превью
+    оператора (обычно HTTP-снапшот суб-потока камеры: у Hikvision
+    ``channels/102/picture``). Фото операций всегда снимаются по
+    основному URL в полном качестве (правило №2 не задето).
     """
 
     role: CameraRole
     snapshot_url: str | None = None
     rtsp_url: str | None = None
+    preview_url: str | None = None
     timeout_s: float = DEFAULT_TIMEOUT_S
 
     def __post_init__(self) -> None:

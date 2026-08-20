@@ -54,11 +54,17 @@ class CycleSection(_Section):
 
 
 class CameraSection(_Section):
-    """Одна камера; snapshot_url (ISAPI) — основной путь, rtsp_url — запасной."""
+    """Одна камера; snapshot_url (ISAPI) — основной путь, rtsp_url — запасной.
+
+    preview_url — лёгкий кадр только для превью оператора (суб-поток
+    камеры); задан → превью обновляется чаще, фото операций — по-прежнему
+    с основного URL.
+    """
 
     role: CameraRole
     snapshot_url: str | None = None
     rtsp_url: str | None = None
+    preview_url: str | None = None
     timeout_s: float = DEFAULT_TIMEOUT_S
 
     @model_validator(mode="after")
@@ -73,6 +79,7 @@ class CameraSection(_Section):
             role=self.role,
             snapshot_url=self.snapshot_url,
             rtsp_url=self.rtsp_url,
+            preview_url=self.preview_url,
             timeout_s=self.timeout_s,
         )
 

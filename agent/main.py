@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 import urllib.parse
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -108,6 +109,11 @@ def cleanup_orphan_photos(storage: AgentStorage, photos_dir: Path) -> int:
 # камеры (Кызыл-Кыя) успевают каждый раз, RTSP-камеры обновляются
 # с темпом собственной съёмки (2-5 с)
 PREVIEW_TTL_S = 1.5
+# камера с preview_url (лёгкий кадр суб-потока, запрос Игоря 20.08.2026 для
+# Аламедина: полный кадр 6 МП камера отдаёт медленно) — превью раз в секунду
+PREVIEW_FAST_TTL_S = 0.75
+PREVIEW_INTERVAL_MS = 2000
+PREVIEW_FAST_INTERVAL_MS = 1000
 
 
 class CameraHealth:
@@ -256,18 +262,37 @@ class AgentRuntime:
         self._preview_cameras = {camera.role: camera for camera in cameras}
         self._preview_cache.clear()
 
+    def preview_interval_ms(self) -> int:
+        """Период опроса превью браузером оператора.
+
+        Хоть у одной камеры задан preview_url → раз в секунду (лёгкий кадр
+        камера отдаёт быстро), иначе прежние 2 с. Значение вшивается в
+        страницу при рендере: смена настройки из центра подхватится при
+        следующей загрузке страницы оператора.
+        """
+        fast = any(camera.preview_url for camera in self._preview_cameras.values())
+        return PREVIEW_FAST_INTERVAL_MS if fast else PREVIEW_INTERVAL_MS
+
     def camera_snapshot(self, role: CameraRole) -> CameraShot:
         """Кадр для превью оператора: из кэша, съёмка — не чаще одной за раз.
 
-        Свежий кадр (моложе PREVIEW_TTL_S) отдаётся из памяти; если съёмка
-        уже идёт (RTSP-кадр занимает секунды) — отдаётся последний готовый,
-        даже подустаревший: превью живёт с темпом, который тянет камера,
+        Свежий кадр (моложе TTL) отдаётся из памяти; если съёмка уже идёт
+        (RTSP-кадр занимает секунды) — отдаётся последний готовый, даже
+        подустаревший: превью живёт с темпом, который тянет камера,
         а каскад параллельных ffmpeg не возникает.
+
+        Камера с preview_url снимается по нему (лёгкий кадр суб-потока,
+        минуя и RTSP-буфер) и с коротким TTL — превью частое, а фото
+        операций по-прежнему идут с основного URL в полном качестве.
         """
         camera = self._preview_cameras.get(role)
         if camera is None:
             raise ValueError(f"камера {role} не настроена")
-        if self._streams is not None:
+        ttl = PREVIEW_TTL_S
+        if camera.preview_url:
+            camera = replace(camera, snapshot_url=camera.preview_url, rtsp_url=None)
+            ttl = PREVIEW_FAST_TTL_S
+        elif self._streams is not None:
             # потоковая камера: буфер обновляется раз в секунду — превью
             # живое, ffmpeg на каждый запрос браузера не запускается
             streamed = self._streams.shot(role)
@@ -275,7 +300,7 @@ class AgentRuntime:
                 return streamed
         cached = self._preview_cache.get(role)
         now = time.monotonic()
-        if cached is not None and now - cached[1] < PREVIEW_TTL_S:
+        if cached is not None and now - cached[1] < ttl:
             return cached[0]
         lock = self._preview_locks.setdefault(role, threading.Lock())
         if not lock.acquire(blocking=False):

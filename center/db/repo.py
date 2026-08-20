@@ -552,7 +552,12 @@ def load_scale_settings(session: Session, scale_id: int) -> ScaleSettingsPayload
         ).scalars()
     )
     cameras = [
-        CameraSettings(role=c.role, snapshot_url=c.snapshot_url, rtsp_url=c.rtsp_url)
+        CameraSettings(
+            role=c.role,
+            snapshot_url=c.snapshot_url,
+            rtsp_url=c.rtsp_url,
+            preview_url=c.preview_url,
+        )
         for c in camera_rows
         if c.snapshot_url or c.rtsp_url
     ] or None

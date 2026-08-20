@@ -32,10 +32,14 @@ no_data_timeout_s = 5.0
 # Камеры Hikvision: основной путь — HTTP-snapshot ISAPI, запасной — RTSP.
 # Логин/пароль вписать в URL (см. выгрузку, вне git); спецсимволы в пароле
 # кодировать percent-encoding (@ → %40).
+# preview_url (необязательно) — лёгкий кадр суб-потока ТОЛЬКО для превью
+# оператора (channels/102/picture): превью обновляется раз в секунду,
+# фото операций — по-прежнему с основного URL в полном качестве.
 [[cameras]]
 role = "front"
 snapshot_url = "http://ЛОГИН:ПАРОЛЬ@192.168.158.120/ISAPI/Streaming/channels/101/picture"
 rtsp_url = "rtsp://ЛОГИН:ПАРОЛЬ@192.168.158.120:554/Streaming/Channels/101"
+# preview_url = "http://ЛОГИН:ПАРОЛЬ@192.168.158.120/ISAPI/Streaming/channels/102/picture"
 
 [[cameras]]
 role = "rear"

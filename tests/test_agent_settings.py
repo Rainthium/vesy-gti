@@ -100,18 +100,23 @@ class TestMergeCenterSettings:
         assert merged.center is config.center
 
     def test_cameras_only_replace_camera_sections(self) -> None:
-        """cameras из снимка замещают список камер (URL с паролями — из центра)."""
+        """cameras из снимка замещают список камер (URL с паролями — из центра);
+        preview_url (лёгкий кадр превью, 20.08.2026) едет вместе с ними."""
         config = make_agent_config()
         payload = ScaleSettingsPayload(
             cameras=[
-                CameraSettings(role=CameraRole.FRONT, snapshot_url="http://u:p@10.0.0.5/front"),
+                CameraSettings(
+                    role=CameraRole.FRONT,
+                    snapshot_url="http://u:p@10.0.0.5/front",
+                    preview_url="http://u:p@10.0.0.5/light",
+                ),
                 CameraSettings(role=CameraRole.REAR, rtsp_url="rtsp://u:p@10.0.0.6/rear"),
             ]
         )
         merged = merge_center_settings(config, payload)
-        assert [(c.role, c.snapshot_url, c.rtsp_url) for c in merged.cameras] == [
-            (CameraRole.FRONT, "http://u:p@10.0.0.5/front", None),
-            (CameraRole.REAR, None, "rtsp://u:p@10.0.0.6/rear"),
+        assert [(c.role, c.snapshot_url, c.rtsp_url, c.preview_url) for c in merged.cameras] == [
+            (CameraRole.FRONT, "http://u:p@10.0.0.5/front", None, "http://u:p@10.0.0.5/light"),
+            (CameraRole.REAR, None, "rtsp://u:p@10.0.0.6/rear", None),
         ]
         assert merged.cycle == config.cycle
         assert merged.scale is config.scale
@@ -411,7 +416,11 @@ class TestManagerCameras:
         и превью оператора (превью — боевой урок Кызыл-Кыи 14.08.2026)."""
         payload = ScaleSettingsPayload(
             cameras=[
-                CameraSettings(role=CameraRole.FRONT, snapshot_url="http://u:p@10.0.0.5/f"),
+                CameraSettings(
+                    role=CameraRole.FRONT,
+                    snapshot_url="http://u:p@10.0.0.5/f",
+                    preview_url="http://u:p@10.0.0.5/light",
+                ),
                 CameraSettings(role=CameraRole.REAR, rtsp_url="rtsp://u:p@10.0.0.6/r"),
             ]
         )
@@ -425,9 +434,9 @@ class TestManagerCameras:
         )
         for consumer in consumers:
             assert len(consumer) == 1
-            assert [(c.role, c.snapshot_url, c.rtsp_url) for c in consumer[0]] == [
-                (CameraRole.FRONT, "http://u:p@10.0.0.5/f", None),
-                (CameraRole.REAR, None, "rtsp://u:p@10.0.0.6/r"),
+            assert [(c.role, c.snapshot_url, c.rtsp_url, c.preview_url) for c in consumer[0]] == [
+                (CameraRole.FRONT, "http://u:p@10.0.0.5/f", None, "http://u:p@10.0.0.5/light"),
+                (CameraRole.REAR, None, "rtsp://u:p@10.0.0.6/r", None),
             ]
         stored = env.stored_payload()
         assert stored is not None and stored.cameras is not None

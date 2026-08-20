@@ -1503,8 +1503,17 @@ def _add_camera(
     *,
     snapshot_url: str | None = None,
     rtsp_url: str | None = None,
+    preview_url: str | None = None,
 ) -> None:
-    session.add(Camera(scale_id=scale_id, role=role, snapshot_url=snapshot_url, rtsp_url=rtsp_url))
+    session.add(
+        Camera(
+            scale_id=scale_id,
+            role=role,
+            snapshot_url=snapshot_url,
+            rtsp_url=rtsp_url,
+            preview_url=preview_url,
+        )
+    )
     session.commit()
 
 
@@ -1559,6 +1568,7 @@ class TestRepoLoadScaleSettings:
             CameraRole.FRONT,
             snapshot_url="http://u:p@10.0.0.5/front",
             rtsp_url="rtsp://u:p@10.0.0.5/stream",
+            preview_url="http://u:p@10.0.0.5/light",
         )
         _add_camera(session, scale_id, CameraRole.REAR, rtsp_url="rtsp://u:p@10.0.0.6/rear")
 
@@ -1569,9 +1579,14 @@ class TestRepoLoadScaleSettings:
         assert settings.scale_port == "COM11"
         assert settings.baudrate == 19200
         assert settings.cameras is not None
-        assert [(c.role, c.snapshot_url, c.rtsp_url) for c in settings.cameras] == [
-            (CameraRole.FRONT, "http://u:p@10.0.0.5/front", "rtsp://u:p@10.0.0.5/stream"),
-            (CameraRole.REAR, None, "rtsp://u:p@10.0.0.6/rear"),
+        assert [(c.role, c.snapshot_url, c.rtsp_url, c.preview_url) for c in settings.cameras] == [
+            (
+                CameraRole.FRONT,
+                "http://u:p@10.0.0.5/front",
+                "rtsp://u:p@10.0.0.5/stream",
+                "http://u:p@10.0.0.5/light",
+            ),
+            (CameraRole.REAR, None, "rtsp://u:p@10.0.0.6/rear", None),
         ]
 
     def test_cycle_only(self, repo_env: tuple[Session, int, int]) -> None:

@@ -213,11 +213,11 @@
       <section class="table-card" id="refs-cameras">
         <div class="card-title">Камеры</div>
         {% if can_edit %}
-        <div class="card-hint">URL камер содержат пароли доступа — вводите полностью (например <span class="mono">http://логин:пароль@192.168.158.120/ISAPI/Streaming/channels/101/picture</span>). Пустые поля — камера не настроена.</div>
+        <div class="card-hint">URL камер содержат пароли доступа — вводите полностью (например <span class="mono">http://логин:пароль@192.168.158.120/ISAPI/Streaming/channels/101/picture</span>). Пустые поля — камера не настроена. «Превью» — необязательный лёгкий кадр суб-потока (<span class="mono">channels/102/picture</span>) только для превью оператора: оно учащается до раза в секунду, фото операций по-прежнему идут с основного URL.</div>
         {% endif %}
         <div class="journal-scroll">
           <table class="journal users">
-            <thead><tr><th>Объект</th><th>Весы</th><th>Роль</th><th>Snapshot (HTTP)</th><th>RTSP</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
+            <thead><tr><th>Объект</th><th>Весы</th><th>Роль</th><th>Snapshot (HTTP)</th><th>RTSP</th><th>Превью (HTTP)</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
             <tbody>
               {% for scale, site in refs.scales %}
               {% for role in camera_roles %}
@@ -234,15 +234,17 @@
                   <input class="cell-input wide" form="cam-{{ scale.id }}-{{ role.value }}" name="snapshot_url" value="{{ camera.snapshot_url if camera and camera.snapshot_url else '' }}" placeholder="http://…">
                 </td>
                 <td><input class="cell-input wide" form="cam-{{ scale.id }}-{{ role.value }}" name="rtsp_url" value="{{ camera.rtsp_url if camera and camera.rtsp_url else '' }}" placeholder="rtsp://…"></td>
+                <td><input class="cell-input wide" form="cam-{{ scale.id }}-{{ role.value }}" name="preview_url" value="{{ camera.preview_url if camera and camera.preview_url else '' }}" placeholder="http://… (не обязательно)"></td>
                 <td class="cell-actions"><button type="submit" form="cam-{{ scale.id }}-{{ role.value }}" class="btn-row btn-row-primary">Сохранить</button></td>
                 {% else %}
                 <td>{% if camera and camera.snapshot_url %}<span class="pill pill-ok"><span class="dot"></span>настроен</span>{% else %}<span class="pill"><span class="dot"></span>—</span>{% endif %}</td>
                 <td>{% if camera and camera.rtsp_url %}<span class="pill pill-ok"><span class="dot"></span>настроен</span>{% else %}<span class="pill"><span class="dot"></span>—</span>{% endif %}</td>
+                <td>{% if camera and camera.preview_url %}<span class="pill pill-ok"><span class="dot"></span>настроен</span>{% else %}<span class="pill"><span class="dot"></span>—</span>{% endif %}</td>
                 {% endif %}
               </tr>
               {% endfor %}
               {% else %}
-              <tr><td colspan="{{ 6 if can_edit else 5 }}" class="empty">Весы не заведены</td></tr>
+              <tr><td colspan="{{ 7 if can_edit else 6 }}" class="empty">Весы не заведены</td></tr>
               {% endfor %}
             </tbody>
           </table>

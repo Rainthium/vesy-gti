@@ -1532,6 +1532,7 @@ def create_panel_router(
         role: Annotated[str, Form()],
         snapshot_url: Annotated[str, Form()] = "",
         rtsp_url: Annotated[str, Form()] = "",
+        preview_url: Annotated[str, Form()] = "",
     ) -> RedirectResponse:
         try:
             parsed_role = CameraRole(role)
@@ -1545,6 +1546,7 @@ def create_panel_router(
                 role=parsed_role,
                 snapshot_url=snapshot_url,
                 rtsp_url=rtsp_url,
+                preview_url=preview_url,
             ),
         )
         if error is None:
