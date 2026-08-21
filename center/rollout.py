@@ -242,6 +242,34 @@ def set_release_notes(
     session.commit()
 
 
+def delete_release(session: Session, releases_dir: Path, version: str, *, by: str) -> None:
+    """Удалить релиз из каталога: zip с диска и строку ``agent_releases`` разом
+    (иначе каталог, собираемый из файлы ∪ строки, оставит фантом).
+
+    Версия на канале не удаляется — её прямо сейчас раздаёт раскатка; сперва
+    «Отозвать» или перевод другой версии. Журнал ``agent_updates`` остаётся:
+    это история обновлений агентов, а не описание версии. Вернуть удалённую
+    версию можно только пересборкой из git-тега.
+    """
+    if not _known_release(session, releases_dir, version):
+        raise ReleaseError(f"релиз {version} не найден")
+    row = session.execute(
+        select(AgentRelease).where(AgentRelease.version == version)
+    ).scalar_one_or_none()
+    if row is not None and row.channel is not None:
+        raise ReleaseError(
+            f"релиз {version} назначен каналу {row.channel.value} — сначала снимите его с канала"
+        )
+    file = release_by_version(releases_dir, version)
+    # файл стирается до commit: если диск откажет, строка каталога уцелеет
+    if file is not None:
+        file.path.unlink(missing_ok=True)
+    if row is not None:
+        session.delete(row)
+    session.commit()
+    logger.info("релиз агента %s удалён из каталога (%s)", version, by)
+
+
 # ---------------------------------------------------------------------------
 # Журнал раскатки: переходы состояний
 # ---------------------------------------------------------------------------

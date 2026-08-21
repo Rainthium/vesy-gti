@@ -95,6 +95,19 @@
               </form>
             {% endif %}
           {% endif %}
+          {% if not r.present and r.channel %}
+            {# файл снесли руками на ВМ, а канал остался: раскатка стоит — дать снять канал (сервер отзыв без файла умеет) #}
+            <form method="post" action="/panel/releases/{{ r.version }}/channel" class="inline-form">
+              <input type="hidden" name="channel" value="none">
+              <button type="submit" class="btn-row btn-row-danger" onclick="return confirm('Отозвать релиз {{ r.version }}? Файла в каталоге нет, раскатка по нему и так не идёт; отзыв снимет канал — после этого версию можно удалить.')">Отозвать</button>
+            </form>
+          {% endif %}
+          {% if not r.channel %}
+            {# удаление — только версиям вне каналов; версии-фантомы (строка без файла) тоже подчищаются #}
+            <form method="post" action="/panel/releases/{{ r.version }}/delete" class="inline-form">
+              <button type="submit" class="btn-row btn-row-danger" onclick="return confirm('Удалить релиз {{ r.version }} из каталога? Файл будет стёрт с диска, вернуть версию можно только пересборкой из git-тега.{% if st and st.on_version %} На этой версии сейчас {{ st.on_version }} аг. — работе это не мешает, но откатиться на неё будет нельзя.{% endif %}')">Удалить</button>
+            </form>
+          {% endif %}
         </td>
       </tr>
       {% else %}

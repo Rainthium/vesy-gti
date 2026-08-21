@@ -35,6 +35,7 @@ from center.db.models import (
     AgentRelease,
     AgentStatus,
     AgentUpdate,
+    AgentUpdateStatus,
     ReleaseChannel,
     User,
     UserRole,
@@ -142,6 +143,7 @@ class TestAccess:
             env.client.post("/panel/releases/0.4.19/channel", data={"channel": "pilot"}).status_code
             == 403
         )
+        assert env.client.post("/panel/releases/0.4.19/delete").status_code == 403
         assert env.client.post(f"/panel/releases/agents/{env.scale_id}/update").status_code == 403
 
     def test_header_shows_display_name_not_login(self, env: ReleasesEnv) -> None:
@@ -218,6 +220,119 @@ class TestCatalogScreen:
         env.client.post("/panel/releases/0.4.19/notes", data={"notes": "самопроверка и автооткат"})
         page = env.client.get("/panel/releases").text
         assert 'value="самопроверка и автооткат"' in page
+
+
+class TestDelete:
+    def test_archived_release_deleted_file_and_row(self, env: ReleasesEnv) -> None:
+        """«Архив» (канал был и снят) удаляется целиком: и zip, и строка БД;
+        журнал раскатки agent_updates — история агентов, остаётся нетронутым."""
+        _put_release(env, "0.4.18")
+        _login(env)
+        with env.factory() as session:
+            session.add(
+                AgentUpdate(
+                    agent_id=env.agent_id, version="0.4.18", status=AgentUpdateStatus.INSTALLED
+                )
+            )
+            session.commit()
+        env.client.post("/panel/releases/0.4.18/channel", data={"channel": "pilot"})
+        env.client.post("/panel/releases/0.4.18/channel", data={"channel": "none"})
+        response = env.client.post("/panel/releases/0.4.18/delete", follow_redirects=False)
+        assert response.status_code == 303
+        assert "удалён из каталога" in unquote(response.headers["location"])
+        assert not (env.releases_dir / "ves-agent-0.4.18-win64.zip").exists()
+        with env.factory() as session:
+            assert (
+                session.execute(
+                    select(AgentRelease).where(AgentRelease.version == "0.4.18")
+                ).scalar_one_or_none()
+                is None
+            )
+            journal = session.execute(
+                select(AgentUpdate).where(AgentUpdate.version == "0.4.18")
+            ).scalar_one()
+            assert journal.status is AgentUpdateStatus.INSTALLED
+        # из каталога версия пропала (форм каталога нет); в блоке раскатки
+        # «0.4.18» останется — это текущая версия агента, её удаление не трёт
+        assert 'action="/panel/releases/0.4.18/notes"' not in env.client.get("/panel/releases").text
+
+    def test_unregistered_file_deleted(self, env: ReleasesEnv) -> None:
+        """Файл без строки каталога («не назначен» после scp) удаляется тоже."""
+        _put_release(env, "0.4.17")
+        _login(env)
+        response = env.client.post("/panel/releases/0.4.17/delete", follow_redirects=False)
+        assert "удалён из каталога" in unquote(response.headers["location"])
+        assert not (env.releases_dir / "ves-agent-0.4.17-win64.zip").exists()
+
+    def test_channel_release_refused(self, env: ReleasesEnv) -> None:
+        """Версию на канале не удалить даже прямым POST — сперва снять с канала."""
+        _put_release(env, "0.4.19")
+        _login(env)
+        for channel in ("pilot", "stable"):
+            env.client.post("/panel/releases/0.4.19/channel", data={"channel": channel})
+            response = env.client.post("/panel/releases/0.4.19/delete", follow_redirects=False)
+            assert f"назначен каналу {channel}" in unquote(response.headers["location"])
+            assert (env.releases_dir / "ves-agent-0.4.19-win64.zip").exists()
+        with env.factory() as session:
+            row = session.execute(
+                select(AgentRelease).where(AgentRelease.version == "0.4.19")
+            ).scalar_one()
+            assert row.channel is ReleaseChannel.STABLE
+
+    def test_phantom_row_deleted(self, env: ReleasesEnv) -> None:
+        """Строка каталога без файла («файла нет в каталоге») подчищается."""
+        _put_release(env, "0.4.16")
+        _login(env)
+        env.client.post("/panel/releases/0.4.16/notes", data={"notes": "строка в БД"})
+        (env.releases_dir / "ves-agent-0.4.16-win64.zip").unlink()
+        response = env.client.post("/panel/releases/0.4.16/delete", follow_redirects=False)
+        assert "удалён из каталога" in unquote(response.headers["location"])
+        with env.factory() as session:
+            assert (
+                session.execute(
+                    select(AgentRelease).where(AgentRelease.version == "0.4.16")
+                ).scalar_one_or_none()
+                is None
+            )
+
+    def test_unknown_version_refused(self, env: ReleasesEnv) -> None:
+        _login(env)
+        response = env.client.post("/panel/releases/9.9.9/delete", follow_redirects=False)
+        assert "не найден" in unquote(response.headers["location"])
+        response = env.client.post("/panel/releases/abc/delete", follow_redirects=False)
+        assert "неверная версия" in unquote(response.headers["location"])
+
+    def test_delete_button_only_for_off_channel(self, env: ReleasesEnv) -> None:
+        """Кнопка «Удалить» — только у версий вне каналов; у stable/pilot её нет."""
+        _put_release(env, "0.4.19")
+        _put_release(env, "0.4.18")
+        _login(env)
+        env.client.post("/panel/releases/0.4.19/channel", data={"channel": "stable"})
+        page = env.client.get("/panel/releases").text
+        assert 'action="/panel/releases/0.4.18/delete"' in page
+        assert 'action="/panel/releases/0.4.19/delete"' not in page
+
+    def test_channel_row_without_file_offers_recall(self, env: ReleasesEnv) -> None:
+        """Строке с каналом, но без файла (снесли руками на ВМ) доступен
+        «Отозвать» — без него состояние было тупиком: кнопки каналов требуют
+        файла, «Удалить» требует снятого канала (замечание ревью 21.08)."""
+        _put_release(env, "0.4.19")
+        _login(env)
+        env.client.post("/panel/releases/0.4.19/channel", data={"channel": "pilot"})
+        (env.releases_dir / "ves-agent-0.4.19-win64.zip").unlink()
+        page = env.client.get("/panel/releases").text
+        assert "файла нет в каталоге" in page
+        assert 'action="/panel/releases/0.4.19/channel"' in page  # форма отзыва
+        assert 'action="/panel/releases/0.4.19/delete"' not in page  # канал ещё назначен
+        response = env.client.post(
+            "/panel/releases/0.4.19/channel", data={"channel": "none"}, follow_redirects=False
+        )
+        assert response.status_code == 303
+        # канал снят — теперь строка удаляется как обычный фантом
+        page = env.client.get("/panel/releases").text
+        assert 'action="/panel/releases/0.4.19/delete"' in page
+        response = env.client.post("/panel/releases/0.4.19/delete", follow_redirects=False)
+        assert "удалён из каталога" in unquote(response.headers["location"])
 
 
 class TestUpload:

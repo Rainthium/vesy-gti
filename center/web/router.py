@@ -1770,6 +1770,29 @@ def create_panel_router(
         )
         return _releases_redirect(f"описание релиза {version} сохранено")
 
+    @router.post("/releases/{version}/delete")
+    async def releases_delete(
+        request: Request, admin: PanelAdmin, version: str
+    ) -> RedirectResponse:
+        """Удалить ненужный релиз (архив/не назначен): zip с диска и строку
+        каталога. Версию на канале сервер не удалит даже прямым POST."""
+        if releases_dir is None:
+            return _releases_redirect("каталог релизов не настроен")
+        if version_key(version) is None:
+            return _releases_redirect("неверная версия")
+        try:
+            await asyncio.to_thread(
+                _db, lambda s: rollout.delete_release(s, releases_dir, version, by=admin)
+            )
+        except ReleaseError as exc:
+            return _releases_redirect(str(exc))
+        except OSError as exc:
+            logger.exception("панель (%s): удаление релиза %s не удалось", admin, version)
+            return _releases_redirect(f"релиз {version} не удалён: {exc}")
+        note = f"релиз {version} удалён из каталога — вернуть его можно пересборкой из git-тега"
+        logger.info("панель (%s): %s", admin, note)
+        return _releases_redirect(note)
+
     @router.post("/releases/agents/{scale_id}/update")
     async def releases_agent_update(
         request: Request, admin: PanelAdmin, scale_id: int
