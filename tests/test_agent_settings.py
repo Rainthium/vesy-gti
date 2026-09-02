@@ -287,6 +287,16 @@ class FakeInfoSink:
         self.models.append(model)
 
 
+class FakeRetention:
+    """Уборка локальных фото: срок из центра применяется на лету (02.09.2026)."""
+
+    def __init__(self) -> None:
+        self.days: list[int] = []
+
+    def set_retention_days(self, days: int) -> None:
+        self.days.append(days)
+
+
 class ManagerEnv:
     """Собранный SettingsManager с фейками и памятью на диске (in-memory)."""
 
@@ -316,6 +326,8 @@ class ManagerEnv:
         self.manager.set_preview(self.preview)
         self.info_sink = FakeInfoSink()
         self.manager.set_info_sink(self.info_sink)
+        self.retention = FakeRetention()
+        self.manager.set_retention(self.retention)
 
     def close(self) -> None:
         self.storage.close()
@@ -597,3 +609,39 @@ class TestManagerPort:
         status = env.handle(ScaleSettingsPayload(cycle=make_cycle_settings()))
         assert status.ok is True
         assert env.driver.set_port_calls == []
+
+
+# --- срок хранения локальных фото из центра (0.4.25, 02.09.2026) ---
+
+
+class TestRetentionFromCenter:
+    def test_retention_days_applied_and_persisted(self, env: ManagerEnv) -> None:
+        """Срок из снимка доезжает до уборки на лету и сохраняется в снимке."""
+        status = env.handle(ScaleSettingsPayload(photo_retention_days=7))
+        assert status.ok is True
+        assert env.retention.days == [7]
+        stored = env.stored_payload()
+        assert stored is not None
+        assert stored.photo_retention_days == 7
+
+    def test_zero_from_center_disables_purge(self, env: ManagerEnv) -> None:
+        """0 — «не убирать»: это управление, а не «не задано»."""
+        env.handle(ScaleSettingsPayload(photo_retention_days=0))
+        assert env.retention.days == [0]
+
+    def test_none_leaves_retention_untouched(self, env: ManagerEnv) -> None:
+        env.handle(ScaleSettingsPayload(cycle=make_cycle_settings()))
+        assert env.retention.days == []
+
+    def test_merge_on_start(self) -> None:
+        """merge_center_settings: срок из снимка главнее config.toml,
+        остальная секция хранилища не тронута."""
+        config = make_agent_config()
+        merged = merge_center_settings(config, ScaleSettingsPayload(photo_retention_days=3))
+        assert merged.storage.photo_retention_days == 3
+        assert merged.storage.db_path == config.storage.db_path
+        assert merged.storage.photos_dir == config.storage.photos_dir
+        merged = merge_center_settings(config, ScaleSettingsPayload(photo_retention_days=0))
+        assert merged.storage.photo_retention_days == 0
+        merged = merge_center_settings(config, ScaleSettingsPayload(cycle=make_cycle_settings()))
+        assert merged.storage.photo_retention_days == config.storage.photo_retention_days

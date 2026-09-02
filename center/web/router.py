@@ -65,6 +65,7 @@ from shared.messages import (
     UpdateCommand,
     VerificationInfo,
     supports_log_tail,
+    supports_photo_cleanup,
     supports_secure_sync,
 )
 from shared.tare import three_months_before
@@ -467,6 +468,13 @@ def create_panel_router(
             "all_good": not alerts
             and all(item.agent is None or online_map.get(item.scale.id) for item in scales),
             "update_targets": update_targets,
+            # кнопка «Освободить место» — только агентам, умеющим команду (0.4.25+)
+            "cleanup_ready": {
+                item.scale.id
+                for item in scales
+                if item.agent is not None and supports_photo_cleanup(item.agent.version)
+            },
+            "disk_low_mb": MonitoringThresholds().disk_low_mb,
             "volumes": volumes,
         }
 
@@ -547,6 +555,112 @@ def create_panel_router(
         """
         note = await _command_update(admin, scale_id)
         return RedirectResponse(f"/panel/?update_note={quote(note)}", status_code=303)
+
+    @router.post("/scales/{scale_id}/cleanup-photos")
+    async def cleanup_photos(
+        request: Request, admin: PanelAdmin, scale_id: int
+    ) -> RedirectResponse:
+        """Убрать с весового ПК локальные фото, уже принятые центром
+        (кнопка «Освободить место», решение Игоря 02.09.2026 — вместо
+        удаления записей за период, которое запрещает правило №2).
+
+        Только админ: команда меняет состояние объекта. Каждая команда — в
+        аудит с итогом. POST — у запроса побочки (см. журнал агента).
+        """
+        note = await _command_cleanup(admin, scale_id)
+        return RedirectResponse(f"/panel/?update_note={quote(note)}", status_code=303)
+
+    async def _command_cleanup(admin: str, scale_id: int) -> str:
+        """Послать агенту команду уборки фото, дождаться отчёта; вернуть заметку."""
+        row = await asyncio.to_thread(
+            _db,
+            lambda s: (
+                None
+                if (scale := s.get(Scale, scale_id)) is None
+                else (scale.name, _agent_of(s, scale_id))
+            ),
+        )
+        if row is None:
+            return "весы не найдены"
+        scale_name, agent = row
+        if agent is None:
+            return f"{scale_name}: агент не заведён"
+        if not hub.connected(scale_id):
+            return f"{scale_name}: агент не в сети — уборка возможна только при связи"
+        if not supports_photo_cleanup(agent.version):
+            return (
+                f"{scale_name}: агент версии {agent.version or '—'} не умеет убирать фото "
+                "по команде (нужна 0.4.25 или новее — обновите его на экране «Релизы»)"
+            )
+        try:
+            response = await hub.request_photo_cleanup(scale_id)
+        except AgentHubError as exc:
+            # команда могла дойти до агента и выполниться — след в аудите
+            # нужен и у неудачной попытки (ревью 02.09)
+            await asyncio.to_thread(
+                _db, lambda s, e=exc: _audit_cleanup(s, admin, scale_id, error=str(e))
+            )
+            return f"{scale_name}: {exc}"
+        await asyncio.to_thread(
+            _db,
+            lambda s: _audit_cleanup(
+                s,
+                admin,
+                scale_id,
+                removed_files=response.removed_files,
+                freed_bytes=response.freed_bytes,
+                disk_free_mb=response.disk_free_mb,
+                error=response.error,
+            ),
+        )
+        if response.error:
+            logger.error(
+                "панель (%s): уборка фото весов %d не удалась: %s", admin, scale_id, response.error
+            )
+            return f"{scale_name}: уборка не удалась — {response.error}"
+        freed_mb = response.freed_bytes / (1024 * 1024)
+        free_note = (
+            f", свободно {response.disk_free_mb / 1024:.1f} ГБ"
+            if response.disk_free_mb is not None
+            else ""
+        )
+        logger.info(
+            "панель (%s): уборка фото весов %d — убрано %d файлов, %.0f МБ",
+            admin,
+            scale_id,
+            response.removed_files,
+            freed_mb,
+        )
+        return (
+            f"{scale_name}: убрано {response.removed_files} файлов, "
+            f"освобождено {freed_mb:.0f} МБ{free_note}"
+        )
+
+    def _audit_cleanup(
+        session: Session,
+        user: str,
+        scale_id: int,
+        *,
+        removed_files: int = 0,
+        freed_bytes: int = 0,
+        disk_free_mb: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Кто, когда и с каким итогом чистил фото объекта (в т.ч. неудачно)."""
+        session.add(
+            AuditLog(
+                actor=f"panel:{user}",
+                action="agent_photo_cleanup",
+                details={
+                    "scale_id": scale_id,
+                    "removed_files": removed_files,
+                    "freed_bytes": freed_bytes,
+                    "disk_free_mb": disk_free_mb,
+                    "error": error,
+                },
+            )
+        )
+        session.commit()
 
     def _agent_of(session: Session, scale_id: int) -> Agent | None:
         return session.execute(select(Agent).where(Agent.scale_id == scale_id)).scalar_one_or_none()
@@ -1462,6 +1576,9 @@ def create_panel_router(
             port=port_cfg.get("port") or "",
             baudrate=port_cfg.get("baudrate") or 9600,
             indicator_model=scale.indicator_model or "",
+            photo_retention_days=(
+                "" if scale.photo_retention_days is None else scale.photo_retention_days
+            ),
             verif_number=scale.verif_number or "",
             verif_date=scale.verif_date.isoformat() if scale.verif_date else "",
             verif_until=scale.verif_until.isoformat() if scale.verif_until else "",
@@ -1483,6 +1600,7 @@ def create_panel_router(
         port: Annotated[str, Form()] = "",
         baudrate: Annotated[str, Form()] = "",
         indicator_model: Annotated[str, Form()] = "",
+        photo_retention_days: Annotated[str, Form()] = "",
         verif_number: Annotated[str, Form()] = "",
         verif_date: Annotated[str, Form()] = "",
         verif_until: Annotated[str, Form()] = "",
@@ -1496,6 +1614,9 @@ def create_panel_router(
         parsed_baudrate, baudrate_ok = _parse_opt_int(baudrate)
         if not baudrate_ok:
             return back("скорость порта — число")
+        parsed_retention, retention_ok = _parse_opt_int(photo_retention_days)
+        if not retention_ok:
+            return back("срок хранения локальных фото — число дней (пусто = локальный конфиг)")
         cycle = CycleSettings(
             zero_threshold_kg=zero_threshold_kg,
             vehicle_threshold_kg=vehicle_threshold_kg,
@@ -1514,6 +1635,7 @@ def create_panel_router(
                 port=port,
                 baudrate=parsed_baudrate,
                 indicator_model=indicator_model,
+                photo_retention_days=parsed_retention,
             ),
         )
         if error is not None:

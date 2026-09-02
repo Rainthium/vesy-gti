@@ -38,6 +38,8 @@ SECURE_SYNC_MIN_VERSION = (0, 4, 0)
 # Минимальная версия агента, умеющая присылать хвост своего журнала
 # по запросу центра (удалённая диагностика без захода в сеть объекта).
 LOG_TAIL_MIN_VERSION = (0, 4, 5)
+# уборка локальных фото по команде центра и срок хранения из снимка (02.09.2026)
+PHOTO_CLEANUP_MIN_VERSION = (0, 4, 25)
 
 # Минимальная версия агента со стадиями автообновления (самопроверка →
 # ``installed``, откат → ``rolled_back``): центр не дублирует его доклады
@@ -70,6 +72,13 @@ def supports_log_tail(version: str | None) -> bool:
     """Умеет ли агент этой версии отдавать хвост журнала по запросу."""
     parts = _version_tuple(version)
     return parts is not None and parts >= LOG_TAIL_MIN_VERSION
+
+
+def supports_photo_cleanup(version: str | None) -> bool:
+    """Умеет ли агент этой версии убирать локальные фото по команде центра
+    и принимать срок их хранения из снимка настроек."""
+    parts = _version_tuple(version)
+    return parts is not None and parts >= PHOTO_CLEANUP_MIN_VERSION
 
 
 class CameraStatus(BaseModel):
@@ -370,6 +379,10 @@ class ScaleSettingsPayload(BaseModel):
     # подпись индикатора/весов в интерфейсе агента (агенты до 0.4.24
     # отбрасывают); None — подписью управляет локальный конфиг
     indicator_model: str | None = None
+    # срок хранения локальных файлов фото на весовом ПК, дней (агенты до
+    # 0.4.25 отбрасывают): 0 — не убирать никогда; None — управляет
+    # локальный конфиг агента (решение Игоря 02.09.2026)
+    photo_retention_days: int | None = Field(default=None, ge=0, le=3650)
 
 
 class ScaleConfigUpdate(BaseModel):
@@ -433,6 +446,32 @@ class LogTailResponse(BaseModel):
     location: str = ""  # где лежит файл на весовом ПК — подсказка диспетчеру
 
 
+class PhotoCleanupRequest(BaseModel):
+    """Центр → агент: убрать с весового ПК локальные файлы фото, уже
+    принятых центром, не дожидаясь срока хранения (кнопка «Освободить
+    место» на карточке весов; решение Игоря 02.09.2026 — вместо удаления
+    записей за период, которое правило №2 запрещает).
+
+    Удаляются ТОЛЬКО подтверждённые снимки (uploaded=1): копия в центре
+    сверена по sha256. Записи журнала и неотправленные фото не трогаются.
+    """
+
+    type: Literal["photo_cleanup_request"] = "photo_cleanup_request"
+    request_id: UUID
+
+
+class PhotoCleanupResponse(BaseModel):
+    """Агент → центр: итог уборки локальных фото."""
+
+    type: Literal["photo_cleanup_response"] = "photo_cleanup_response"
+    request_id: UUID
+    agent_id: str
+    removed_files: int = 0  # убрано кадров (миниатюры не считаем)
+    freed_bytes: int = 0  # освобождено байт (кадры + миниатюры)
+    disk_free_mb: int | None = None  # свободно на диске с фото после уборки
+    error: str | None = None  # уборка не удалась целиком — текст причины
+
+
 # --- дискриминированные объединения и разбор ---
 
 AgentMessage = Annotated[
@@ -443,6 +482,7 @@ AgentMessage = Annotated[
     | UpdateStatus
     | ConfigStatus
     | LogTailResponse
+    | PhotoCleanupResponse
     | OperatorsReport,
     Field(discriminator="type"),
 ]
@@ -454,7 +494,8 @@ CenterMessage = Annotated[
     | ScaleConfigUpdate
     | HeartbeatAck
     | UpdateCommand
-    | LogTailRequest,
+    | LogTailRequest
+    | PhotoCleanupRequest,
     Field(discriminator="type"),
 ]
 

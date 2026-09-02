@@ -22,7 +22,15 @@ from shared import (
     parse_agent_message,
     parse_center_message,
 )
-from shared.messages import AgentOperatorInfo, OperatorsReport, UpdateStatus
+from shared.messages import (
+    AgentOperatorInfo,
+    OperatorsReport,
+    PhotoCleanupRequest,
+    PhotoCleanupResponse,
+    ScaleSettingsPayload,
+    UpdateStatus,
+    supports_photo_cleanup,
+)
 
 
 class TestEnums:
@@ -207,3 +215,61 @@ class TestAisRefAndTareHint:
         assert isinstance(parsed, WeighRequest)
         assert parsed.ais_ref == "WEI000094176"
         assert parsed.tare_resolved is True and parsed.tare == hint
+
+
+class TestPhotoCleanupMessages:
+    """Уборка локальных фото по команде центра (агент 0.4.25, решение Игоря
+    02.09.2026): команда идёт только центр → агент, отчёт — только обратно."""
+
+    def test_request_is_center_message_only(self) -> None:
+        msg = PhotoCleanupRequest(request_id=uuid4())
+        parsed = parse_center_message(msg.model_dump_json())
+        assert isinstance(parsed, PhotoCleanupRequest)
+        assert parsed.request_id == msg.request_id
+        with pytest.raises(ValidationError):
+            parse_agent_message(msg.model_dump_json())
+
+    def test_response_roundtrip_and_defaults(self) -> None:
+        msg = PhotoCleanupResponse(
+            request_id=uuid4(),
+            agent_id="a1",
+            removed_files=12,
+            freed_bytes=3_500_000,
+            disk_free_mb=40_960,
+        )
+        parsed = parse_agent_message(msg.model_dump_json())
+        assert isinstance(parsed, PhotoCleanupResponse)
+        assert (parsed.removed_files, parsed.freed_bytes, parsed.disk_free_mb) == (
+            12,
+            3_500_000,
+            40_960,
+        )
+        assert parsed.error is None
+        bare = parse_agent_message(
+            PhotoCleanupResponse(request_id=uuid4(), agent_id="a1").model_dump_json()
+        )
+        assert isinstance(bare, PhotoCleanupResponse)
+        assert (bare.removed_files, bare.freed_bytes, bare.disk_free_mb) == (0, 0, None)
+        with pytest.raises(ValidationError):
+            parse_center_message(msg.model_dump_json())
+
+    def test_retention_days_in_settings_payload(self) -> None:
+        """0 — «не убирать» (это тоже управление), None — локальный конфиг;
+        неизвестные поля будущих версий не ломают разбор старым агентом."""
+        assert ScaleSettingsPayload(photo_retention_days=0).photo_retention_days == 0
+        assert ScaleSettingsPayload().photo_retention_days is None
+        future = ScaleSettingsPayload.model_validate_json(
+            '{"photo_retention_days": 7, "unknown_future_field": 1}'
+        )
+        assert future.photo_retention_days == 7
+        with pytest.raises(ValidationError):
+            ScaleSettingsPayload(photo_retention_days=-1)
+        with pytest.raises(ValidationError):
+            ScaleSettingsPayload(photo_retention_days=3651)
+
+    @pytest.mark.parametrize(
+        ("version", "expected"),
+        [("0.4.24", False), ("0.4.25", True), ("0.5.0", True), (None, False), ("мусор", False)],
+    )
+    def test_supports_photo_cleanup(self, version: str | None, expected: bool) -> None:
+        assert supports_photo_cleanup(version) is expected

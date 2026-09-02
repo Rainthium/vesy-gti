@@ -83,7 +83,7 @@ ALL_TABLES = (
     "weighing_events",
 )
 
-HEAD_REVISION = "f2a3b4c5d6e7"  # indicator_model весов (20.08.2026)
+HEAD_REVISION = "a3b4c5d6e7f8"  # photo_retention_days весов (02.09.2026)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64

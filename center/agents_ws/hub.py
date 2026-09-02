@@ -21,6 +21,8 @@ from shared.messages import (
     LogTailRequest,
     LogTailResponse,
     OperatorsRegistryUpdate,
+    PhotoCleanupRequest,
+    PhotoCleanupResponse,
     ScaleConfigUpdate,
     TareRegistryUpdate,
     UpdateCommand,
@@ -32,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WEIGH_TIMEOUT_S = 120.0  # тайм-аут всей операции взвешивания
 DEFAULT_LOG_TAIL_TIMEOUT_S = 20.0  # журнал маленький: агент отвечает за секунды
+# уборка тысяч файлов на HDD весового ПК — десятки секунд (02.09.2026); меньше
+# proxy_read_timeout 180s панели в deploy/nginx.conf — иначе админ увидел бы
+# 504 nginx вместо заметки «агент не отчитался» (ревью 02.09)
+DEFAULT_PHOTO_CLEANUP_TIMEOUT_S = 150.0
 AIS_REF_TTL_S = 15 * 60.0  # сколько помнить номер документа АИС команды без результата
 
 
@@ -59,6 +65,8 @@ class AgentHub:
         self._pending: dict[UUID, tuple[int, asyncio.Future[WeighResult]]] = {}
         # request_id -> (scale_id, future хвоста журнала) — удалённая диагностика
         self._pending_logs: dict[UUID, tuple[int, asyncio.Future[LogTailResponse]]] = {}
+        # команды уборки локальных фото (02.09.2026): ждём отчёт агента
+        self._pending_cleanups: dict[UUID, tuple[int, asyncio.Future[PhotoCleanupResponse]]] = {}
         # последняя самодиагностика из hello/heartbeat (для дашборда панели:
         # состояние индикатора и камер на одном экране, запрос Игоря 09.08.2026)
         self._equipment: dict[int, EquipmentStatus] = {}
@@ -198,6 +206,50 @@ class AgentHub:
     def resolve_log_tail(self, response: LogTailResponse, *, scale_id: int) -> bool:
         """Доставить хвост журнала ожидающему запросу; False — никто не ждал."""
         entry = self._pending_logs.get(response.request_id)
+        if entry is None:
+            return False
+        pending_scale_id, future = entry
+        if pending_scale_id != scale_id or future.done():
+            return False
+        future.set_result(response)
+        return True
+
+    async def request_photo_cleanup(
+        self,
+        scale_id: int,
+        *,
+        timeout_s: float = DEFAULT_PHOTO_CLEANUP_TIMEOUT_S,
+    ) -> PhotoCleanupResponse:
+        """Велеть агенту убрать локальные фото, принятые центром, и дождаться
+        отчёта (кнопка «Освободить место», решение Игоря 02.09.2026).
+
+        Уборка тысяч файлов на медленном диске занимает десятки секунд —
+        тайм-аут заметно больше, чем у журнала.
+        """
+        link = self._links.get(scale_id)
+        if link is None:
+            raise AgentHubError(ErrorCode.ERR_AGENT_OFFLINE, "нет связи с агентом объекта")
+        request = PhotoCleanupRequest(request_id=uuid4())
+        future: asyncio.Future[PhotoCleanupResponse] = asyncio.get_running_loop().create_future()
+        self._pending_cleanups[request.request_id] = (scale_id, future)
+        try:
+            try:
+                await link.send_text(request.model_dump_json())
+            except Exception as exc:
+                raise AgentHubError(
+                    ErrorCode.ERR_AGENT_OFFLINE, "соединение с агентом оборвалось"
+                ) from exc
+            return await asyncio.wait_for(future, timeout=timeout_s)
+        except TimeoutError as exc:
+            raise AgentHubError(
+                ErrorCode.ERR_INTERNAL, "агент не отчитался об уборке за отведённое время"
+            ) from exc
+        finally:
+            self._pending_cleanups.pop(request.request_id, None)
+
+    def resolve_photo_cleanup(self, response: PhotoCleanupResponse, *, scale_id: int) -> bool:
+        """Доставить отчёт об уборке ожидающей команде; False — никто не ждал."""
+        entry = self._pending_cleanups.get(response.request_id)
         if entry is None:
             return False
         pending_scale_id, future = entry

@@ -293,13 +293,17 @@ def save_scale_settings(
     port: str,
     baudrate: int | None,
     indicator_model: str = "",
+    photo_retention_days: int | None = None,
 ) -> str | None:
     """Сохранить настройки весов (страница настроек, решение Игоря 10.08.2026).
 
     Цикл — полный набор в scales.thresholds; COM-порт/скорость —
     в scales.port_cfg (пустой порт = порт остаётся локальным на весовом ПК);
     indicator_model — подпись в интерфейсе агента (пустая = подписью
-    управляет локальный конфиг, 20.08.2026).
+    управляет локальный конфиг, 20.08.2026); photo_retention_days — через
+    сколько дней агент убирает локальные ФАЙЛЫ снимков, принятых центром
+    (None = локальный конфиг, 0 = не убирать; 02.09.2026 — записи журнала
+    не удаляются никогда, правило №2).
     Доставку агенту делает маршрут (push + при каждом hello).
     """
     scale = session.get(Scale, scale_id)
@@ -320,9 +324,12 @@ def save_scale_settings(
     indicator_model = indicator_model.strip()
     if len(indicator_model) > 120:
         return "модель индикатора: не длиннее 120 символов"
+    if photo_retention_days is not None and not 0 <= photo_retention_days <= 3650:
+        return "срок хранения локальных фото: от 0 до 3650 дней"
     scale.thresholds = values
     scale.port_cfg = {"port": port, "baudrate": baudrate or 9600} if port else None
     scale.indicator_model = indicator_model or None
+    scale.photo_retention_days = photo_retention_days
     session.commit()
     logger.info("справочники: настройки весов id=%d сохранены", scale_id)
     return None

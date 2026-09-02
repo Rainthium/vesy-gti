@@ -33,7 +33,8 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from agent.sync.retention import PhotoRetention, run_forever
+from agent.photos import thumb_path
+from agent.sync.retention import CleanupResult, PhotoRetention, run_forever
 from agent.sync.storage import AgentStorage, StoredPhoto
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 from shared.messages import WeighingRecord
@@ -481,3 +482,151 @@ class TestRetentionLoop:
         with caplog.at_level(logging.ERROR, logger="agent.sync.retention"):
             asyncio.run(asyncio.wait_for(scenario(), timeout=10))
         assert any("сбой уборки" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Принудительная уборка по команде центра и срок на лету (0.4.25, 02.09.2026)
+# ---------------------------------------------------------------------------
+
+
+class TestCleanupNow:
+    """Кнопка «Освободить место»: убрать всё, что центр уже принял, сразу."""
+
+    def test_removes_all_uploaded_regardless_of_age(self, env: RetentionEnv) -> None:
+        _, fresh = env.add_photo("fresh.jpeg", uploaded_at=NOW - timedelta(minutes=1))
+        _, old = env.add_photo("old.jpeg", uploaded_at=NOW - timedelta(days=40))
+        retention = PhotoRetention(env.storage, retention_days=30)
+        result = retention.cleanup_now(now=NOW)
+        assert result == CleanupResult(removed_files=2, freed_bytes=2 * len(JPEG))
+        assert not fresh.exists() and not old.exists()
+
+    def test_works_when_scheduled_purge_disabled(self, env: RetentionEnv) -> None:
+        """retention_days = 0 выключает плановую уборку, но не команду диспетчера."""
+        _, path = env.add_photo("a.jpeg", uploaded_at=NOW - timedelta(days=1))
+        retention = PhotoRetention(env.storage, retention_days=0)
+        assert retention.cleanup_now(now=NOW).removed_files == 1
+        assert not path.exists()
+
+    def test_never_touches_unconfirmed_photos(self, env: RetentionEnv) -> None:
+        """Неподтверждённый снимок — единственный экземпляр: не трогаем."""
+        weighing_uuid, pending = env.add_photo("pending.jpeg", uploaded=False)
+        retention = PhotoRetention(env.storage, retention_days=30)
+        assert retention.cleanup_now(now=NOW) == CleanupResult(0, 0)
+        assert pending.exists()
+        assert env.photo_row(weighing_uuid)["file_removed"] == 0
+
+    def test_counts_thumbnail_bytes_and_keeps_metadata(self, env: RetentionEnv) -> None:
+        weighing_uuid, frame = env.add_photo("f.jpeg", uploaded_at=NOW - timedelta(days=1))
+        thumb = thumb_path(frame)
+        thumb.write_bytes(b"t" * 10)
+        result = PhotoRetention(env.storage, retention_days=30).cleanup_now(now=NOW)
+        assert result.freed_bytes == len(JPEG) + 10
+        assert not thumb.exists()
+        row = env.photo_row(weighing_uuid)
+        assert row["file_removed"] == 1
+        assert row["sha256"] == SHA and row["path"] == str(frame)
+
+    def test_second_run_finds_nothing(self, env: RetentionEnv) -> None:
+        env.add_photo("f.jpeg", uploaded_at=NOW - timedelta(days=1))
+        retention = PhotoRetention(env.storage, retention_days=30)
+        retention.cleanup_now(now=NOW)
+        assert retention.cleanup_now(now=NOW) == CleanupResult(0, 0)
+
+    def test_undeletable_file_does_not_loop_forever(
+        self, env: RetentionEnv, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Файл не поддаётся (занят/нет прав): порция та же — цикл обязан выйти."""
+        env.add_photo("f.jpeg", uploaded_at=NOW - timedelta(days=1))
+
+        def busy(self: Path, missing_ok: bool = False) -> None:
+            raise PermissionError("файл занят")
+
+        monkeypatch.setattr(Path, "unlink", busy)
+        result = PhotoRetention(env.storage, retention_days=30).cleanup_now(now=NOW)
+        assert result == CleanupResult(0, 0)
+
+
+class TestRetentionOnTheFly:
+    """Срок из центра (снимок настроек) меняется без рестарта службы."""
+
+    def test_set_retention_days_switches_enabled(self, env: RetentionEnv) -> None:
+        retention = PhotoRetention(env.storage, retention_days=0)
+        assert not retention.enabled
+        retention.set_retention_days(7)
+        assert retention.enabled and retention.retention_days == 7
+        retention.set_retention_days(0)
+        assert not retention.enabled
+        with pytest.raises(ValueError):
+            retention.set_retention_days(-1)
+
+    def test_new_term_takes_effect_immediately(self, env: RetentionEnv) -> None:
+        """Цикл спит часами; смена срока будит его сразу — 40-дневный файл
+        убирается за доли секунды, а не при следующем заходе."""
+        _, old = env.add_photo("old.jpeg", uploaded_at=datetime.now(UTC) - timedelta(days=40))
+        retention = PhotoRetention(env.storage, retention_days=0, interval_s=3600)
+
+        async def scenario() -> None:
+            task = asyncio.create_task(run_forever(retention))
+            await asyncio.sleep(0.05)
+            assert old.exists(), "выключенная уборка что-то удалила"
+            retention.set_retention_days(30)
+            deadline = time.monotonic() + 3
+            while old.exists():
+                assert time.monotonic() < deadline, "смена срока не разбудила цикл"
+                await asyncio.sleep(0.01)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        asyncio.run(scenario())
+
+    def test_change_during_long_purge_is_not_lost(
+        self, env: RetentionEnv, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Срок сменили, пока плановая уборка крутилась в потоке: сигнал
+        будильника не должен стереться — новый срок действует сразу, а не
+        через весь интервал (замечание ревью 02.09.2026)."""
+        _, old = env.add_photo("old.jpeg", uploaded_at=datetime.now(UTC) - timedelta(days=40))
+        retention = PhotoRetention(env.storage, retention_days=60, interval_s=3600)
+        original = env.storage.photos_to_purge
+        calls = 0
+
+        def slow_query(older_than: datetime, limit: int = 200) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                time.sleep(0.3)  # первая уборка «долгая» — смена срока придёт в неё
+            return original(older_than, limit)
+
+        monkeypatch.setattr(env.storage, "photos_to_purge", slow_query)
+
+        async def scenario() -> None:
+            task = asyncio.create_task(run_forever(retention))
+            await asyncio.sleep(0.1)  # уборка идёт в потоке (срок 60 — файл не подходит)
+            retention.set_retention_days(30)
+            deadline = time.monotonic() + 3
+            while old.exists():
+                assert time.monotonic() < deadline, "смена срока во время уборки потерялась"
+                await asyncio.sleep(0.01)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        asyncio.run(scenario())
+
+    def test_disabling_on_the_fly_stops_purging(self, env: RetentionEnv) -> None:
+        retention = PhotoRetention(env.storage, retention_days=30, interval_s=0.01)
+
+        async def scenario() -> None:
+            task = asyncio.create_task(run_forever(retention))
+            await asyncio.sleep(0.03)
+            retention.set_retention_days(0)
+            await asyncio.sleep(0.03)
+            _, old = env.add_photo("old.jpeg", uploaded_at=datetime.now(UTC) - timedelta(days=40))
+            await asyncio.sleep(0.1)
+            assert old.exists(), "выключенная на лету уборка удалила файл"
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        asyncio.run(scenario())

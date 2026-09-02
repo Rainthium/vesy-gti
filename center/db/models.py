@@ -127,6 +127,9 @@ class Scale(Base):
     # «Оборудование»); реплицируется агенту в снимке настроек (20.08.2026);
     # NULL — подписью управляет локальный конфиг весового ПК
     indicator_model: Mapped[str | None] = mapped_column(String(120), default=None)
+    # срок хранения локальных файлов фото на весовом ПК, дней (0 — не
+    # убирать); NULL — управляет локальный конфиг агента (02.09.2026)
+    photo_retention_days: Mapped[int | None] = mapped_column(default=None)
     # свидетельство о поверке (одно на весы; печатается на весовой карточке
     # и реплицируется агенту в снимке настроек — офлайн-печать)
     verif_number: Mapped[str | None] = mapped_column(String(64), default=None)

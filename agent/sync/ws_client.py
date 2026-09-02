@@ -38,6 +38,7 @@ from uuid import uuid4
 
 import websockets
 
+from agent.sync.retention import CleanupResult
 from agent.sync.storage import AgentStorage
 from shared.enums import ErrorCode, WeighingSource
 from shared.messages import (
@@ -52,6 +53,8 @@ from shared.messages import (
     OfflineSyncAck,
     OperatorsRegistryUpdate,
     OperatorsReport,
+    PhotoCleanupRequest,
+    PhotoCleanupResponse,
     ScaleConfigUpdate,
     TareRegistryUpdate,
     UpdateCommand,
@@ -108,6 +111,7 @@ class CenterClient:
         on_scale_config: Callable[[ScaleConfigUpdate], Awaitable[ConfigStatus]] | None = None,
         on_server_time: Callable[[datetime], None] | None = None,
         on_log_tail: Callable[[int], tuple[list[str], str]] | None = None,
+        on_photo_cleanup: Callable[[], Awaitable[CleanupResult]] | None = None,
     ) -> None:
         self._config = config
         self._storage = storage
@@ -117,6 +121,7 @@ class CenterClient:
         self._on_scale_config = on_scale_config
         self._on_server_time = on_server_time
         self._on_log_tail = on_log_tail
+        self._on_photo_cleanup = on_photo_cleanup
         self._connected = asyncio.Event()
         self._stopping = False
         self._request_tasks: set[asyncio.Task[None]] = set()
@@ -262,6 +267,8 @@ class CenterClient:
                 self._spawn_update_handler(connection, message)
             elif isinstance(message, LogTailRequest):
                 await self._send_log_tail(connection, message)
+            elif isinstance(message, PhotoCleanupRequest):
+                self._spawn_cleanup_handler(connection, message)
 
     async def _send_log_tail(
         self, connection: websockets.ClientConnection, request: LogTailRequest
@@ -293,6 +300,48 @@ class CenterClient:
             logger.info("журнал отправлен центру: %d строк", len(lines))
         else:
             logger.warning("центру отправлен пустой журнал (файл недоступен)")
+
+    def _spawn_cleanup_handler(
+        self, connection: websockets.ClientConnection, request: PhotoCleanupRequest
+    ) -> None:
+        """Уборка локальных фото по команде центра — отдельной задачей:
+        тысячи файлов удаляются секунды, heartbeat замирать не должен.
+        Центр всегда получает отчёт — с итогом или с текстом ошибки."""
+        handler = self._on_photo_cleanup
+
+        async def handle() -> None:
+            response = PhotoCleanupResponse(
+                request_id=request.request_id, agent_id=self._config.agent_id
+            )
+            if handler is None:
+                logger.warning("запрошена уборка фото, но обработчик не настроен")
+                response = response.model_copy(update={"error": "агент не настроен на уборку"})
+            else:
+                try:
+                    result = await handler()
+                    response = response.model_copy(
+                        update={
+                            "removed_files": result.removed_files,
+                            "freed_bytes": result.freed_bytes,
+                        }
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.exception("уборка фото по команде центра упала")
+                    # «голое» исключение без текста не должно выглядеть успехом
+                    response = response.model_copy(update={"error": str(exc) or type(exc).__name__})
+            with contextlib.suppress(Exception):
+                # сколько стало свободно — тем же способом, что и heartbeat
+                response = response.model_copy(
+                    update={"disk_free_mb": self._equipment_status().disk_free_mb}
+                )
+            with contextlib.suppress(Exception):
+                await connection.send(response.model_dump_json())
+
+        task = asyncio.create_task(handle(), name="photo-cleanup")
+        self._request_tasks.add(task)
+        task.add_done_callback(self._request_tasks.discard)
 
     def _spawn_config_handler(
         self, connection: websockets.ClientConnection, update: ScaleConfigUpdate

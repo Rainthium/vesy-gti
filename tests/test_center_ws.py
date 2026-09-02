@@ -92,6 +92,8 @@ from shared.messages import (
     OperatorRecord,
     OperatorsRegistryUpdate,
     OperatorsReport,
+    PhotoCleanupRequest,
+    PhotoCleanupResponse,
     PhotoMeta,
     ScaleConfigUpdate,
     ScaleSettingsPayload,
@@ -2028,3 +2030,122 @@ class TestUpdateStatusEvents:
         assert events[0].severity is MonitoringSeverity.WARNING
         assert "до 0.4.18 не выполнено" in events[0].message
         assert "служба не перезапущена" in events[0].message
+
+
+# ---------------------------------------------------------------------------
+# Уборка локальных фото по команде центра (0.4.25, решение Игоря 02.09.2026)
+# ---------------------------------------------------------------------------
+
+
+class TestRepoLoadScaleSettingsRetention:
+    def test_retention_only_makes_payload(self, repo_env: tuple[Session, int, int]) -> None:
+        """Один лишь срок хранения (даже 0 — «не убирать») — уже снимок."""
+        session, scale_id, _ = repo_env
+        scale = session.get(Scale, scale_id)
+        assert scale is not None
+        scale.photo_retention_days = 0
+        session.commit()
+        settings = repo.load_scale_settings(session, scale_id)
+        assert settings is not None
+        assert settings.photo_retention_days == 0
+        assert settings.cycle is None and settings.cameras is None
+
+    def test_null_retention_is_none(self, repo_env: tuple[Session, int, int]) -> None:
+        """NULL в справочнике — None в снимке: сроком правит локальный конфиг."""
+        session, scale_id, _ = repo_env
+        _set_scale_settings(session, scale_id, thresholds=dict(CYCLE_THRESHOLDS))
+        settings = repo.load_scale_settings(session, scale_id)
+        assert settings is not None
+        assert settings.photo_retention_days is None
+
+
+class TestAgentHubPhotoCleanup:
+    def test_request_and_response(self) -> None:
+        """Центр шлёт команду, агент отчитывается — отчёт возвращается."""
+
+        async def scenario() -> None:
+            hub = AgentHub()
+            link = FakeLink()
+            hub.attach(1, link)
+            task = asyncio.create_task(hub.request_photo_cleanup(1))
+            await asyncio.sleep(0)
+            request = parse_center_message(link.sent[0])
+            assert isinstance(request, PhotoCleanupRequest)
+            assert hub.resolve_photo_cleanup(
+                PhotoCleanupResponse(
+                    request_id=request.request_id,
+                    agent_id="agent-1",
+                    removed_files=5,
+                    freed_bytes=1024,
+                    disk_free_mb=20480,
+                ),
+                scale_id=1,
+            )
+            response = await task
+            assert response.removed_files == 5
+            assert response.disk_free_mb == 20480
+            assert hub._pending_cleanups == {}
+
+        asyncio.run(scenario())
+
+    def test_offline_agent_raises(self) -> None:
+        async def scenario() -> None:
+            hub = AgentHub()
+            with pytest.raises(AgentHubError) as exc:
+                await hub.request_photo_cleanup(42)
+            assert exc.value.code is ErrorCode.ERR_AGENT_OFFLINE
+
+        asyncio.run(scenario())
+
+    def test_timeout_raises_and_forgets_request(self) -> None:
+        async def scenario() -> None:
+            hub = AgentHub()
+            hub.attach(1, FakeLink())
+            with pytest.raises(AgentHubError) as exc:
+                await hub.request_photo_cleanup(1, timeout_s=0.05)
+            assert exc.value.code is ErrorCode.ERR_INTERNAL
+            assert hub._pending_cleanups == {}
+
+        asyncio.run(scenario())
+
+    def test_response_from_other_scale_ignored(self) -> None:
+        """Отчёт с ЧУЖИХ ВЕСОВ не закрывает команду, даже с верным request_id."""
+
+        async def scenario() -> None:
+            hub = AgentHub()
+            link = FakeLink()
+            hub.attach(1, link)
+            task = asyncio.create_task(hub.request_photo_cleanup(1, timeout_s=0.3))
+            await asyncio.sleep(0)
+            request = parse_center_message(link.sent[0])
+            assert isinstance(request, PhotoCleanupRequest)
+            assert not hub.resolve_photo_cleanup(
+                PhotoCleanupResponse(request_id=request.request_id, agent_id="чужой"),
+                scale_id=2,
+            )
+            with pytest.raises(AgentHubError):
+                await task
+
+        asyncio.run(scenario())
+
+    def test_late_response_is_not_an_error(self) -> None:
+        async def scenario() -> None:
+            hub = AgentHub()
+            assert not hub.resolve_photo_cleanup(
+                PhotoCleanupResponse(request_id=uuid4(), agent_id="a"), scale_id=1
+            )
+
+        asyncio.run(scenario())
+
+
+class TestAgentsWsPhotoCleanupDispatch:
+    def test_late_report_keeps_connection(self, ws_env: WsEnv) -> None:
+        """Отчёт об уборке, которого никто не ждёт, отбрасывается — сессия жива."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            ws.send_text(
+                PhotoCleanupResponse(
+                    request_id=uuid4(), agent_id="a", removed_files=1
+                ).model_dump_json()
+            )
+            registry = _hello_and_registry(ws)
+            assert registry["records"] == []

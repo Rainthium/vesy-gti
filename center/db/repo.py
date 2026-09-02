@@ -582,12 +582,16 @@ def load_scale_settings(session: Session, scale_id: int) -> ScaleSettingsPayload
             valid_until=scale.verif_until,
         )
     indicator_model = scale.indicator_model or None
+    # срок хранения локальных фото (0.4.25): 0 — «не убирать», это тоже
+    # управление; NULL — локальный конфиг агента
+    photo_retention_days = scale.photo_retention_days
     if (
         cycle is None
         and port is None
         and cameras is None
         and verification is None
         and indicator_model is None
+        and photo_retention_days is None
     ):
         return None
     return ScaleSettingsPayload(
@@ -597,6 +601,7 @@ def load_scale_settings(session: Session, scale_id: int) -> ScaleSettingsPayload
         baudrate=baudrate,
         verification=verification,
         indicator_model=indicator_model,
+        photo_retention_days=photo_retention_days,
     )
 
 

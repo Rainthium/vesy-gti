@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, unquote, urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -69,6 +70,8 @@ from shared.messages import (
     EquipmentStatus,
     LogTailRequest,
     LogTailResponse,
+    PhotoCleanupRequest,
+    PhotoCleanupResponse,
     PhotoMeta,
     WeighingRecord,
     parse_center_message,
@@ -2416,3 +2419,198 @@ class TestPasswordChangeKillsSessions:
             )
         response = panel_env.client.get("/panel/users", follow_redirects=False)
         assert response.status_code == 303 and "/panel/login" in response.headers["location"]
+
+
+# ---------------------------------------------------------------------------
+# Уборка локальных фото по команде центра (кнопка «Освободить место», 02.09.2026)
+# ---------------------------------------------------------------------------
+
+
+class _CleanupLink:
+    """Фейковое соединение агента: отвечает на команду уборки отчётом."""
+
+    def __init__(
+        self,
+        hub: AgentHub,
+        scale_id: int,
+        *,
+        removed: int = 3,
+        freed: int = 6 * 1024 * 1024,
+        disk_free_mb: int | None = 51_200,
+        error: str | None = None,
+    ) -> None:
+        self._hub = hub
+        self._scale_id = scale_id
+        self._removed = removed
+        self._freed = freed
+        self._disk_free_mb = disk_free_mb
+        self._error = error
+        self.sent: list[str] = []
+
+    async def send_text(self, data: str) -> None:
+        self.sent.append(data)
+        request = parse_center_message(data)
+        assert isinstance(request, PhotoCleanupRequest)
+        self._hub.resolve_photo_cleanup(
+            PhotoCleanupResponse(
+                request_id=request.request_id,
+                agent_id="agent-1",
+                removed_files=self._removed,
+                freed_bytes=self._freed,
+                disk_free_mb=self._disk_free_mb,
+                error=self._error,
+            ),
+            scale_id=self._scale_id,
+        )
+
+
+class _DeadCleanupLink:
+    """Соединение с умершим TCP: команда уборки не уходит."""
+
+    async def send_text(self, data: str) -> None:
+        raise RuntimeError("соединение закрыто")
+
+
+def _cleanup_note(response: object) -> str:
+    """Флеш-заметка из редиректа на дашборд после команды уборки."""
+    location = response.headers["location"]  # type: ignore[attr-defined]
+    parts = urlsplit(location)
+    assert parts.path == "/panel/", f"редирект не на дашборд: {location}"
+    notes = parse_qs(parts.query).get("update_note", [])
+    assert notes, f"update_note отсутствует в редиректе: {location}"
+    return unquote(notes[0])
+
+
+class TestCleanupPhotos:
+    def test_admin_command_reports_result_and_audits(self, panel_env: PanelEnv) -> None:
+        """Админ жмёт кнопку: команда уходит агенту, итог — в заметке и в аудите."""
+        _login(panel_env)
+        _make_admin(panel_env)
+        _set_agent_version(panel_env, "0.4.25")
+        link = _CleanupLink(panel_env.hub, panel_env.scale_id)
+        panel_env.hub.attach(panel_env.scale_id, link)
+        response = panel_env.client.post(
+            f"/panel/scales/{panel_env.scale_id}/cleanup-photos", follow_redirects=False
+        )
+        assert response.status_code == 303
+        note = _cleanup_note(response)
+        assert "убрано 3 файлов" in note
+        assert "освобождено 6 МБ" in note
+        assert "свободно 50.0 ГБ" in note
+        assert len(link.sent) == 1
+        with panel_env.factory() as session:
+            entry = session.execute(
+                select(AuditLog).where(AuditLog.action == "agent_photo_cleanup")
+            ).scalar_one()
+        assert entry.actor == f"panel:{PANEL_LOGIN}"
+        assert entry.details is not None
+        assert entry.details["scale_id"] == panel_env.scale_id
+        assert entry.details["removed_files"] == 3
+        assert entry.details["error"] is None
+
+    def test_agent_error_reported(self, panel_env: PanelEnv) -> None:
+        """Агент не смог убрать (диск/права) — заметка честно говорит об этом."""
+        _login(panel_env)
+        _make_admin(panel_env)
+        _set_agent_version(panel_env, "0.4.25")
+        panel_env.hub.attach(
+            panel_env.scale_id,
+            _CleanupLink(panel_env.hub, panel_env.scale_id, removed=0, freed=0, error="нет прав"),
+        )
+        note = _cleanup_note(
+            panel_env.client.post(
+                f"/panel/scales/{panel_env.scale_id}/cleanup-photos", follow_redirects=False
+            )
+        )
+        assert "не удалась" in note and "нет прав" in note
+        with panel_env.factory() as session:
+            entry = session.execute(
+                select(AuditLog).where(AuditLog.action == "agent_photo_cleanup")
+            ).scalar_one()
+        assert entry.details is not None and entry.details["error"] == "нет прав"
+
+    def test_failed_command_is_audited_too(self, panel_env: PanelEnv) -> None:
+        """Команда не дошла (обрыв) — заметка с причиной и след в аудите:
+        агент мог успеть выполнить её (замечание ревью 02.09.2026)."""
+        _login(panel_env)
+        _make_admin(panel_env)
+        _set_agent_version(panel_env, "0.4.25")
+        panel_env.hub.attach(panel_env.scale_id, _DeadCleanupLink())
+        note = _cleanup_note(
+            panel_env.client.post(
+                f"/panel/scales/{panel_env.scale_id}/cleanup-photos", follow_redirects=False
+            )
+        )
+        assert "оборвалось" in note
+        with panel_env.factory() as session:
+            entry = session.execute(
+                select(AuditLog).where(AuditLog.action == "agent_photo_cleanup")
+            ).scalar_one()
+        assert entry.details is not None
+        assert entry.details["removed_files"] == 0
+        assert "оборвалось" in str(entry.details["error"])
+
+    def test_old_agent_gets_no_command(self, panel_env: PanelEnv) -> None:
+        """Агент до 0.4.25 команду не получает — панель объясняет почему."""
+        _login(panel_env)
+        _make_admin(panel_env)
+        _set_agent_version(panel_env, "0.4.24")
+        link = _CleanupLink(panel_env.hub, panel_env.scale_id)
+        panel_env.hub.attach(panel_env.scale_id, link)
+        note = _cleanup_note(
+            panel_env.client.post(
+                f"/panel/scales/{panel_env.scale_id}/cleanup-photos", follow_redirects=False
+            )
+        )
+        assert "0.4.25" in note
+        assert link.sent == []
+
+    def test_offline_agent_explained(self, panel_env: PanelEnv) -> None:
+        _login(panel_env)
+        _make_admin(panel_env)
+        _set_agent_version(panel_env, "0.4.25")
+        note = _cleanup_note(
+            panel_env.client.post(
+                f"/panel/scales/{panel_env.scale_id}/cleanup-photos", follow_redirects=False
+            )
+        )
+        assert "не в сети" in note
+
+    def test_dispatcher_forbidden(self, panel_env: PanelEnv) -> None:
+        """Диспетчеру команда недоступна (403): она меняет состояние объекта."""
+        _login(panel_env)
+        response = panel_env.client.post(
+            f"/panel/scales/{panel_env.scale_id}/cleanup-photos", follow_redirects=False
+        )
+        assert response.status_code == 403
+
+    def test_dashboard_shows_disk_and_button_for_capable_agent(self, panel_env: PanelEnv) -> None:
+        """Строка «Диск ПК» из heartbeat и кнопка — агенту 0.4.25+ на связи.
+
+        Роль для кнопок шаблон берёт из сессии, которая заполняется при
+        входе, — поэтому админом пользователь становится ДО логина."""
+        _make_admin(panel_env)
+        _login(panel_env)
+        _set_agent_online(panel_env)
+        _set_agent_version(panel_env, "0.4.25")
+        panel_env.hub.update_equipment(
+            panel_env.scale_id,
+            EquipmentStatus(scale_status=ScaleStatus.OK, disk_free_mb=2048, pending_photos_count=4),
+        )
+        page = panel_env.client.get("/panel/").text
+        assert "Диск ПК: свободно 2.0 ГБ" in page
+        assert "не отправлено фото: 4" in page
+        assert "Освободить место" in page
+
+    def test_dashboard_hides_button_for_old_agent(self, panel_env: PanelEnv) -> None:
+        """Админ на связи с агентом 0.4.24: диск виден, кнопки нет."""
+        _make_admin(panel_env)
+        _login(panel_env)
+        _set_agent_online(panel_env)
+        _set_agent_version(panel_env, "0.4.24")
+        panel_env.hub.update_equipment(
+            panel_env.scale_id, EquipmentStatus(scale_status=ScaleStatus.OK, disk_free_mb=2048)
+        )
+        page = panel_env.client.get("/panel/").text
+        assert "Диск ПК: свободно 2.0 ГБ" in page
+        assert "Освободить место" not in page

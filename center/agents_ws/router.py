@@ -41,6 +41,7 @@ from shared.messages import (
     OfflineSyncAck,
     OperatorsRegistryUpdate,
     OperatorsReport,
+    PhotoCleanupResponse,
     ScaleConfigUpdate,
     TareRegistryUpdate,
     UpdateStatus,
@@ -229,6 +230,12 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                     if not hub.resolve_log_tail(message, scale_id=scale_id):
                         # никто не ждёт: запрос уже отвалился по тайм-ауту
                         logger.info("весы %d: журнал пришёл поздно, отброшен", scale_id)
+
+                elif isinstance(message, PhotoCleanupResponse):
+                    if not hub.resolve_photo_cleanup(message, scale_id=scale_id):
+                        logger.info(
+                            "весы %d: отчёт об уборке фото пришёл поздно, отброшен", scale_id
+                        )
 
                 elif isinstance(message, OperatorsReport):
                     # снимок учёток весового ПК (агент 0.4.14): полная

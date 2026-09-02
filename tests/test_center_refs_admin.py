@@ -1865,3 +1865,86 @@ class TestScaleSettingsRoutes:
         note = _note_from(response)
         assert "камера сохранена" in note
         assert "офлайн" not in note
+
+
+# ---------------------------------------------------------------------------
+# Срок хранения локальных фото (0.4.25, решение Игоря 02.09.2026)
+# ---------------------------------------------------------------------------
+
+
+class TestSaveScaleSettingsRetention:
+    """None — локальный конфиг, 0 — не убирать, иначе 1..3650 дней."""
+
+    def test_saved_zero_and_cleared(self, db_session: Session) -> None:
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        for days in (7, 0, None):
+            error = refs_admin.save_scale_settings(
+                db_session,
+                scale.id,
+                cycle=_make_cycle(),
+                port="",
+                baudrate=None,
+                photo_retention_days=days,
+            )
+            assert error is None
+            db_session.refresh(scale)
+            assert scale.photo_retention_days == days
+
+    @pytest.mark.parametrize("days", [-1, 3651])
+    def test_out_of_range_rejected(self, db_session: Session, days: int) -> None:
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        error = refs_admin.save_scale_settings(
+            db_session,
+            scale.id,
+            cycle=_make_cycle(),
+            port="",
+            baudrate=None,
+            photo_retention_days=days,
+        )
+        assert error is not None and "3650" in error
+        db_session.refresh(scale)
+        assert scale.photo_retention_days is None and scale.thresholds is None
+
+
+class TestScaleSettingsRetentionRoutes:
+    def test_page_shows_field_and_post_saves(self, refs_env: RefsEnv) -> None:
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        url = f"/panel/refs/scales/{refs_env.scale_id}/settings"
+        assert 'name="photo_retention_days"' in refs_env.client.get(url).text
+        response = refs_env.client.post(
+            url, data=_settings_form(photo_retention_days="14"), follow_redirects=False
+        )
+        assert response.status_code == 303
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None
+            assert scale.photo_retention_days == 14
+        assert 'value="14"' in refs_env.client.get(url).text
+
+    def test_empty_field_means_local_config(self, refs_env: RefsEnv) -> None:
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        url = f"/panel/refs/scales/{refs_env.scale_id}/settings"
+        refs_env.client.post(
+            url, data=_settings_form(photo_retention_days="14"), follow_redirects=False
+        )
+        refs_env.client.post(
+            url, data=_settings_form(photo_retention_days=""), follow_redirects=False
+        )
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None
+            assert scale.photo_retention_days is None
+
+    def test_garbage_days_rejected_with_note(self, refs_env: RefsEnv) -> None:
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        url = f"/panel/refs/scales/{refs_env.scale_id}/settings"
+        response = refs_env.client.post(
+            url, data=_settings_form(photo_retention_days="много"), follow_redirects=False
+        )
+        assert "число" in _settings_note(response, refs_env.scale_id)
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None
+            assert scale.thresholds is None, "мусор в сроке не должен сохранять остальное"

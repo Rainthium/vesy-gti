@@ -66,6 +66,16 @@
     </section>
 
     <section class="table-card">
+      <div class="card-title">Локальные фото на весовом ПК</div>
+      <div class="settings-grid">
+        <label>Хранить локальные фото, дней
+          <input name="photo_retention_days" inputmode="numeric" maxlength="4" value="{{ photo_retention_days }}" placeholder="30">
+        </label>
+      </div>
+      <div class="card-hint">Через сколько дней после подтверждённой загрузки в центр агент убирает файл снимка с весового ПК (агент 0.4.25+, применяется на лету). 0 — не убирать никогда; пустое поле — сроком управляет локальный конфиг весового ПК. Записи журнала и снимки, ещё не принятые центром, не удаляются никогда. Убрать все уже принятые снимки сразу — кнопка «Освободить место» на карточке весов.</div>
+    </section>
+
+    <section class="table-card">
       <div class="card-title">Свидетельство о поверке</div>
       <div class="settings-grid">
         <label>Номер свидетельства

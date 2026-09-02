@@ -46,7 +46,7 @@ from agent.photos import THUMB_SUFFIX, PhotoLibrary
 from agent.selfcheck import UpdateSelfCheck
 from agent.settings import SettingsManager, merge_center_settings
 from agent.sync.photo_uploader import PhotoUploader
-from agent.sync.retention import PhotoRetention
+from agent.sync.retention import CleanupResult, PhotoRetention
 from agent.sync.storage import AgentStorage
 from agent.sync.ws_client import CenterClient, ClientConfig, run_forever
 from agent.updater import AgentUpdater, install_base
@@ -221,6 +221,9 @@ class AgentRuntime:
         # самопроверка после автообновления (0.4.19): собирается в build_runtime,
         # run_agent подставляет web_ready и запускает задачу
         self.selfcheck: UpdateSelfCheck | None = None
+        # уборка локальных фото (0.4.25): собирается в build_runtime, цикл
+        # запускает run_agent; срок меняется из центра на лету
+        self.retention: PhotoRetention | None = None
         self._info = AgentInfo(
             site_name=config.site_name,
             scale_name=config.scale_name,
@@ -500,6 +503,13 @@ def build_runtime(
     async def on_scale_config(update: ScaleConfigUpdate) -> ConfigStatus:
         return await manager_ref[0].handle(update)
 
+    # уборка локальных фото: срок из config.toml (поверх него — снимок центра,
+    # на лету), принудительная уборка — по команде центра «Освободить место»
+    retention = PhotoRetention(storage, retention_days=config.storage.photo_retention_days)
+
+    async def on_photo_cleanup() -> CleanupResult:
+        return await asyncio.to_thread(retention.cleanup_now)
+
     # путь к журналу службы нужен и клиенту (ответ центру), и веб-интерфейсу
     log_path = default_log_path()
     client = CenterClient(
@@ -521,6 +531,7 @@ def build_runtime(
             read_log_tail(log_path, lines=lines),
             str(log_path) if log_path else "агент запущен не службой (вывод в консоль)",
         ),
+        on_photo_cleanup=on_photo_cleanup,
     )
     updater.notify = client.post_message
     # самопроверка после автообновления и доклад об откате (0.4.19): собирается
@@ -593,7 +604,9 @@ def build_runtime(
     # локальному конфигу до рестарта службы (боевой урок К-К 14.08.2026)
     manager_ref[-1].set_preview(runtime)
     manager_ref[-1].set_info_sink(runtime)
+    manager_ref[-1].set_retention(retention)
     runtime.selfcheck = selfcheck
+    runtime.retention = retention
     return runtime, driver, storage, client, uploader, camera_health, watcher, auto_config, streams
 
 
@@ -660,7 +673,8 @@ async def run_agent(
         config.web.host,
         config.web.port,
     )
-    retention = PhotoRetention(storage, retention_days=config.storage.photo_retention_days)
+    retention = runtime.retention
+    assert retention is not None  # собран в build_runtime
     tasks = [
         asyncio.create_task(run_forever(client), name="center-client"),
         asyncio.create_task(uploader.run(), name="photo-uploader"),
@@ -670,11 +684,11 @@ async def run_agent(
         ),
         asyncio.create_task(server.serve(), name="operator-web"),
     ]
-    # выключенный ретеншн задачи не получает: она завершилась бы сразу, а
-    # выход ЛЮБОЙ задачи останавливает агента (находка qa-tester 11.08.2026)
-    if retention.enabled:
-        tasks.append(asyncio.create_task(retention.run(), name="photo-retention"))
-    else:
+    # цикл уборки живёт всегда (0.4.25): срок меняется из центра на лету, а
+    # выключенная уборка внутри цикла просто спит — выход ЛЮБОЙ задачи
+    # останавливает агента (находка qa-tester 11.08.2026)
+    tasks.append(asyncio.create_task(retention.run(), name="photo-retention"))
+    if not retention.enabled:
         logger.info("ретеншн локальных фото выключен (photo_retention_days = 0)")
     # самопроверка после автообновления и доклад об откате (0.4.19): задача
     # ЗАКАНЧИВАЕТСЯ за минуты, поэтому живёт вне списка выше — иначе её

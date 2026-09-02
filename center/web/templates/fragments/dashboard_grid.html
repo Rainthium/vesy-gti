@@ -113,6 +113,23 @@
       {% else %}
       <div class="stat"><span class="dot warn"></span><span>Камеры: нет данных</span></div>
       {% endfor %}
+      {# диск весового ПК из heartbeat (0.4.13) и уборка локальных фото по
+         команде (0.4.25, решение Игоря 02.09.2026): кнопка — только админу и
+         только агентам, умеющим команду; записи журнала не трогаются #}
+      {% if eq.disk_free_mb is not none %}
+      <div class="stat">
+        <span class="dot {{ 'ok' if eq.disk_free_mb >= disk_low_mb else 'err' }}"></span>
+        <span>Диск ПК: свободно {{ '%.1f' | format(eq.disk_free_mb / 1024) }} ГБ{% if eq.pending_photos_count %} · не отправлено фото: {{ eq.pending_photos_count }}{% endif %}</span>
+        {% if request.session.get('panel_role') == 'admin' and item.scale.id in cleanup_ready %}
+        <form method="post" action="/panel/scales/{{ item.scale.id }}/cleanup-photos" class="log-form">
+          <button type="submit" class="btn-log"
+                  onclick="return confirm('Убрать с весового ПК все локальные фото, уже принятые центром? Записи журнала и неотправленные снимки не трогаются.')">
+            Освободить место
+          </button>
+        </form>
+        {% endif %}
+      </div>
+      {% endif %}
       {% elif online %}
       <div class="stat"><span class="dot warn"></span><span>Оборудование: ждём heartbeat</span></div>
       {% endif %}

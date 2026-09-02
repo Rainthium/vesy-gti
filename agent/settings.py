@@ -66,6 +66,13 @@ class AgentInfoLike(Protocol):
     def set_indicator_model(self, model: str) -> None: ...
 
 
+class RetentionLike(Protocol):
+    """Минимум от уборки локальных фото (реализация — sync.retention.PhotoRetention):
+    срок хранения из центра применяется на лету (решение Игоря 02.09.2026)."""
+
+    def set_retention_days(self, days: int) -> None: ...
+
+
 # ожидание живого индикатора после смены порта: живой cas22 шлёт поток
 # непрерывно, статус OK появляется за ~1-2 с после открытия порта; запас
 # покрывает пару циклов переоткрытия драйвера (rx_error_timeout_s=3 +
@@ -108,6 +115,12 @@ def merge_center_settings(config: AgentConfig, payload: ScaleSettingsPayload) ->
         )
     if payload.indicator_model:
         updates["indicator_model"] = payload.indicator_model
+    if payload.photo_retention_days is not None:
+        # срок хранения локальных фото (0.4.25): 0 из центра — «не убирать»,
+        # это тоже управление, а не «не задано»
+        updates["storage"] = config.storage.model_copy(
+            update={"photo_retention_days": payload.photo_retention_days}
+        )
     if not updates:
         return config
     return config.model_copy(update=updates)
@@ -139,6 +152,7 @@ class SettingsManager:
         # AgentRuntime создаётся ПОЗЖЕ менеджера (см. build_runtime)
         self._preview: CameraPreviewLike | None = None
         self._info_sink: AgentInfoLike | None = None
+        self._retention: RetentionLike | None = None
         self._storage = storage
         # таймауты съёмки локального конфига по ролям: камеры из центра
         # наследуют их (см. merge_center_settings — та же логика при старте)
@@ -152,6 +166,10 @@ class SettingsManager:
     def set_info_sink(self, sink: AgentInfoLike) -> None:
         """Подписать шапку веб-интерфейса на подпись индикатора из центра."""
         self._info_sink = sink
+
+    def set_retention(self, retention: RetentionLike) -> None:
+        """Подписать уборку локальных фото на срок хранения из центра."""
+        self._retention = retention
 
     async def handle(self, update: ScaleConfigUpdate) -> ConfigStatus:
         """Обработчик для CenterClient: применить и сохранить снимок."""
@@ -193,6 +211,13 @@ class SettingsManager:
         if settings.indicator_model and self._info_sink is not None:
             self._info_sink.set_indicator_model(settings.indicator_model)
             logger.info("настройки центра: подпись индикатора применена")
+
+        if settings.photo_retention_days is not None and self._retention is not None:
+            self._retention.set_retention_days(settings.photo_retention_days)
+            logger.info(
+                "настройки центра: срок хранения локальных фото — %d дн.",
+                settings.photo_retention_days,
+            )
 
         status = ConfigStatus(ok=True)
         if settings.scale_port:

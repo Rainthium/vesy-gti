@@ -473,3 +473,28 @@ class TestCameraHealth:
         assert status.role is CameraRole.FRONT
         assert status.available is False
         assert status.last_snapshot_at is None  # удачного снимка ещё не было
+
+
+class TestRuntimeRetention:
+    def test_build_runtime_wires_retention_from_config(self, tmp_path: Path) -> None:
+        """Уборка собирается в build_runtime со сроком из config.toml и живёт
+        в runtime — цикл запускает run_agent, срок меняет центр (0.4.25)."""
+        config = AgentConfig.model_validate(
+            config_data(
+                storage={
+                    "db_path": str(tmp_path / "agent.sqlite3"),
+                    "photos_dir": str(tmp_path / "photos"),
+                    "photo_retention_days": 12,
+                }
+            )
+        )
+        runtime, _driver, storage, _client, _uploader, _health, _watcher, _auto, streams = (
+            build_runtime(config)
+        )
+        streams.stop_all()
+        try:
+            assert runtime.retention is not None
+            assert runtime.retention.retention_days == 12
+            assert runtime.retention.enabled
+        finally:
+            storage.close()

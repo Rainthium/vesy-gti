@@ -43,6 +43,7 @@ from pydantic import BaseModel
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
+from agent.sync.retention import CleanupResult
 from agent.sync.storage import AgentStorage
 from agent.sync.ws_client import CenterClient, ClientConfig, run_forever
 from shared.enums import ErrorCode, Operation, ScaleStatus, WeighingSource
@@ -62,6 +63,8 @@ from shared.messages import (
     OperatorRecord,
     OperatorsRegistryUpdate,
     OperatorsReport,
+    PhotoCleanupRequest,
+    PhotoCleanupResponse,
     ScaleConfigUpdate,
     ScaleSettingsPayload,
     TareRecord,
@@ -1171,5 +1174,95 @@ def test_log_tail_handler_failure_keeps_session() -> None:
             # соединение живо: следующий heartbeat приходит на том же канале
             await scene.center.expect(Heartbeat)
             assert len(scene.center.connections) == 1
+
+    run_scenario(scenario())
+
+
+# --- уборка локальных фото по команде центра (0.4.25, 02.09.2026) ---
+
+
+class CleanupScene(Scene):
+    """Сцена с обработчиком уборки фото (сигнатура CenterClient)."""
+
+    def __init__(self, handler: Any) -> None:
+        super().__init__()
+        self._handler = handler
+
+    async def __aenter__(self) -> "CleanupScene":
+        await super().__aenter__()
+        if self.run_task is not None and not self.run_task.done():
+            self.run_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.run_task
+        self.client = CenterClient(
+            make_config(self.center.url),
+            self.storage,
+            equipment_status=make_equipment,
+            on_weigh_request=echo_weigh_handler,
+            on_photo_cleanup=self._handler,
+        )
+        self.start_client()
+        return self
+
+
+def test_photo_cleanup_request_answered_with_result() -> None:
+    """Команда центра → обработчик → отчёт с числами тем же request_id."""
+    calls = 0
+
+    async def handler() -> CleanupResult:
+        nonlocal calls
+        calls += 1
+        return CleanupResult(removed_files=17, freed_bytes=5 * 1024 * 1024)
+
+    async def scenario() -> None:
+        async with CleanupScene(handler) as scene:
+            await scene.center.expect(Hello)
+            request = PhotoCleanupRequest(request_id=uuid4())
+            await scene.center.connection.send(request.model_dump_json())
+            response = await scene.center.expect(PhotoCleanupResponse)
+            assert response.request_id == request.request_id
+            assert response.agent_id == make_config(scene.center.url).agent_id
+            assert (response.removed_files, response.freed_bytes) == (17, 5 * 1024 * 1024)
+            assert response.error is None
+            assert calls == 1
+            assert scene.client.connected is True
+
+    run_scenario(scenario())
+
+
+def test_photo_cleanup_without_handler_reports_error() -> None:
+    """Клиент без обработчика отвечает отчётом с ошибкой, а не молчит."""
+
+    async def scenario() -> None:
+        async with Scene() as scene:  # обычная сцена, без on_photo_cleanup
+            await scene.center.expect(Hello)
+            request = PhotoCleanupRequest(request_id=uuid4())
+            await scene.center.connection.send(request.model_dump_json())
+            response = await scene.center.expect(PhotoCleanupResponse)
+            assert response.request_id == request.request_id
+            assert response.error
+            assert response.removed_files == 0
+            assert scene.client.connected is True
+
+    run_scenario(scenario())
+
+
+def test_photo_cleanup_handler_failure_keeps_session() -> None:
+    """Сбой уборки (диск) уезжает текстом в отчёт; соединение не рвётся."""
+
+    async def broken() -> CleanupResult:
+        raise OSError("диск недоступен")
+
+    async def scenario() -> None:
+        async with CleanupScene(broken) as scene:
+            await scene.center.expect(Hello)
+            await scene.center.connection.send(
+                PhotoCleanupRequest(request_id=uuid4()).model_dump_json()
+            )
+            response = await scene.center.expect(PhotoCleanupResponse)
+            assert response.error == "диск недоступен"
+            # сессия жива: heartbeat продолжает ходить
+            await scene.center.expect(Heartbeat)
+            assert scene.client.connected is True
 
     run_scenario(scenario())
