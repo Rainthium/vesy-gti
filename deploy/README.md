@@ -168,6 +168,26 @@ docker compose exec -T postgres pg_dump -U ves -Fc ves > /backup/ves-$(date +%F)
 (`/var/lib/docker/volumes/ves-center_photos/_data`), копировать
 rsync'ом туда же, куда и дампы. Хранение фото — 5 лет (правило №2).
 
+> **Фактическое состояние на 02.09.2026:** cron на ВМ НЕ настроен и каталога
+> `/backup` нет — единственные копии ручные, в `~/backups` (сделаны перед
+> чисткой тестовых операций 02.09.2026: `ves-before-cleanup-2026-09-02.dump`,
+> `photos-before-cleanup-2026-09-02.tgz`). Перед любой правкой боевой БД —
+> сначала дамп туда же:
+>
+> ```bash
+> cd ~/vesy-gti/deploy && docker compose exec -T postgres pg_dump -U ves -Fc ves > ~/backups/ves-$(date +%F).dump
+> ```
+>
+> Готовая строка crontab для ежедневного дампа с ротацией 30 дней
+> (поставить по решению Игоря, `crontab -e` под vesy):
+>
+> ```
+> 15 3 * * * cd /home/vesy/vesy-gti/deploy && docker compose exec -T postgres pg_dump -U ves -Fc ves > /home/vesy/backups/ves-$(date +\%F).dump && find /home/vesy/backups -name 'ves-*.dump' -mtime +30 -delete
+> ```
+>
+> Восстановление из дампа: `docker compose exec -T postgres pg_restore -U ves -d ves --clean --if-exists < ~/backups/ves-ДАТА.dump`
+> (триггеры неизменяемости и данные вернутся вместе со схемой; фото — распаковать tgz в том `photos`).
+
 ## 8. Обновление версии
 
 ```bash
