@@ -13,6 +13,7 @@
 
 import hashlib
 import http.server
+import io
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -20,8 +21,9 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+from PIL import Image
 
-from agent.photos import PhotoLibrary, make_thumbnail, thumb_path
+from agent.photos import MISSING_TTL_S, PhotoLibrary, make_thumbnail, thumb_path
 from agent.sync.storage import AgentStorage, StoredPhoto
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 from shared.messages import WeighingRecord
@@ -29,7 +31,9 @@ from tools.dev_operator_ui import _GRAY_JPEG
 
 TOKEN = "agent-token-photos"
 CENTER_JPEG = b"\xff\xd8\xff\xe0" + b"from-center-original" + b"\xff\xd9"
-CENTER_THUMB = b"\xff\xd8\xff\xe0" + b"from-center-thumb" + b"\xff\xd9"
+# миниатюра из центра — настоящий маленький JPEG: агент проверяет её размер
+# перед сохранением на диск (0.4.26)
+CENTER_THUMB = _GRAY_JPEG
 
 
 class _CenterStub(http.server.ThreadingHTTPServer):
@@ -37,6 +41,7 @@ class _CenterStub(http.server.ThreadingHTTPServer):
 
     requests: list[tuple[str, str]]
     status: int = 200
+    thumb_body: bytes | None = None
 
 
 def _handler() -> type[http.server.BaseHTTPRequestHandler]:
@@ -52,6 +57,8 @@ def _handler() -> type[http.server.BaseHTTPRequestHandler]:
                 self._send(server.status, b"")
                 return
             body = CENTER_THUMB if "thumb=1" in self.path else CENTER_JPEG
+            if "thumb=1" in self.path and server.thumb_body is not None:
+                body = server.thumb_body  # центр без миниатюры: полный кадр или мусор
             self._send(200, body)
 
         def _send(self, code: int, body: bytes) -> None:
@@ -219,6 +226,115 @@ class TestCenterFallback:
         uuid = _save_photo(storage, tmp_path, on_disk=False)
         library = PhotoLibrary(storage, base_url="http://127.0.0.1:1", token=TOKEN, timeout_s=1.0)
         assert library.photo_bytes(uuid, CameraRole.FRONT) is None
+
+
+class TestCenterAnswersRemembered:
+    """После уборки локальных фото журнал не должен долбить центр каждые 5 с:
+    404 помнится MISSING_TTL_S, миниатюра из центра остаётся на диске
+    (боевая находка 02.09.2026 — 2158 запросов за 4 часа с Кызыл-Кыи)."""
+
+    def test_404_is_not_asked_again(
+        self, storage: AgentStorage, center: _CenterStub, tmp_path: Path
+    ) -> None:
+        uuid = _save_photo(storage, tmp_path, on_disk=False)
+        center.status = 404
+        library = _library(storage, center)
+        assert library.photo_bytes(uuid, CameraRole.FRONT, thumb=True) is None
+        assert library.photo_bytes(uuid, CameraRole.FRONT, thumb=True) is None
+        assert library.photo_bytes(uuid, CameraRole.FRONT, thumb=True) is None
+        assert len(center.requests) == 1, "переспросили центр, хотя он ответил 404"
+        # полный кадр — отдельный ключ: его центр спрашивают один раз тоже
+        assert library.photo_bytes(uuid, CameraRole.FRONT) is None
+        assert library.photo_bytes(uuid, CameraRole.FRONT) is None
+        assert len(center.requests) == 2
+
+    def test_404_memory_expires(
+        self, storage: AgentStorage, center: _CenterStub, tmp_path: Path
+    ) -> None:
+        uuid = _save_photo(storage, tmp_path, on_disk=False)
+        center.status = 404
+        clock = [1000.0]
+        port = center.server_address[1]
+        library = PhotoLibrary(
+            storage,
+            base_url=f"http://127.0.0.1:{port}",
+            token=TOKEN,
+            timeout_s=3.0,
+            now=lambda: clock[0],
+        )
+        assert library.photo_bytes(uuid, CameraRole.FRONT, thumb=True) is None
+        clock[0] += MISSING_TTL_S - 1
+        assert library.photo_bytes(uuid, CameraRole.FRONT, thumb=True) is None
+        assert len(center.requests) == 1
+        clock[0] += 2
+        center.status = 200
+        assert library.photo_bytes(uuid, CameraRole.FRONT, thumb=True) == CENTER_THUMB
+        assert len(center.requests) == 2
+
+    def test_other_errors_are_not_remembered(
+        self, storage: AgentStorage, center: _CenterStub, tmp_path: Path
+    ) -> None:
+        """500 центра — временная беда: следующий запрос идёт снова."""
+        uuid = _save_photo(storage, tmp_path, on_disk=False)
+        center.status = 500
+        library = _library(storage, center)
+        assert library.photo_bytes(uuid, CameraRole.FRONT, thumb=True) is None
+        assert library.photo_bytes(uuid, CameraRole.FRONT, thumb=True) is None
+        assert len(center.requests) == 2
+
+    def test_center_thumb_kept_on_disk(
+        self, storage: AgentStorage, center: _CenterStub, tmp_path: Path
+    ) -> None:
+        """Миниатюра из центра ложится рядом с (убранным) кадром — дальше
+        журнал читает её с диска, центр больше не спрашивают."""
+        uuid = _save_photo(storage, tmp_path, on_disk=False)
+        library = _library(storage, center)
+        assert library.photo_bytes(uuid, CameraRole.FRONT, thumb=True) == CENTER_THUMB
+        assert library.photo_bytes(uuid, CameraRole.FRONT, thumb=True) == CENTER_THUMB
+        assert len(center.requests) == 1
+        stored = storage.photos_for(uuid)[0]
+        assert thumb_path(Path(stored.path)).read_bytes() == CENTER_THUMB
+        assert not Path(stored.path).exists(), "оригинал из центра на диск не тянем"
+
+    def test_full_frame_from_center_is_shrunk_before_keeping(
+        self, storage: AgentStorage, center: _CenterStub, tmp_path: Path
+    ) -> None:
+        """Центр без готовой миниатюры отдаёт полный кадр (1–3 МБ у 6-МП
+        камер) — под именем миниатюры хранится ужатая копия, не оригинал
+        (замечание ревью 02.09.2026). Оригинал при этом никто не трогает."""
+        uuid = _save_photo(storage, tmp_path, on_disk=False)
+        buffer = io.BytesIO()
+        Image.new("RGB", (1600, 1200), "gray").save(buffer, format="JPEG")
+        center.thumb_body = buffer.getvalue()
+        library = _library(storage, center)
+        data = library.photo_bytes(uuid, CameraRole.FRONT, thumb=True)
+        assert data is not None
+        with Image.open(io.BytesIO(data)) as image:
+            assert max(image.size) <= 320
+        kept = thumb_path(Path(storage.photos_for(uuid)[0].path)).read_bytes()
+        assert kept == data
+        assert len(kept) < len(center.thumb_body)
+
+    def test_garbage_from_center_is_not_kept(
+        self, storage: AgentStorage, center: _CenterStub, tmp_path: Path
+    ) -> None:
+        """Ответ, который не разбирается как картинка, отдаём, но не храним."""
+        uuid = _save_photo(storage, tmp_path, on_disk=False)
+        center.thumb_body = b"not-a-jpeg"
+        library = _library(storage, center)
+        assert library.photo_bytes(uuid, CameraRole.FRONT, thumb=True) == b"not-a-jpeg"
+        assert not thumb_path(Path(storage.photos_for(uuid)[0].path)).exists()
+
+    def test_full_frame_not_kept_on_disk(
+        self, storage: AgentStorage, center: _CenterStub, tmp_path: Path
+    ) -> None:
+        """Полный кадр ретеншн убрал сознательно — обратно не сохраняем."""
+        uuid = _save_photo(storage, tmp_path, on_disk=False)
+        library = _library(storage, center)
+        assert library.photo_bytes(uuid, CameraRole.FRONT) == CENTER_JPEG
+        assert library.photo_bytes(uuid, CameraRole.FRONT) == CENTER_JPEG
+        assert len(center.requests) == 2
+        assert not Path(storage.photos_for(uuid)[0].path).exists()
 
 
 class TestThumbnailGeneration:

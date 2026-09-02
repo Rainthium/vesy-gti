@@ -119,16 +119,20 @@
       {% if eq.disk_free_mb is not none %}
       <div class="stat">
         <span class="dot {{ 'ok' if eq.disk_free_mb >= disk_low_mb else 'err' }}"></span>
-        <span>Диск ПК: свободно {{ '%.1f' | format(eq.disk_free_mb / 1024) }} ГБ{% if eq.pending_photos_count %} · не отправлено фото: {{ eq.pending_photos_count }}{% endif %}</span>
+        {# коротко: в карточку 300px строка с кнопкой иначе не влезает (замер 02.09.2026) #}
+        <span title="Свободно на диске весового ПК">Диск ПК: {{ "{:,.1f}".format(eq.disk_free_mb / 1024) | replace(',', ' ') | replace('.', ',') }} ГБ</span>
         {% if request.session.get('panel_role') == 'admin' and item.scale.id in cleanup_ready %}
         <form method="post" action="/panel/scales/{{ item.scale.id }}/cleanup-photos" class="log-form">
-          <button type="submit" class="btn-log"
+          <button type="submit" class="btn-log" title="Убрать с весового ПК локальные фото, уже принятые центром"
                   onclick="return confirm('Убрать с весового ПК все локальные фото, уже принятые центром? Записи журнала и неотправленные снимки не трогаются.')">
-            Освободить место
+            Освободить
           </button>
         </form>
         {% endif %}
       </div>
+      {% if eq.pending_photos_count %}
+      <div class="stat"><span class="dot warn"></span><span>Не отправлено фото: {{ eq.pending_photos_count }}</span></div>
+      {% endif %}
       {% endif %}
       {% elif online %}
       <div class="stat"><span class="dot warn"></span><span>Оборудование: ждём heartbeat</span></div>

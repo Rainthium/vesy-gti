@@ -615,7 +615,10 @@ class TestJournalPhotos:
         """Снимка нет ни локально, ни в центре — 404, страница не падает."""
         record = make_record()
         services.photo_roles_by_uuid = {}
-        assert operator_client.get(f"/photos/{record.uuid}/front.jpg").status_code == 404
+        response = operator_client.get(f"/photos/{record.uuid}/front.jpg")
+        assert response.status_code == 404
+        # отказ кэшируется браузером: журнал переклеивается каждые 5 с
+        assert "max-age" in response.headers["Cache-Control"]
 
     def test_unknown_role_404(self, operator_client: TestClient) -> None:
         """Роль вне перечисления — 404."""

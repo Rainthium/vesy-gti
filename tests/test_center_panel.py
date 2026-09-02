@@ -24,6 +24,7 @@ ves_test_panel_<pid> + миграции alembic + TRUNCATE между теста
 
 import importlib
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -2598,9 +2599,10 @@ class TestCleanupPhotos:
             EquipmentStatus(scale_status=ScaleStatus.OK, disk_free_mb=2048, pending_photos_count=4),
         )
         page = panel_env.client.get("/panel/").text
-        assert "Диск ПК: свободно 2.0 ГБ" in page
-        assert "не отправлено фото: 4" in page
-        assert "Освободить место" in page
+        assert "Диск ПК: 2,0 ГБ" in page  # запятая, как везде в панели
+        assert "Не отправлено фото: 4" in page  # отдельной строкой, только когда есть
+        assert "cleanup-photos" in page
+        assert re.search(r">\s*Освободить\s*<", page), "кнопки «Освободить» нет на карточке"
 
     def test_dashboard_hides_button_for_old_agent(self, panel_env: PanelEnv) -> None:
         """Админ на связи с агентом 0.4.24: диск виден, кнопки нет."""
@@ -2609,8 +2611,9 @@ class TestCleanupPhotos:
         _set_agent_online(panel_env)
         _set_agent_version(panel_env, "0.4.24")
         panel_env.hub.update_equipment(
-            panel_env.scale_id, EquipmentStatus(scale_status=ScaleStatus.OK, disk_free_mb=2048)
+            panel_env.scale_id, EquipmentStatus(scale_status=ScaleStatus.OK, disk_free_mb=1_167_360)
         )
         page = panel_env.client.get("/panel/").text
-        assert "Диск ПК: свободно 2.0 ГБ" in page
-        assert "Освободить место" not in page
+        assert "Диск ПК: 1 140,0 ГБ" in page  # 1,14 ТБ: разделитель тысяч, как в отчётах
+        assert "Не отправлено фото" not in page  # очередь пуста — строки нет
+        assert "cleanup-photos" not in page

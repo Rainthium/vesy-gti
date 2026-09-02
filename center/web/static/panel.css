@@ -228,14 +228,19 @@ a:hover { color: #1f7fbb; }
 .stat .dot.ok { background: #1FA36F; }
 .stat .dot.warn { background: #E8A33D; }
 .stat .dot.err { background: #D9434E; }
-.stat span:last-child {
+/* текст строки — по классу элемента, а не по позиции: когда в строке есть
+   кнопка (форма), последним потомком становится она, и текст терял стиль —
+   крупный шрифт и перенос на три строки (замечание Игоря 02.09.2026) */
+.stat > span:not(.dot) {
   font-size: 12px;
   font-weight: 600;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
+.stat .log-form { flex: none; }
 
 .obj-foot {
   margin-top: auto;

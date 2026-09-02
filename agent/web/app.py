@@ -338,7 +338,13 @@ def create_app(
             raise HTTPException(status_code=404, detail="нет такой камеры") from exc
         data = services.photo_bytes(weighing_uuid, camera_role, thumb=thumb)
         if data is None:
-            raise HTTPException(status_code=404, detail="снимок недоступен")
+            # отказ тоже кэшируем: журнал переклеивается каждые 5 с, и браузер
+            # иначе переспрашивал бы каждый отсутствующий снимок (02.09.2026)
+            raise HTTPException(
+                status_code=404,
+                detail="снимок недоступен",
+                headers={"Cache-Control": "private, max-age=300"},
+            )
         # снимок неизменяем: можно смело держать в кэше браузера
         return Response(
             content=data,
