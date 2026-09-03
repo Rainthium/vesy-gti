@@ -55,7 +55,11 @@
     {% if manual_allowed %}
       <a class="btn btn-weigh" href="/manual/weighing">Взвешивание</a>
       <a class="btn btn-tare" href="/manual/taring">Тарирование</a>
+      {% if center_online %}
+      <p>Ручной режим разрешён центром (АИС «СВХ» к объекту не подключена). Операции отправляются в центр сразу.</p>
+      {% else %}
       <p>Операции сохраняются локально и будут отправлены в центр автоматически после восстановления связи.</p>
+      {% endif %}
     {% else %}
       <button class="btn" disabled>Взвешивание</button>
       {% if not scale_ok %}

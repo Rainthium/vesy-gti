@@ -4,10 +4,11 @@
 Живой вес — WebSocket ``/ws/state``; журнал и пилюли статуса — HTMX-опрос
 фрагментов; кадры камер — периодически обновляемые снимки.
 
-Правило режимов (№3): при связи с центром ручные операции заблокированы —
-флаг ``manual_allowed`` вычисляется на сервере из ``center_connected()``
-и уходит в шаблоны; серверные обработчики ручного режима (следующая
-задача) обязаны проверять его сами, а не доверять кнопкам.
+Правило режимов (№3): при связи с центром ручные операции заблокированы,
+кроме объектов, где центр разрешил их явно (0.4.28) — флаг ``manual_allowed``
+вычисляется на сервере (``services.manual_allowed()``: нет связи ИЛИ
+разрешение центра) и уходит в шаблоны; серверные обработчики ручного
+режима проверяют его сами, а не доверяют кнопкам.
 
 Доступ — только после входа оператора; сессия в подписанной cookie.
 """
@@ -181,7 +182,9 @@ def create_app(
             "scale": scale,
             "scale_ok": scale.status is ScaleStatus.OK,
             "center_online": center_online,
-            "manual_allowed": not center_online,  # правило режимов №3
+            # правило режимов №3 либо разрешение центра при связи (0.4.28)
+            "manual_allowed": services.manual_allowed(),
+            "manual_by_center": services.manual_allowed_by_center(),
             "pending_count": services.pending_count(),
             "now": datetime.now(UTC),
         }
@@ -448,11 +451,12 @@ def create_app(
         return operation
 
     def require_manual_mode() -> None:
-        """Правило №3: при живой связи с центром ручной режим запрещён.
+        """Правило №3: при живой связи с центром ручной режим запрещён —
+        кроме объектов, где центр разрешил его явно (0.4.28).
 
         Проверка серверная — кнопкам в браузере не доверяем.
         """
-        if services.center_connected():
+        if not services.manual_allowed():
             raise HTTPException(status_code=303, headers={"Location": "/"})
 
     @app.get("/manual/{op}", response_class=HTMLResponse)
@@ -556,7 +560,7 @@ def create_app(
                         "stable": scale.stable,
                         "overload": scale.overload,
                         "center_online": services.center_connected(),
-                        "manual_allowed": not services.center_connected(),
+                        "manual_allowed": services.manual_allowed(),
                         "manual_ready": services.manual_ready(),
                         "pending_count": services.pending_count(),
                     }

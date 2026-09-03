@@ -65,6 +65,10 @@ class AgentInfoLike(Protocol):
 
     def set_indicator_model(self, model: str) -> None: ...
 
+    def set_manual_allowed(self, allowed: bool) -> None:
+        """Разрешение ручного режима при связи с центром (0.4.28)."""
+        ...
+
 
 class RetentionLike(Protocol):
     """Минимум от уборки локальных фото (реализация — sync.retention.PhotoRetention):
@@ -211,6 +215,15 @@ class SettingsManager:
         if settings.indicator_model and self._info_sink is not None:
             self._info_sink.set_indicator_model(settings.indicator_model)
             logger.info("настройки центра: подпись индикатора применена")
+
+        if settings.manual_allowed is not None and self._info_sink is not None:
+            # исключение из правила №3 по решению центра (объект без АИС);
+            # False из центра — тоже управление: снимает разрешение
+            self._info_sink.set_manual_allowed(settings.manual_allowed)
+            logger.info(
+                "настройки центра: ручной режим при связи с центром — %s",
+                "разрешён" if settings.manual_allowed else "запрещён",
+            )
 
         if settings.photo_retention_days is not None and self._retention is not None:
             self._retention.set_retention_days(settings.photo_retention_days)

@@ -6,7 +6,7 @@
     <header class="manual-head">
       <div>
         <h1>Ручная операция</h1>
-        <p>Автономный режим · {{ info.site_name }} · {{ info.scale_name }}</p>
+        <p>{{ 'Ручной режим (разрешён центром)' if center_online else 'Автономный режим' }} · {{ info.site_name }} · {{ info.scale_name }}</p>
       </div>
       <a class="close" href="/" aria-label="Закрыть">✕</a>
     </header>

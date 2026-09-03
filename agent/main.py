@@ -179,6 +179,18 @@ class CameraHealth:
             await asyncio.sleep(self._interval_s)
 
 
+class ManualPermit:
+    """Разрешение ручного режима при живой связи с центром (0.4.28).
+
+    Живёт в памяти процесса: центр включает/выключает его снимком настроек,
+    при старте восстанавливается из сохранённого снимка (build_runtime).
+    Общий объект для потока ручных операций и веб-интерфейса.
+    """
+
+    def __init__(self) -> None:
+        self.by_center = False
+
+
 class AgentRuntime:
     """Реализация AgentServices: связывает веб-интерфейс с кирпичами агента."""
 
@@ -194,12 +206,14 @@ class AgentRuntime:
         clock: CenterClock,
         log_path: Path | None,
         streams: CameraStreams | None = None,
+        manual_permit: ManualPermit | None = None,
     ) -> None:
         self._config = config
         self._driver = driver
         self._storage = storage
         self._client = client
         self._manual = manual
+        self._manual_permit = manual_permit or ManualPermit()
         self._photos = photos
         self._clock = clock
         self._log_path = log_path
@@ -248,6 +262,17 @@ class AgentRuntime:
 
     def center_connected(self) -> bool:
         return self._client.connected
+
+    def manual_allowed(self) -> bool:
+        """Правило №3 (нет связи) либо разрешение центра при связи (0.4.28)."""
+        return not self._client.connected or self._manual_permit.by_center
+
+    def manual_allowed_by_center(self) -> bool:
+        return self._manual_permit.by_center
+
+    def set_manual_allowed(self, allowed: bool) -> None:
+        """Снимок настроек центра включает/выключает ручной режим при связи."""
+        self._manual_permit.by_center = allowed
 
     def pending_count(self) -> int:
         return self._storage.pending_count()
@@ -441,6 +466,16 @@ def build_runtime(
         discrete_kg=config.scale.discrete_kg,
     )
     storage = AgentStorage(config.storage.db_path)
+    # разрешение ручного режима при связи (0.4.28): восстанавливается из
+    # последнего снимка настроек центра, чтобы после рестарта службы объект
+    # без АИС не остался без кнопки до следующего hello
+    permit = ManualPermit()
+    stored_settings = storage.load_center_settings()
+    if stored_settings is not None:
+        with contextlib.suppress(ValueError):
+            permit.by_center = bool(
+                ScaleSettingsPayload.model_validate_json(stored_settings).manual_allowed
+            )
     # время записей — по часам центра (heartbeat_ack), офлайн — по
     # последнему известному смещению из SQLite (вопрос Игоря 10.08.2026)
     center_clock = CenterClock(storage)
@@ -559,8 +594,11 @@ def build_runtime(
     )
     manual = ManualOperationFlow(
         scale_state=lambda: driver.state,
-        # правило №3: ручной режим только без связи с центром
-        manual_allowed=lambda: not client.connected,
+        # правило №3: ручной режим без связи с центром — либо при связи по
+        # разрешению центра (0.4.28, объект без АИС)
+        manual_allowed=lambda: not client.connected or permit.by_center,
+        # при живой связи команда АИС и ручная фиксация не должны пересечься
+        busy=runner.busy,
         storage=storage,
         cameras=config.camera_configs(),
         photos_dir=config.storage.photos_dir,
@@ -604,6 +642,7 @@ def build_runtime(
         clock=center_clock,
         streams=streams,
         log_path=log_path,
+        manual_permit=permit,
     )
     # превью подписывается на смену камер из центра ПОСЛЕ создания runtime
     # (менеджер собирается раньше); без подписки превью снимало бы по

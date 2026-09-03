@@ -39,6 +39,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.sql.expression import false as sql_false
 
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 
@@ -130,6 +131,12 @@ class Scale(Base):
     # срок хранения локальных файлов фото на весовом ПК, дней (0 — не
     # убирать); NULL — управляет локальный конфиг агента (02.09.2026)
     photo_retention_days: Mapped[int | None] = mapped_column(default=None)
+    # ручной режим при ЖИВОЙ связи с центром (решение Игоря 03.09.2026 —
+    # объект, к которому АИС «СВХ» ещё не подключена): агенту 0.4.28+ едет
+    # в снимке настроек, переключение — в аудите (scale_manual_mode)
+    manual_allowed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sql_false(), nullable=False
+    )
     # свидетельство о поверке (одно на весы; печатается на весовой карточке
     # и реплицируется агенту в снимке настроек — офлайн-печать)
     verif_number: Mapped[str | None] = mapped_column(String(64), default=None)

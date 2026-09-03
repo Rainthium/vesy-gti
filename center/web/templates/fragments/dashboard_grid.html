@@ -72,6 +72,7 @@
       {% else %}
       <span class="pill"><span class="dot"></span>Не подключены</span>
       {% endif %}
+      {% if item.scale.manual_allowed %}<span class="pill pill-warn" title="Ручной режим разрешён при связи с центром (объект без АИС «СВХ»)"><span class="dot"></span>Ручной режим</span>{% endif %}
     </div>
     <div class="obj-stats">
       {% if item.agent %}

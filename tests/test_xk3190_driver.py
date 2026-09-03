@@ -1,6 +1,7 @@
-"""Драйвер xk3190 (0.4.27): кадр VESAR, но цифры в целых кг и дискрета 20.
+"""Драйвер xk3190 (0.4.27/0.4.28): кадр VESAR, десятые кг (делитель 10 — урок
+первого запуска 03.09.2026: при делителе 1 человек 80 кг показался как 800), дискрета 20.
 
-Проверяется: разбор кадра с делителем 1, квантование к 20 кг, умолчания
+Проверяется: разбор кадра с явным делителем, квантование к 20 кг, умолчания
 класса против vesar, переопределение из конфига и сквозной проход
 кадра Кокчо-Коза через цикл чтения драйвера.
 """
@@ -67,9 +68,10 @@ class TestQuantizeDiscrete20:
 
 class TestDefaultsAndRegistry:
     def test_xk3190_defaults(self) -> None:
+        """Десятые кг (как VESAR) и дискрета 20 — по живому весу Кокчо-Коза."""
         driver = create_driver("xk3190", "loop://", baudrate=1200)
         assert isinstance(driver, Xk3190Driver)
-        assert driver.weight_divisor == 1.0
+        assert driver.weight_divisor == 10.0
         assert driver.discrete_kg == 20.0
         assert driver.baudrate == 1200
 
@@ -80,11 +82,9 @@ class TestDefaultsAndRegistry:
         assert driver.discrete_kg == 10.0
 
     def test_config_overrides_class_defaults(self) -> None:
-        driver = create_driver(
-            "xk3190", "loop://", baudrate=9600, weight_divisor=10, discrete_kg=10
-        )
+        driver = create_driver("xk3190", "loop://", baudrate=9600, weight_divisor=1, discrete_kg=10)
         assert isinstance(driver, Xk3190Driver)
-        assert driver.weight_divisor == 10.0
+        assert driver.weight_divisor == 1.0
         assert driver.discrete_kg == 10.0
 
     def test_cas22_rejects_frame_options(self) -> None:
@@ -122,11 +122,16 @@ class _FakePort:
         return b""
 
 
-def test_read_loop_reports_whole_kilograms_quantized_to_twenty() -> None:
+def test_read_loop_reports_tenths_quantized_to_twenty() -> None:
+    """«+0000800» — человек 80 кг (десятые), «+0370100» — 37 010 кг → 37 000."""
     driver = Xk3190Driver("loop://", baudrate=1200)
     stop_event = threading.Event()
-    port = _FakePort([KOKCHO_EMPTY, frame(b"+", "0037010")], stop_event)
+    port = _FakePort([KOKCHO_EMPTY, frame(b"+", "0000800")], stop_event)
     driver._read_loop(port, stop_event)  # type: ignore[arg-type]
-    state = driver.state
-    assert state.status is ScaleStatus.OK
-    assert state.weight_kg == 37000.0
+    assert driver.state.status is ScaleStatus.OK
+    assert driver.state.weight_kg == 80.0
+
+    stop_event = threading.Event()
+    port = _FakePort([frame(b"+", "0370100")], stop_event)
+    driver._read_loop(port, stop_event)  # type: ignore[arg-type]
+    assert driver.state.weight_kg == 37000.0

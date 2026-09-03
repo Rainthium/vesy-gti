@@ -2617,3 +2617,16 @@ class TestCleanupPhotos:
         assert "Диск ПК: 1 140,0 ГБ" in page  # 1,14 ТБ: разделитель тысяч, как в отчётах
         assert "Не отправлено фото" not in page  # очередь пуста — строки нет
         assert "cleanup-photos" not in page
+
+
+class TestManualModeBadge:
+    def test_dashboard_marks_scale_with_manual_permit(self, panel_env: PanelEnv) -> None:
+        """Разрешённый ручной режим виден на карточке — чтобы не забыть выключить."""
+        _login(panel_env)
+        with panel_env.factory() as session:
+            scale = session.get(Scale, panel_env.scale_id)
+            assert scale is not None
+            scale.manual_allowed = True
+            session.commit()
+        page = panel_env.client.get("/panel/").text
+        assert "Ручной режим" in page

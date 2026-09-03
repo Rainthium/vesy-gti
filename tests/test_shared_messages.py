@@ -273,3 +273,13 @@ class TestPhotoCleanupMessages:
     )
     def test_supports_photo_cleanup(self, version: str | None, expected: bool) -> None:
         assert supports_photo_cleanup(version) is expected
+
+
+class TestManualAllowedField:
+    """Ручной режим при связи с центром (0.4.28): None — не задано, bool — команда."""
+
+    def test_default_is_none_and_bool_round_trips(self) -> None:
+        assert ScaleSettingsPayload().manual_allowed is None
+        assert ScaleSettingsPayload(manual_allowed=True).manual_allowed is True
+        parsed = ScaleSettingsPayload.model_validate_json('{"manual_allowed": false}')
+        assert parsed.manual_allowed is False

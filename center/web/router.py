@@ -1579,6 +1579,7 @@ def create_panel_router(
             photo_retention_days=(
                 "" if scale.photo_retention_days is None else scale.photo_retention_days
             ),
+            manual_allowed=bool(scale.manual_allowed),
             verif_number=scale.verif_number or "",
             verif_date=scale.verif_date.isoformat() if scale.verif_date else "",
             verif_until=scale.verif_until.isoformat() if scale.verif_until else "",
@@ -1601,10 +1602,14 @@ def create_panel_router(
         baudrate: Annotated[str, Form()] = "",
         indicator_model: Annotated[str, Form()] = "",
         photo_retention_days: Annotated[str, Form()] = "",
+        manual_allowed: Annotated[str, Form()] = "",
         verif_number: Annotated[str, Form()] = "",
         verif_date: Annotated[str, Form()] = "",
         verif_until: Annotated[str, Form()] = "",
     ) -> RedirectResponse:
+        # чекбокс: браузер шлёт «on» только отмеченным, снятый — не шлёт вовсе
+        manual_flag = manual_allowed == "on"
+
         def back(note: str) -> RedirectResponse:
             return RedirectResponse(
                 f"/panel/refs/scales/{scale_id}/settings?note={quote(note)}",
@@ -1626,9 +1631,21 @@ def create_panel_router(
             stable_timeout_s=stable_timeout_s,
             no_data_timeout_s=no_data_timeout_s,
         )
-        error = await asyncio.to_thread(
-            _db,
-            lambda s: refs_admin.save_scale_settings(
+
+        def save_settings(s: Session) -> str | None:
+            before = s.get(Scale, scale_id)
+            if before is not None and bool(before.manual_allowed) != manual_flag:
+                # исключение из правила №3 — каждое переключение в аудите;
+                # строка ложится в ТУ ЖЕ транзакцию, что и флаг: при ошибке
+                # валидации сессия закрывается без коммита и запись отбрасывается
+                s.add(
+                    AuditLog(
+                        actor=f"panel:{admin}",
+                        action="scale_manual_mode",
+                        details={"scale_id": scale_id, "manual_allowed": manual_flag},
+                    )
+                )
+            return refs_admin.save_scale_settings(
                 s,
                 scale_id,
                 cycle=cycle,
@@ -1636,8 +1653,10 @@ def create_panel_router(
                 baudrate=parsed_baudrate,
                 indicator_model=indicator_model,
                 photo_retention_days=parsed_retention,
-            ),
-        )
+                manual_allowed=manual_flag,
+            )
+
+        error = await asyncio.to_thread(_db, save_settings)
         if error is not None:
             return back(error)
         verification_error = await asyncio.to_thread(

@@ -72,7 +72,10 @@ class ManualOperationFlow:
     """Ручные операции: превью → подтверждение. Одно превью за раз.
 
     ``scale_state`` — снимок состояния индикатора (обычно driver.state);
-    ``manual_allowed`` — правило №3 (нет связи с центром);
+    ``manual_allowed`` — правило №3 (нет связи с центром) либо разрешение
+    центра при живой связи (0.4.28, объект без АИС);
+    ``busy`` — идёт ли операция по команде АИС: при связи ручная фиксация
+    не должна пересекаться с ней (иначе две записи на одну стоянку);
     ``photos_dir`` — корень хранения снимков (структура ГГГГ/ММ/ДД).
     """
 
@@ -88,9 +91,11 @@ class ManualOperationFlow:
         ffmpeg_path: str = "ffmpeg",
         streams: CameraStreams | None = None,
         now_utc: Callable[[], datetime] | None = None,
+        busy: Callable[[], bool] | None = None,
     ) -> None:
         self._scale_state = scale_state
         self._manual_allowed = manual_allowed
+        self._busy = busy or (lambda: False)
         self._storage = storage
         self._cameras = cameras
         self._photos_dir = Path(photos_dir)
@@ -118,6 +123,7 @@ class ManualOperationFlow:
         scale = self._scale_state()
         return (
             self._manual_allowed()
+            and not self._busy()
             and scale.status is ScaleStatus.OK
             and scale.stable
             and not scale.overload
@@ -139,6 +145,10 @@ class ManualOperationFlow:
         """
         if not self._manual_allowed():
             raise ManualFlowError("Есть связь с центром — взвешивание проводится через АИС «СВХ»")
+        if self._busy():
+            raise ManualFlowError(
+                "На весах выполняется операция по команде АИС «СВХ» — дождитесь её завершения"
+            )
         vehicle_number = vehicle_number.strip().upper()
         trailer_number = (trailer_number or "").strip().upper() or None
         if not vehicle_number:

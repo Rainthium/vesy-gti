@@ -47,6 +47,7 @@ from center.agents_ws.hub import AgentHub
 from center.db import repo
 from center.db.models import (
     Agent,
+    AuditLog,
     Camera,
     ReleaseChannel,
     Scale,
@@ -1948,3 +1949,90 @@ class TestScaleSettingsRetentionRoutes:
             scale = session.get(Scale, refs_env.scale_id)
             assert scale is not None
             assert scale.thresholds is None, "мусор в сроке не должен сохранять остальное"
+
+
+class TestScaleSettingsManualAllowed:
+    """Ручной режим при связи с центром (03.09.2026): чекбокс, аудит, снятие."""
+
+    def test_checkbox_saves_and_audits(self, refs_env: RefsEnv) -> None:
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        url = f"/panel/refs/scales/{refs_env.scale_id}/settings"
+        page = refs_env.client.get(url).text
+        assert (
+            'name="manual_allowed"' in page
+            and "checked" not in page.split('name="manual_allowed"')[1][:20]
+        )
+        response = refs_env.client.post(
+            url, data=_settings_form(manual_allowed="on"), follow_redirects=False
+        )
+        assert response.status_code == 303
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None
+            assert scale.manual_allowed is True
+            entry = session.execute(
+                select(AuditLog).where(AuditLog.action == "scale_manual_mode")
+            ).scalar_one()
+            assert entry.details == {"scale_id": refs_env.scale_id, "manual_allowed": True}
+        assert "checked" in refs_env.client.get(url).text
+
+    def test_unchecked_revokes_and_audits_once_per_change(self, refs_env: RefsEnv) -> None:
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        url = f"/panel/refs/scales/{refs_env.scale_id}/settings"
+        refs_env.client.post(url, data=_settings_form(manual_allowed="on"), follow_redirects=False)
+        # повторное сохранение без изменения флага — новой записи аудита нет
+        refs_env.client.post(url, data=_settings_form(manual_allowed="on"), follow_redirects=False)
+        refs_env.client.post(url, data=_settings_form(), follow_redirects=False)
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None
+            assert scale.manual_allowed is False
+            entries = (
+                session.execute(select(AuditLog).where(AuditLog.action == "scale_manual_mode"))
+                .scalars()
+                .all()
+            )
+            assert [e.details["manual_allowed"] for e in entries if e.details] == [True, False]
+
+    def test_validation_error_leaves_flag_and_audit_untouched(self, refs_env: RefsEnv) -> None:
+        """Аудит ложится в ту же транзакцию, что и флаг: ошибка формы — ни того, ни другого."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        url = f"/panel/refs/scales/{refs_env.scale_id}/settings"
+        bad = _settings_form(manual_allowed="on", vehicle_threshold_kg="100")  # ниже порога пустых
+        response = refs_env.client.post(url, data=bad, follow_redirects=False)
+        assert response.status_code == 303
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None
+            assert scale.manual_allowed is False
+            assert (
+                session.execute(
+                    select(AuditLog).where(AuditLog.action == "scale_manual_mode")
+                ).scalar_one_or_none()
+                is None
+            )
+
+    def test_none_means_keep(self, refs_env: RefsEnv) -> None:
+        """Вызов без manual_allowed (скрипты заведения) не снимает разрешение."""
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None
+            scale.manual_allowed = True
+            session.commit()
+            cycle = CycleSettings(
+                zero_threshold_kg=150,
+                vehicle_threshold_kg=600,
+                zero_timeout_s=10,
+                vehicle_timeout_s=90,
+                stable_duration_s=5,
+                stable_timeout_s=30,
+                no_data_timeout_s=5,
+            )
+            assert (
+                refs_admin.save_scale_settings(
+                    session, scale.id, cycle=cycle, port="", baudrate=None
+                )
+                is None
+            )
+            session.refresh(scale)
+            assert scale.manual_allowed is True

@@ -76,6 +76,14 @@
     </section>
 
     <section class="table-card">
+      <div class="card-title">Ручной режим при связи с центром</div>
+      <div class="settings-grid">
+        <label><input type="checkbox" name="manual_allowed"{% if manual_allowed %} checked{% endif %}> Разрешить оператору взвешивание и тарирование при живой связи с центром (объект без АИС «СВХ»)</label>
+      </div>
+      <div class="card-hint">Исключение из правила режимов: пока АИС не подключена к объекту, оператор проводит операции сам; записи уходят в центр сразу с источником «ручной режим» и попадут в очередь АИС как события. Применяется агентом 0.4.28+ на лету, каждое переключение — в аудите. Выключить, как только АИС подключится.</div>
+    </section>
+
+    <section class="table-card">
       <div class="card-title">Свидетельство о поверке</div>
       <div class="settings-grid">
         <label>Номер свидетельства

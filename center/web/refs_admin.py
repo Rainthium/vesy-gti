@@ -294,8 +294,14 @@ def save_scale_settings(
     baudrate: int | None,
     indicator_model: str = "",
     photo_retention_days: int | None = None,
+    manual_allowed: bool | None = None,
 ) -> str | None:
     """Сохранить настройки весов (страница настроек, решение Игоря 10.08.2026).
+
+    manual_allowed — ручной режим оператору при живой связи с центром
+    (03.09.2026, объект без АИС «СВХ»; агент 0.4.28+): None — не трогать
+    (скрипты заведения и старые вызовы не снимут разрешение молча). Аудит
+    переключения пишет маршрут — у него есть имя пользователя.
 
     Цикл — полный набор в scales.thresholds; COM-порт/скорость —
     в scales.port_cfg (пустой порт = порт остаётся локальным на весовом ПК);
@@ -330,6 +336,8 @@ def save_scale_settings(
     scale.port_cfg = {"port": port, "baudrate": baudrate or 9600} if port else None
     scale.indicator_model = indicator_model or None
     scale.photo_retention_days = photo_retention_days
+    if manual_allowed is not None:
+        scale.manual_allowed = manual_allowed
     session.commit()
     logger.info("справочники: настройки весов id=%d сохранены", scale_id)
     return None

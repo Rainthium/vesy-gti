@@ -172,6 +172,13 @@ class DemoServices:
     def center_connected(self) -> bool:
         return not self._offline
 
+    def manual_allowed(self) -> bool:
+        # dev-стенд: разрешения центра нет — как правило №3
+        return self._offline
+
+    def manual_allowed_by_center(self) -> bool:
+        return False
+
     def pending_count(self) -> int:
         return 3 if self._offline else 0
 

@@ -2149,3 +2149,24 @@ class TestAgentsWsPhotoCleanupDispatch:
             )
             registry = _hello_and_registry(ws)
             assert registry["records"] == []
+
+
+class TestRepoLoadScaleSettingsManualAllowed:
+    def test_permit_alone_makes_payload(self, repo_env: tuple[Session, int, int]) -> None:
+        """Одно лишь разрешение ручного режима — уже снимок (агент должен узнать)."""
+        session, scale_id, _ = repo_env
+        scale = session.get(Scale, scale_id)
+        assert scale is not None
+        scale.manual_allowed = True
+        session.commit()
+        settings = repo.load_scale_settings(session, scale_id)
+        assert settings is not None
+        assert settings.manual_allowed is True
+
+    def test_false_is_sent_with_other_settings(self, repo_env: tuple[Session, int, int]) -> None:
+        """Снятое разрешение едет явным False вместе с остальными настройками."""
+        session, scale_id, _ = repo_env
+        _set_scale_settings(session, scale_id, thresholds=dict(CYCLE_THRESHOLDS))
+        settings = repo.load_scale_settings(session, scale_id)
+        assert settings is not None
+        assert settings.manual_allowed is False

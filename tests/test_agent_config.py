@@ -498,3 +498,40 @@ class TestRuntimeRetention:
             assert runtime.retention.enabled
         finally:
             storage.close()
+
+
+class TestManualPermitRestore:
+    def test_permit_restored_from_stored_snapshot(self, tmp_path: Path) -> None:
+        """0.4.28: разрешение ручного режима из снимка центра переживает рестарт
+        службы — объект без АИС не остаётся без кнопки до следующего hello."""
+        db_path = tmp_path / "agent.sqlite3"
+        config = AgentConfig.model_validate(
+            config_data(storage={"db_path": str(db_path), "photos_dir": str(tmp_path / "photos")})
+        )
+        seed = AgentStorage(str(db_path))
+        seed.save_center_settings('{"manual_allowed": true}')
+        seed.close()
+        runtime, _, storage, _, _, _, _, _, streams = build_runtime(config)
+        streams.stop_all()
+        try:
+            assert runtime.manual_allowed_by_center() is True
+            runtime.set_manual_allowed(False)
+            assert runtime.manual_allowed_by_center() is False
+        finally:
+            storage.close()
+
+    def test_snapshot_without_field_gives_no_permit(self, tmp_path: Path) -> None:
+        """Снимок от центра до 0.4.28 (поля нет) — правило №3 как прежде."""
+        db_path = tmp_path / "agent.sqlite3"
+        config = AgentConfig.model_validate(
+            config_data(storage={"db_path": str(db_path), "photos_dir": str(tmp_path / "photos")})
+        )
+        seed = AgentStorage(str(db_path))
+        seed.save_center_settings('{"indicator_model": "CAS"}')
+        seed.close()
+        runtime, _, storage, _, _, _, _, _, streams = build_runtime(config)
+        streams.stop_all()
+        try:
+            assert runtime.manual_allowed_by_center() is False
+        finally:
+            storage.close()

@@ -96,6 +96,7 @@ class FakeServices:
 
     def __init__(self) -> None:
         self.online = True  # связь с центром (правило режимов №3)
+        self.manual_permit = False  # разрешение центра на ручной режим при связи (0.4.28)
         self.stamps: dict[str, str | None] = {OPERATOR_LOGIN: "stamp-1"}
         self.scale = ScaleState(status=ScaleStatus.OK, weight_kg=1460.0, stable=True)
         self.snapshot_ok = True
@@ -139,6 +140,12 @@ class FakeServices:
 
     def center_connected(self) -> bool:
         return self.online
+
+    def manual_allowed(self) -> bool:
+        return not self.online or self.manual_permit
+
+    def manual_allowed_by_center(self) -> bool:
+        return self.manual_permit
 
     def pending_count(self) -> int:
         return self.pending
@@ -430,10 +437,40 @@ class TestModeRule:
         assert 'href="/manual/weighing"' in page.text
         assert 'href="/manual/taring"' in page.text
 
+    def test_online_with_center_permit_allows_manual(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Центр разрешил ручной режим при связи (0.4.28, объект без АИС):
+        кнопки есть, баннера автономного режима нет, подсказка объясняет."""
+        services.online = True
+        services.manual_permit = True
+        page = operator_client.get("/")
+        assert page.status_code == 200
+        assert "АВТОНОМНЫЙ РЕЖИМ" not in page.text
+        assert 'href="/manual/weighing"' in page.text
+        assert 'href="/manual/taring"' in page.text
+        assert "разрешён центром" in page.text
+        with operator_client.websocket_connect("/ws/state") as ws:
+            frame = ws.receive_json()
+        assert frame["center_online"] is True
+        assert frame["manual_allowed"] is True
+
+    def test_manual_form_open_when_center_permits(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        """Серверная проверка пускает в форму при связи только с разрешением центра."""
+        services.online = True
+        services.manual_permit = False
+        blocked = operator_client.get("/manual/weighing", follow_redirects=False)
+        assert blocked.status_code == 303
+        services.manual_permit = True
+        allowed = operator_client.get("/manual/weighing", follow_redirects=False)
+        assert allowed.status_code == 200
+
     def test_ws_manual_allowed_inverts_center_online(
         self, services: FakeServices, operator_client: TestClient
     ) -> None:
-        """В кадрах /ws/state manual_allowed всегда противоположен center_online."""
+        """Без разрешения центра manual_allowed в /ws/state противоположен center_online."""
         services.online = True
         with operator_client.websocket_connect("/ws/state") as ws:
             frame = ws.receive_json()

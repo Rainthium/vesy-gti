@@ -585,6 +585,12 @@ def load_scale_settings(session: Session, scale_id: int) -> ScaleSettingsPayload
     # срок хранения локальных фото (0.4.25): 0 — «не убирать», это тоже
     # управление; NULL — локальный конфиг агента
     photo_retention_days = scale.photo_retention_days
+    # ручной режим при связи (0.4.28): в снимок едет ВСЕГДА (False тоже
+    # управление — снимает разрешение); один лишь True — уже снимок.
+    # Оговорка: у весов вообще без настроек снятый флаг снимка не даёт и
+    # до агента не доедет — через панель недостижимо (форма всегда пишет
+    # пороги цикла), при правке БД руками — пересохранить настройки в панели
+    manual_allowed = bool(scale.manual_allowed)
     if (
         cycle is None
         and port is None
@@ -592,6 +598,7 @@ def load_scale_settings(session: Session, scale_id: int) -> ScaleSettingsPayload
         and verification is None
         and indicator_model is None
         and photo_retention_days is None
+        and not manual_allowed
     ):
         return None
     return ScaleSettingsPayload(
@@ -602,6 +609,7 @@ def load_scale_settings(session: Session, scale_id: int) -> ScaleSettingsPayload
         verification=verification,
         indicator_model=indicator_model,
         photo_retention_days=photo_retention_days,
+        manual_allowed=manual_allowed,
     )
 
 

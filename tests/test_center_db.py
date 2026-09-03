@@ -83,7 +83,7 @@ ALL_TABLES = (
     "weighing_events",
 )
 
-HEAD_REVISION = "a3b4c5d6e7f8"  # photo_retention_days весов (02.09.2026)
+HEAD_REVISION = "b4c5d6e7f8a9"  # manual_allowed весов — ручной режим при связи (03.09.2026)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64

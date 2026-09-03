@@ -282,9 +282,13 @@ class FakeInfoSink:
 
     def __init__(self) -> None:
         self.models: list[str] = []
+        self.manual: list[bool] = []
 
     def set_indicator_model(self, model: str) -> None:
         self.models.append(model)
+
+    def set_manual_allowed(self, allowed: bool) -> None:
+        self.manual.append(allowed)
 
 
 class FakeRetention:
@@ -645,3 +649,28 @@ class TestRetentionFromCenter:
         assert merged.storage.photo_retention_days == 0
         merged = merge_center_settings(config, ScaleSettingsPayload(cycle=make_cycle_settings()))
         assert merged.storage.photo_retention_days == config.storage.photo_retention_days
+
+
+# --- ручной режим при связи с центром (0.4.28, 03.09.2026) ---
+
+
+class TestManualAllowedFromCenter:
+    def test_true_reaches_runtime_and_is_persisted(self, env: ManagerEnv) -> None:
+        """Разрешение доезжает до веб-интерфейса на лету и остаётся в снимке —
+        после рестарта службы объект без АИС не теряет кнопку."""
+        status = env.handle(ScaleSettingsPayload(manual_allowed=True))
+        assert status.ok is True
+        assert env.info_sink.manual == [True]
+        stored = env.stored_payload()
+        assert stored is not None
+        assert stored.manual_allowed is True
+
+    def test_false_revokes(self, env: ManagerEnv) -> None:
+        """False из центра — тоже управление: разрешение снимается."""
+        env.handle(ScaleSettingsPayload(manual_allowed=True))
+        env.handle(ScaleSettingsPayload(manual_allowed=False))
+        assert env.info_sink.manual == [True, False]
+
+    def test_none_leaves_permit_untouched(self, env: ManagerEnv) -> None:
+        env.handle(ScaleSettingsPayload(indicator_model="CAS"))
+        assert env.info_sink.manual == []
