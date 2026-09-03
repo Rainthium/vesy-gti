@@ -14,7 +14,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, model_validator
 
 from agent.cameras.capture import DEFAULT_TIMEOUT_S, CameraConfig
 from agent.weighing.cycle import CycleConfig
@@ -33,9 +33,14 @@ class ScaleSection(_Section):
 
     # Literal: опечатка в имени драйвера — ошибка при старте, а не тихий
     # запуск cas22; реестр — agent/drivers/__init__.py (DRIVERS)
-    driver: Literal["cas22", "vesar"] = "cas22"
+    driver: Literal["cas22", "vesar", "xk3190"] = "cas22"
     port: str  # «COM5» либо pyserial-URL («socket://127.0.0.1:4001» — эмулятор)
     baudrate: int = 9600
+    # только vesar/xk3190 (0.4.27): делитель 7 цифр кадра (10 — десятые кг,
+    # 1 — целые кг) и дискрета табло для квантования; None — умолчание
+    # драйвера (vesar 10/10, xk3190 1/20)
+    weight_divisor: PositiveFloat | None = None
+    discrete_kg: PositiveFloat | None = None
 
 
 class CycleSection(_Section):

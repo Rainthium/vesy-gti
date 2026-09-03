@@ -41,9 +41,12 @@ PACKET_LEN = 12
 STX = 0x02
 ETX = 0x03
 
-# дискретность индикатора: в порт идут десятые кг, табло показывает
-# кратно 10 кг (85,0 в потоке = «80» на табло, подтверждено 20.08.2026).
-# Появится второй vesar-объект с другой дискретой — вынести в конфиг.
+# цифры кадра — десятые кг (Кара-Суу, Алтын): делитель 10; семейство
+# XK3190 шлёт целые кг (делитель 1) — см. agent/drivers/xk3190.py
+WEIGHT_DIVISOR = 10.0
+# дискретность индикатора: табло показывает кратно 10 кг (85,0 в потоке =
+# «80» на табло, подтверждено 20.08.2026). Оба параметра переопределяются
+# в конфиге агента ([scale] weight_divisor / discrete_kg, 0.4.27).
 DISCRETE_KG = 10.0
 
 # программная стабильность — настройки UniServer с объекта:
@@ -64,8 +67,11 @@ class VesarPacket:
     raw_weight_kg: float
 
 
-def parse_packet(pkt: bytes) -> VesarPacket | None:
+def parse_packet(pkt: bytes, *, divisor: float = WEIGHT_DIVISOR) -> VesarPacket | None:
     """Разобрать один 12-байтовый пакет; None — пакет не прошёл проверку.
+
+    ``divisor`` — во что превращать 7 цифр: 10 — десятые кг (VESAR),
+    1 — целые кг (XK3190).
 
     Проверяются рамки STX/ETX, знак, 7 цифр массы и контрольная сумма
     (XOR байтов знака и массы, две ASCII-hex цифры в верхнем регистре —
@@ -88,20 +94,20 @@ def parse_packet(pkt: bytes) -> VesarPacket | None:
         return None
     if checksum != declared:
         return None
-    value = int(digits) / 10.0  # младший разряд — десятые кг
+    value = int(digits) / divisor  # младший разряд — десятые (10) или кг (1)
     if sign == b"-":
         value = -value
     return VesarPacket(raw_weight_kg=value)
 
 
-def quantize(raw_weight_kg: float) -> float:
+def quantize(raw_weight_kg: float, discrete_kg: float = DISCRETE_KG) -> float:
     """Привести вес к дискрете индикатора усечением по модулю вниз.
 
     Поведение табло, зафиксированное 20.08.2026: 85,0 в порту → «80»
     на табло. Знак сохраняется: −85,0 → −80.
     """
     sign = -1.0 if raw_weight_kg < 0 else 1.0
-    return sign * (abs(raw_weight_kg) // DISCRETE_KG) * DISCRETE_KG
+    return sign * (abs(raw_weight_kg) // discrete_kg) * discrete_kg
 
 
 class PacketAssembler:
@@ -112,8 +118,9 @@ class PacketAssembler:
     сплошной мусор без STX не копился бесконечно.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, divisor: float = WEIGHT_DIVISOR) -> None:
         self._buffer = b""
+        self._divisor = divisor
 
     def feed(self, chunk: bytes) -> list[VesarPacket]:
         """Добавить прочитанные байты, вернуть все собравшиеся пакеты."""
@@ -127,7 +134,7 @@ class PacketAssembler:
             self._buffer = self._buffer[idx:]
             if len(self._buffer) < PACKET_LEN:
                 break
-            packet = parse_packet(self._buffer[:PACKET_LEN])
+            packet = parse_packet(self._buffer[:PACKET_LEN], divisor=self._divisor)
             if packet is not None:
                 packets.append(packet)
                 self._buffer = self._buffer[PACKET_LEN:]
@@ -179,6 +186,10 @@ class VesarDriver:
     tools/vesar_emulator.py).
     """
 
+    # умолчания трактовки кадра; наследники семейства (xk3190) меняют их
+    DEFAULT_WEIGHT_DIVISOR: float = WEIGHT_DIVISOR
+    DEFAULT_DISCRETE_KG: float = DISCRETE_KG
+
     def __init__(
         self,
         port_url: str,
@@ -187,9 +198,17 @@ class VesarDriver:
         read_timeout_s: float = DEFAULT_READ_TIMEOUT_S,
         rx_error_timeout_s: float = DEFAULT_RX_ERROR_TIMEOUT_S,
         reopen_delay_s: float = DEFAULT_REOPEN_DELAY_S,
+        weight_divisor: float | None = None,
+        discrete_kg: float | None = None,
     ) -> None:
         self._port_url = port_url
         self._baudrate = baudrate
+        # None — умолчание класса (конфиг агента отдаёт None, когда поле
+        # не задано); явное значение — переопределение с объекта
+        self._weight_divisor = (
+            self.DEFAULT_WEIGHT_DIVISOR if weight_divisor is None else weight_divisor
+        )
+        self._discrete_kg = self.DEFAULT_DISCRETE_KG if discrete_kg is None else discrete_kg
         self._read_timeout_s = read_timeout_s
         self._rx_error_timeout_s = rx_error_timeout_s
         self._reopen_delay_s = reopen_delay_s
@@ -233,6 +252,14 @@ class VesarDriver:
     @property
     def baudrate(self) -> int:
         return self._baudrate
+
+    @property
+    def weight_divisor(self) -> float:
+        return self._weight_divisor
+
+    @property
+    def discrete_kg(self) -> float:
+        return self._discrete_kg
 
     def set_port(self, port_url: str, baudrate: int | None = None) -> None:
         """Переключить порт/скорость (настройки из центра) — как в cas22."""
@@ -298,8 +325,9 @@ class VesarDriver:
 
     def _read_loop(self, port: serial.Serial, stop_event: threading.Event) -> None:
         """Читать поток, разбирать пакеты, обновлять состояние."""
-        assembler = PacketAssembler()
-        stability = StabilityTracker()
+        assembler = PacketAssembler(divisor=self._weight_divisor)
+        # программная стабильность — 3 дискреты за секунду (как UniServer)
+        stability = StabilityTracker(amplitude_kg=3 * self._discrete_kg)
         last_packet_at: float | None = None
         started_at = time.monotonic()
 
@@ -321,7 +349,7 @@ class VesarDriver:
                     self._set_state(
                         ScaleState(
                             status=ScaleStatus.OK,
-                            weight_kg=quantize(packets[-1].raw_weight_kg),
+                            weight_kg=quantize(packets[-1].raw_weight_kg, self._discrete_kg),
                             stable=stable,
                             overload=False,
                             last_packet_at=now,

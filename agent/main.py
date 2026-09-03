@@ -433,7 +433,13 @@ def build_runtime(
     CameraStreams,
 ]:
     """Собрать все кирпичи агента (без запуска фоновых задач)."""
-    driver = create_driver(config.scale.driver, config.scale.port, baudrate=config.scale.baudrate)
+    driver = create_driver(
+        config.scale.driver,
+        config.scale.port,
+        baudrate=config.scale.baudrate,
+        weight_divisor=config.scale.weight_divisor,
+        discrete_kg=config.scale.discrete_kg,
+    )
     storage = AgentStorage(config.storage.db_path)
     # время записей — по часам центра (heartbeat_ack), офлайн — по
     # последнему известному смещению из SQLite (вопрос Игоря 10.08.2026)
