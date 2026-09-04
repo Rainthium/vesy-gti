@@ -902,6 +902,7 @@ table.users .cell-input.narrow { max-width: 76px; }
 .settings-grid label {
   display: flex;
   flex-direction: column;
+  justify-content: flex-end; /* поле у нижнего края: подписи в две строки не сбивают ряд */
   gap: 6px;
   font-size: 12px;
   font-weight: 600;
