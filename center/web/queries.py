@@ -28,7 +28,7 @@ from center.db.models import (
 )
 from shared.enums import ErrorCode, Operation, WeighingSource
 from shared.passwords import verify_password
-from shared.tare import three_months_before
+from shared.tare import tare_below_gross, three_months_before
 
 
 def verify_user(session: Session, login: str, password: str) -> User | None:
@@ -98,6 +98,8 @@ def weighings_today(session: Session, site_scope: int | None = None) -> tuple[in
         )
         .select_from(Weighing)
         .where(Weighing.weighed_at >= day_start)
+        # сторно-пара — «как не было» (04.09.2026)
+        .where(Weighing.storno_of.is_(None), Weighing.id.not_in(repo.annulled_weighing_ids()))
     )
     if site_scope is not None:
         query = query.join(Scale, Scale.id == Weighing.scale_id).where(Scale.site_id == site_scope)
@@ -252,6 +254,11 @@ class WeighingCard:
     # outbox (офлайн-операции публикуются в RabbitMQ)
     ais_ref: str | None = None
     ais_event: WeighingEvent | None = None
+    # сторнирование (04.09.2026): запись-сторно, аннулирующая эту запись
+    annulled_by: Weighing | None = None
+    # тарирование, отвергнутое как неправдоподобное (тара не меньше брутто,
+    # агент 0.4.29): страница записи и карта объясняют прочерк в нетто
+    rejected_tare: Weighing | None = None
 
 
 def weighing_card(
@@ -281,6 +288,7 @@ def weighing_card(
     tare = session.get(Weighing, weighing.tare_weighing_id) if weighing.tare_weighing_id else None
     storno = session.get(Weighing, weighing.storno_of) if weighing.storno_of else None
     expired_tare = None
+    rejected_tare = None
     if (
         weighing.operation is Operation.WEIGHING
         and weighing.netto is None
@@ -296,6 +304,15 @@ def weighing_card(
         # а тарирование ПОЗЖЕ записи не меняет старую карту задним числом
         if registry is not None and registry.tared_at < three_months_before(weighing.weighed_at):
             expired_tare = session.get(Weighing, registry.weighing_id)
+        elif (
+            registry is not None
+            and registry.tared_at <= weighing.weighed_at
+            and weighing.massa is not None
+            and not tare_below_gross(registry.tare_value, weighing.massa)
+        ):
+            # тара не меньше брутто — агент 0.4.29 её не подставил (04.09.2026):
+            # показываем, какое тарирование ошибочно (его надо сторнировать)
+            rejected_tare = session.get(Weighing, registry.weighing_id)
     ais_link = session.get(WeighingAisRef, weighing.id)
     ais_event = repo.latest_weighing_event(session, weighing.id)
     return WeighingCard(
@@ -308,7 +325,19 @@ def weighing_card(
         expired_tare=expired_tare,
         ais_ref=ais_link.ais_ref if ais_link is not None else None,
         ais_event=ais_event,
+        annulled_by=repo.storno_by(session, weighing.id),
+        rejected_tare=rejected_tare,
     )
+
+
+def annulled_ids(session: Session, weighing_ids: list[int]) -> set[int]:
+    """Какие из записей аннулированы сторно (пилюли журнала и истории тар)."""
+    if not weighing_ids:
+        return set()
+    rows = session.execute(
+        select(Weighing.storno_of).where(Weighing.storno_of.in_(weighing_ids))
+    ).scalars()
+    return {int(i) for i in rows if i is not None}
 
 
 def tare_expires_at(tared_at: datetime) -> datetime:
@@ -394,8 +423,9 @@ def tare_history(
         .join(Site, Site.id == Scale.site_id)
         .outerjoin(TareRegistry, TareRegistry.weighing_id == Weighing.id)
         .where(Weighing.operation == Operation.TARING)
-        # как в журнале: показываем только состоявшиеся операции
-        .where(Weighing.code == ErrorCode.OK)
+        # как в журнале: показываем только состоявшиеся операции; записи-сторно
+        # не тарирования (аннулированные помечает маршрут)
+        .where(Weighing.code == ErrorCode.OK, Weighing.storno_of.is_(None))
     )
     if site_scope is not None:
         # ограничение пользователя сильнее фильтра экрана

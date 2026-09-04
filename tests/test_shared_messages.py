@@ -24,6 +24,7 @@ from shared import (
 )
 from shared.messages import (
     AgentOperatorInfo,
+    CycleSettings,
     OperatorsReport,
     PhotoCleanupRequest,
     PhotoCleanupResponse,
@@ -48,6 +49,8 @@ class TestEnums:
             "ERR_CAMERA",
             "ERR_BUSY",
             "ERR_INTERNAL",
+            # лимит тары (контракт v2 4.4, дополнение 04.09.2026)
+            "ERR_TARE_TOO_HEAVY",
         }
         assert {code.value for code in ErrorCode} == expected
 
@@ -283,3 +286,35 @@ class TestManualAllowedField:
         assert ScaleSettingsPayload(manual_allowed=True).manual_allowed is True
         parsed = ScaleSettingsPayload.model_validate_json('{"manual_allowed": false}')
         assert parsed.manual_allowed is False
+
+
+class TestMaxTareField:
+    """CycleSettings.max_tare_kg (агент 0.4.29, решение Игоря 04.09.2026)."""
+
+    def _cycle(self, **overrides: object) -> CycleSettings:
+        fields: dict[str, object] = {
+            "zero_threshold_kg": 200.0,
+            "vehicle_threshold_kg": 500.0,
+            "zero_timeout_s": 10.0,
+            "vehicle_timeout_s": 90.0,
+            "stable_duration_s": 5.0,
+            "stable_timeout_s": 30.0,
+            "no_data_timeout_s": 5.0,
+        }
+        fields.update(overrides)
+        return CycleSettings.model_validate(fields)
+
+    def test_default_for_old_snapshots(self) -> None:
+        """Снимок настроек без поля (сохранён до 0.4.29) — лимит 25 т."""
+        assert self._cycle().max_tare_kg == 25000.0
+
+    def test_zero_allowed_negative_rejected(self) -> None:
+        assert self._cycle(max_tare_kg=0).max_tare_kg == 0.0
+        with pytest.raises(ValidationError):
+            self._cycle(max_tare_kg=-1)
+
+    def test_travels_in_scale_settings_payload(self) -> None:
+        """Поле едет агенту в снимке настроек и переживает JSON."""
+        payload = ScaleSettingsPayload(cycle=self._cycle(max_tare_kg=30000.0))
+        restored = ScaleSettingsPayload.model_validate_json(payload.model_dump_json())
+        assert restored.cycle is not None and restored.cycle.max_tare_kg == 30000.0

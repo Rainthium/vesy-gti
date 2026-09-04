@@ -47,8 +47,8 @@
             <td class="num">{{ (weighing.tare_value if weighing.operation.value == 'weighing' else weighing.massa) | fmt_kg }}</td>
             <td class="num cell-netto">{{ weighing.netto | fmt_kg }}</td>
             {# stopPropagation: клик по печати не должен заодно открывать запись #}
-            <td class="cell-print"><a class="print-link" href="/panel/journal/{{ weighing.id }}/card" target="_blank" title="Печать весовой карточки" onclick="event.stopPropagation()">Печать</a></td>
-            <td><span class="pill {{ 'pill-info' if weighing.source.value == 'ais' else 'pill-warn' }}"><span class="dot"></span>{{ 'АИС' if weighing.source.value == 'ais' else 'Вручную (офлайн)' }}</span></td>
+            {% if weighing.storno_of %}<td class="cell-print"></td>{% else %}<td class="cell-print"><a class="print-link" href="/panel/journal/{{ weighing.id }}/card" target="_blank" title="Печать весовой карточки" onclick="event.stopPropagation()">Печать</a></td>{% endif %}
+            <td>{% if weighing.storno_of %}<span class="pill pill-err" title="Запись-сторно: аннулирует запись №{{ weighing.storno_of }}"><span class="dot"></span>Сторно</span>{% elif weighing.id in annulled %}<span class="pill pill-err" title="Аннулирована сторно — для системы операции не было"><span class="dot"></span>Аннулирована</span>{% else %}<span class="pill {{ 'pill-info' if weighing.source.value == 'ais' else 'pill-warn' }}"><span class="dot"></span>{{ 'АИС' if weighing.source.value == 'ais' else 'Вручную (офлайн)' }}</span>{% endif %}</td>
             <td class="cell-muted">{{ weighing.code.value }}</td>
           </tr>
           {% else %}

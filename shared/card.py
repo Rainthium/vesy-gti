@@ -19,7 +19,7 @@ from pathlib import Path
 
 from shared.enums import Operation
 from shared.messages import VerificationInfo
-from shared.tare import TARE_VALIDITY_MONTHS, three_months_before
+from shared.tare import TARE_VALIDITY_MONTHS, tare_below_gross, three_months_before
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 _LOGO_PATH = Path(__file__).parent / "assets" / "gti-logo.jpg"
@@ -98,6 +98,7 @@ def netto_note(
     netto: float | None,
     latest_tared_at: datetime | None,
     latest_tare_value: float | None,
+    massa: float | None = None,
 ) -> str | None:
     """Примечание «почему нет нетто» для карты и экранов (просьба Игоря 14.08.2026).
 
@@ -124,6 +125,22 @@ def netto_note(
             f"тара {fmt_kg(latest_tare_value)} кг — устарело "
             f"(тара действует {TARE_VALIDITY_MONTHS} календарных месяца)."
         )
+    if (
+        latest_tared_at is not None
+        and latest_tare_value is not None
+        and massa is not None
+        and _as_utc(latest_tared_at) <= _as_utc(weighed_at)
+        and not tare_below_gross(latest_tare_value, massa)
+    ):
+        # тара не меньше брутто — тарирование сцепки ошибочно (гружёная
+        # машина); агент 0.4.29 такую тару не подставляет (решение Игоря
+        # 04.09.2026), карта объясняет прочерк в нетто
+        return (
+            f"Нетто не рассчитано: тара сцепки {fmt_kg(latest_tare_value)} кг "
+            f"(тарирование от {fmt_dt(latest_tared_at)}) не меньше брутто "
+            f"{fmt_kg(massa)} кг — тарирование ошибочно (гружёная машина), "
+            "в расчёт не подставлено."
+        )
     return "Нетто не рассчитано: действующего тарирования сцепки не было."
 
 
@@ -148,6 +165,7 @@ def build_card(
     code_ok: bool = True,
     latest_tared_at: datetime | None = None,
     latest_tare_value: float | None = None,
+    annulled_note: str | None = None,
 ) -> dict[str, object]:
     """Контекст печатной формы card.html (вся логика прочерков — здесь).
 
@@ -180,6 +198,7 @@ def build_card(
             netto=netto,
             latest_tared_at=latest_tared_at,
             latest_tare_value=latest_tare_value,
+            massa=massa,
         ),
         "gross_text": fmt_kg(massa) if is_weighing else "—",
         "tare_text": fmt_kg(tare_value) if is_weighing else fmt_kg(massa),
@@ -191,4 +210,7 @@ def build_card(
         ],
         "photos_note": photos_note,
         "record_uuid": record_uuid,
+        # запись аннулирована сторно (04.09.2026): печатается крупно — бумага
+        # на операцию, которой «как не было», не должна выглядеть действующей
+        "annulled_note": annulled_note,
     }

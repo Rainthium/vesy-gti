@@ -124,7 +124,11 @@ def create_api_v2_router(
             weighing = session.execute(
                 select(Weighing).where(Weighing.uuid == record_uuid)
             ).scalar_one_or_none()
-            if weighing is None or weighing.code is not ErrorCode.OK:
+            if (
+                weighing is None
+                or weighing.code is not ErrorCode.OK
+                or weighing.storno_of is not None  # запись-сторно — не операция
+            ):
                 return None
             return _document(session, weighing)
 
@@ -186,6 +190,18 @@ def create_api_v2_router(
         audit_details["record_uuid"] = str(result.record.uuid)
         await asyncio.to_thread(_audit, f"ais:{integrator}", "weigh_request_v2", audit_details)
         if code is not ErrorCode.OK:
+            if code is ErrorCode.ERR_TARE_TOO_HEAVY:
+                # гружёная машина проведена как тарирование (решение Игоря
+                # 04.09.2026) — событие мониторинга: «События» панели и Telegram
+                alert = (
+                    f"тарирование отклонено — {result.record.message or code.value} "
+                    f"(документ АИС {command.ais_ref}, ТС {command.vehicle}"
+                    + (f"/{command.trailer}" if command.trailer else "")
+                    + ")"
+                )
+                await asyncio.to_thread(
+                    _db, lambda s: repo.record_scale_alert(s, scale.id, alert, kind="tare_rejected")
+                )
             # отказ — только {code, message}: ничего не записано (решение 10.08.2026)
             return {"code": code.value, "message": result.record.message or code.value}
 
@@ -332,7 +348,10 @@ def create_api_v2_router(
         unlinked = params.get("unlinked") in {"1", "true", "yes"}
 
         def load(session: Session) -> dict[str, Any]:
-            query = select(Weighing).where(Weighing.code == ErrorCode.OK)
+            # записи-сторно — не операции: сверка АИС приняла бы их за новые
+            query = select(Weighing).where(
+                Weighing.code == ErrorCode.OK, Weighing.storno_of.is_(None)
+            )
             if ais_ref is not None:
                 query = query.join(WeighingAisRef, WeighingAisRef.weighing_id == Weighing.id).where(
                     WeighingAisRef.ais_ref == ais_ref
@@ -397,7 +416,11 @@ def create_api_v2_router(
             weighing = session.execute(
                 select(Weighing).where(Weighing.uuid == record_uuid)
             ).scalar_one_or_none()
-            if weighing is None or weighing.code is not ErrorCode.OK:
+            if (
+                weighing is None
+                or weighing.code is not ErrorCode.OK
+                or weighing.storno_of is not None  # запись-сторно — не операция
+            ):
                 return 404, {"code": "ERR_NOT_FOUND", "message": "нет операции с таким id"}
             error = check_ais_ref(link.ais_ref, weighing.operation)
             if error is not None:

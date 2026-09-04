@@ -52,7 +52,15 @@ from center.agents_ws.hub import AgentHub
 from center.api_v2.router import ApiV2Config, create_api_v2_router
 from center.api_v2.schemas import WeighV2Request, validation_details
 from center.db import repo
-from center.db.models import AuditLog, Scale, ScaleKind, Site, WeighingAisRef
+from center.db.models import (
+    AuditLog,
+    MonitoringEvent,
+    Scale,
+    ScaleKind,
+    Site,
+    Weighing,
+    WeighingAisRef,
+)
 from center.db.session import database_url, make_session_factory
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 from shared.messages import (
@@ -498,12 +506,15 @@ class TestCommand:
         assert doc["massa"] == 43310.0
         assert doc["tare"] == {
             "status": "applied",
+            "reason": None,
             "id": str(taring.uuid),
             "card_number": "ТАР-20260612-102100",
             "ais_ref": "TAR000012206",
             "tared_at": "2026-06-12T10:21:00+06:00",
             "massa": 15300.0,
+            "storno": None,
         }
+        assert doc["storno"] is None
         assert doc["netto"] == 28010.0
         # фото: канонические пути центра, файлы ещё не доехали
         front = doc["photos"]["front"]
@@ -576,6 +587,9 @@ class TestCommand:
         doc = _post(api_env).json()["weighing"]
         assert doc["tare"]["status"] == "not_applied"
         assert doc["netto"] is None
+        # причина (уточнение 04.09.2026): тара меньше брутто → отстала реплика
+        assert doc["tare"]["reason"] == "replica_lag"
+        assert doc["tare"]["storno"] is None and doc["storno"] is None
 
     def test_taring_after_weighing_not_shown(self, api_env: ApiEnv) -> None:
         """Тарирование позже момента взвешивания к нему не относится."""
@@ -925,3 +939,232 @@ class TestTools:
             }
         )
         assert "СВХ 0013" in line and "[expired]" in line and "01KG777AAA/—" in line
+
+
+# ---------------------------------------------------------------------------
+# Лимит тары, правдоподобие тары и сторно (решение Игоря 04.09.2026)
+# ---------------------------------------------------------------------------
+
+
+def _monitoring_rows(env: ApiEnv, kind: str) -> list[str]:
+    with env.factory() as session:
+        return list(
+            session.execute(
+                select(MonitoringEvent.message)
+                .where(MonitoringEvent.kind == kind)
+                .order_by(MonitoringEvent.id)
+            ).scalars()
+        )
+
+
+class TestTarePlausibility:
+    def test_tare_too_heavy_refusal_and_alert(self, api_env: ApiEnv) -> None:
+        """Агент отказал по лимиту тары: АИС получает 200 + код и текст, ничего не
+        записано, повтор разрешён; центр пишет событие мониторинга tare_rejected."""
+        refusal = _make_record(
+            operation=Operation.TARING,
+            code=ErrorCode.ERR_TARE_TOO_HEAVY,
+            massa=None,
+            weighed_at=None,
+            message="Масса 37 120 кг больше допустимой тары 25 000 кг — это гружёная машина",
+        )
+        link = _attach_agent(api_env, refusal, _make_taring())
+        first = _post(api_env, ais_ref="TAR000012929", operation="taring").json()
+        assert first["code"] == "ERR_TARE_TOO_HEAVY"
+        assert "гружёная машина" in first["message"]
+        with api_env.factory() as session:
+            assert repo.weighing_by_ais_ref(session, "TAR000012929") is None
+        alerts = _monitoring_rows(api_env, "tare_rejected")
+        assert len(alerts) == 1
+        assert "TAR000012929" in alerts[0] and "37 120" in alerts[0]
+        assert "01KG777AAA/01KG500AB" in alerts[0]
+        second = _post(api_env, ais_ref="TAR000012929", operation="taring").json()
+        assert second["code"] == "OK" and len(link.requests) == 2
+        assert _audit_rows(api_env)[0]["code"] == "ERR_TARE_TOO_HEAVY"
+
+    def test_not_applied_because_tare_not_below_gross(self, api_env: ApiEnv) -> None:
+        """Действующая тара не меньше брутто, агент 0.4.29 её не подставил:
+        status not_applied + reason, событие мониторинга tare_implausible."""
+        _seed_taring(api_env, massa=50000.0)  # брутто записи — 43 310
+        _attach_agent(api_env, _make_record())
+        doc = _post(api_env).json()["weighing"]
+        assert doc["netto"] is None
+        assert doc["tare"]["status"] == "not_applied"
+        assert doc["tare"]["reason"] == "tare_not_below_gross"
+        assert doc["tare"]["massa"] == 50000.0
+        alerts = _monitoring_rows(api_env, "tare_implausible")
+        assert len(alerts) == 1 and "50000" in alerts[0] and "43310" in alerts[0]
+
+    def test_negative_netto_from_old_agent_is_flagged(self, api_env: ApiEnv) -> None:
+        """Агент до 0.4.29 подставил тяжёлую тару (нетто ≤ 0) — тоже событие."""
+        taring = _seed_taring(api_env, massa=50000.0)
+        _attach_agent(
+            api_env,
+            _make_record(tare_value=50000.0, tare_weighing_uuid=taring.uuid, netto=-6690.0),
+        )
+        doc = _post(api_env).json()["weighing"]
+        assert doc["netto"] == -6690.0  # запись неизменяема — как прислал агент
+        alerts = _monitoring_rows(api_env, "tare_implausible")
+        assert len(alerts) == 1 and "-6690" in alerts[0]
+
+    def test_plausible_tare_no_alert(self, api_env: ApiEnv) -> None:
+        _seed_taring(api_env)
+        _attach_agent(api_env, _make_record(tare_value=15300.0, netto=43310.0 - 15300.0))
+        _post(api_env)
+        assert _monitoring_rows(api_env, "tare_implausible") == []
+
+    # --- границы и «не срабатывает» (решение 04.09.2026) ---
+
+    def test_heavy_taring_itself_not_flagged(self, api_env: ApiEnv) -> None:
+        """Тяжёлое тарирование, прошедшее при выключенном лимите, — не
+        взвешивание: ни tare_implausible, ни tare_rejected."""
+        _attach_agent(api_env, _make_taring(massa=50000.0))
+        body = _post(api_env, ais_ref="TAR000012206", operation="taring").json()
+        assert body["code"] == "OK" and body["weighing"]["massa"] == 50000.0
+        assert _monitoring_rows(api_env, "tare_implausible") == []
+        assert _monitoring_rows(api_env, "tare_rejected") == []
+
+    def test_other_refusal_gives_no_tare_rejected(self, api_env: ApiEnv) -> None:
+        """Событие tare_rejected — только у ERR_TARE_TOO_HEAVY: отказ ERR_UNSTABLE
+        при тарировании проходит как обычный отказ без события."""
+        refusal = _make_record(
+            operation=Operation.TARING,
+            code=ErrorCode.ERR_UNSTABLE,
+            massa=None,
+            weighed_at=None,
+            message="вес не стабилизировался за отведённое время",
+        )
+        _attach_agent(api_env, refusal)
+        body = _post(api_env, ais_ref="TAR000012929", operation="taring").json()
+        assert body["code"] == "ERR_UNSTABLE"
+        assert _monitoring_rows(api_env, "tare_rejected") == []
+
+    def test_tare_equal_to_gross_is_not_below(self, api_env: ApiEnv) -> None:
+        """Тара РОВНО равна брутто — граница строгая: not_applied +
+        tare_not_below_gross и событие."""
+        _seed_taring(api_env, massa=43310.0)  # брутто записи — 43 310
+        _attach_agent(api_env, _make_record())
+        doc = _post(api_env).json()["weighing"]
+        assert doc["netto"] is None
+        assert doc["tare"]["status"] == "not_applied"
+        assert doc["tare"]["reason"] == "tare_not_below_gross"
+        assert len(_monitoring_rows(api_env, "tare_implausible")) == 1
+
+    def test_tare_one_discrete_below_gross_is_replica_lag(self, api_env: ApiEnv) -> None:
+        """Тара на дискрету (10 кг) меньше брутто правдоподобна: не подставлена
+        агентом — значит, отстала реплика (replica_lag), события нет."""
+        _seed_taring(api_env, massa=43300.0)
+        _attach_agent(api_env, _make_record())
+        doc = _post(api_env).json()["weighing"]
+        assert doc["tare"]["status"] == "not_applied"
+        assert doc["tare"]["reason"] == "replica_lag"
+        assert _monitoring_rows(api_env, "tare_implausible") == []
+
+    def test_heavy_tare_of_other_coupling_not_related(self, api_env: ApiEnv) -> None:
+        """Тяжёлое тарирование той же головы БЕЗ прицепа к взвешиванию с прицепом
+        не относится: подсказка агенту «тары нет», tare null, события нет."""
+        _seed_taring(api_env, massa=50000.0, trailer_number=None)
+        link = _attach_agent(api_env, _make_record())
+        doc = _post(api_env).json()["weighing"]
+        assert doc["tare"] is None and doc["netto"] is None
+        assert link.requests[0].tare is None and link.requests[0].tare_resolved is True
+        assert _monitoring_rows(api_env, "tare_implausible") == []
+
+    def test_zero_netto_from_old_agent_is_flagged(self, api_env: ApiEnv) -> None:
+        """Нетто ровно 0 от старого агента (тара = брутто подставлена) — граница
+        «≤ 0» включительно: applied без reason, событие с нетто."""
+        taring = _seed_taring(api_env, massa=43310.0)
+        _attach_agent(
+            api_env,
+            _make_record(tare_value=43310.0, tare_weighing_uuid=taring.uuid, netto=0.0),
+        )
+        doc = _post(api_env).json()["weighing"]
+        assert doc["netto"] == 0.0
+        assert doc["tare"]["status"] == "applied" and doc["tare"]["reason"] is None
+        alerts = _monitoring_rows(api_env, "tare_implausible")
+        assert len(alerts) == 1 and "нетто 0" in alerts[0]
+
+    def test_storno_of_heavy_taring_clears_document(self, api_env: ApiEnv) -> None:
+        """После сторно ошибочного тарирования документ того же взвешивания:
+        тары «как не было» (tare null), сама запись не менялась (massa та же,
+        нетто пусто, storno null — сторнировано тарирование, не взвешивание);
+        следующая команда идёт без тары и нового события не даёт."""
+        taring = _seed_taring(api_env, massa=50000.0)
+        _attach_agent(api_env, _make_record())
+        before = _post(api_env).json()["weighing"]
+        assert before["tare"]["reason"] == "tare_not_below_gross"
+
+        with api_env.factory() as session:
+            row = session.execute(select(Weighing).where(Weighing.uuid == taring.uuid)).scalar_one()
+            repo.storno_weighing(session, row, actor="panel:igor", reason="гружёная машина")
+        after = api_env.client.get(f"/api/v2/weighings/{before['id']}", headers=_auth()).json()
+        assert after["weighing"]["tare"] is None and after["weighing"]["netto"] is None
+        assert after["weighing"]["massa"] == 43310.0 and after["weighing"]["storno"] is None
+
+        second = _post(api_env, ais_ref="WEI000094177").json()["weighing"]
+        assert second["tare"] is None and second["netto"] is None
+        assert len(_monitoring_rows(api_env, "tare_implausible")) == 1  # только первое
+
+
+class TestStornoInApi:
+    def _storno_seeded_taring(
+        self, env: ApiEnv, reason: str = "гружёная машина"
+    ) -> tuple[str, str]:
+        """Сторнировать посеянное тарирование; вернуть (uuid исходной, uuid сторно)."""
+        taring = _seed_taring(env)
+        with env.factory() as session:
+            row = session.execute(select(Weighing).where(Weighing.uuid == taring.uuid)).scalar_one()
+            storno = repo.storno_weighing(session, row, actor="panel:igor", reason=reason)
+            return str(taring.uuid), str(storno.uuid)
+
+    def test_storno_hidden_and_original_marked(self, api_env: ApiEnv) -> None:
+        original_uuid, storno_uuid = self._storno_seeded_taring(api_env)
+        # исходная запись видна с полем storno
+        doc = api_env.client.get(f"/api/v2/weighings/{original_uuid}", headers=_auth()).json()
+        assert doc["weighing"]["storno"]["reason"] == "гружёная машина"
+        assert doc["weighing"]["storno"]["at"].endswith("+06:00")
+        assert doc["weighing"]["ais_ref"] == "TAR000012206"
+        # запись-сторно — не операция: ни по id, ни в списке, ни для обратной связи
+        assert (
+            api_env.client.get(f"/api/v2/weighings/{storno_uuid}", headers=_auth()).status_code
+            == 404
+        )
+        listing = api_env.client.get(
+            "/api/v2/weighings", params={"operation": "taring"}, headers=_auth()
+        ).json()
+        assert listing["total"] == 1
+        assert [w["id"] for w in listing["weighings"]] == [original_uuid]
+        assert listing["weighings"][0]["storno"] is not None
+        link = api_env.client.post(
+            f"/api/v2/weighings/{storno_uuid}/ais_ref",
+            json={"ais_ref": "TAR000012999"},
+            headers=_auth(),
+        )
+        assert link.status_code == 404
+
+    def test_annulled_taring_not_used_as_tare(self, api_env: ApiEnv) -> None:
+        """После сторно тарирование сцепки для системы «как не было»: команда
+        взвешивания идёт без тары, вложение tare — null."""
+        self._storno_seeded_taring(api_env)
+        link = _attach_agent(api_env, _make_record())
+        doc = _post(api_env).json()["weighing"]
+        assert doc["tare"] is None and doc["netto"] is None
+        assert link.requests[0].tare is None and link.requests[0].tare_resolved is True
+
+    def test_applied_tare_shows_later_storno(self, api_env: ApiEnv) -> None:
+        """Тара была подставлена, а тарирование сторнировали ПОТОМ: запись
+        взвешивания неизменна (applied, нетто есть), но во вложении видно сторно."""
+        taring = _seed_taring(api_env)
+        _attach_agent(
+            api_env,
+            _make_record(tare_value=15300.0, tare_weighing_uuid=taring.uuid, netto=28010.0),
+        )
+        before = _post(api_env).json()["weighing"]
+        assert before["tare"]["status"] == "applied" and before["tare"]["storno"] is None
+        with api_env.factory() as session:
+            row = session.execute(select(Weighing).where(Weighing.uuid == taring.uuid)).scalar_one()
+            repo.storno_weighing(session, row, actor="panel:igor", reason="ошибочное")
+        after = api_env.client.get(f"/api/v2/weighings/{before['id']}", headers=_auth()).json()
+        tare = after["weighing"]["tare"]
+        assert tare["status"] == "applied" and after["weighing"]["netto"] == 28010.0
+        assert tare["storno"]["reason"] == "ошибочное"

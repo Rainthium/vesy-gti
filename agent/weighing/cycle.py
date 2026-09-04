@@ -21,6 +21,7 @@ from enum import StrEnum
 
 from agent.drivers.base import ScaleState
 from shared.enums import ErrorCode, ScaleStatus
+from shared.tare import DEFAULT_MAX_TARE_KG
 
 
 class CycleState(StrEnum):
@@ -49,6 +50,9 @@ class CycleConfig:
     stable_duration_s: float = 2.0  # вес неизменен столько секунд → фиксация
     stable_timeout_s: float = 30.0  # не стабилизировался → ERR_UNSTABLE
     no_data_timeout_s: float = 5.0  # нет данных с индикатора → ERR_SCALE_OFFLINE
+    # лимит массы тарирования: тяжелее — гружёная машина → ERR_TARE_TOO_HEAVY
+    # (решение Игоря 04.09.2026); 0 — выключен
+    max_tare_kg: float = DEFAULT_MAX_TARE_KG
 
 
 @dataclass(frozen=True)

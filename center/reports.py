@@ -386,11 +386,17 @@ def _reason_rows_query(period: Period, site_id: int | None) -> Any:
     поджимает день месяца так же, как ``shared.tare.three_months_before``.
     """
     tare = aliased(Weighing)
+    # сторно (04.09.2026): ни записи-сторно, ни аннулированные ими тарирования
+    # тарой не являются — как в repo._valid_tarings и документе v2
+    storno_rows = aliased(Weighing)
+    annulled = select(storno_rows.storno_of).where(storno_rows.storno_of.is_not(None))
     latest_tared = (
         select(func.max(tare.weighed_at))
         .where(
             tare.operation == Operation.TARING,
             tare.code == ErrorCode.OK,
+            tare.storno_of.is_(None),
+            tare.id.not_in(annulled),
             tare.weighed_at.is_not(None),
             tare.vehicle_number == Weighing.vehicle_number,
             func.coalesce(tare.trailer_number, "") == func.coalesce(Weighing.trailer_number, ""),

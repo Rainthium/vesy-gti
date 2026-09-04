@@ -55,6 +55,8 @@
             <td><span class="pill pill-warn"><span class="dot"></span>Истекло</span></td>
             {% elif row.status == 'replaced' %}
             <td><span class="pill pill-info"><span class="dot"></span>Заменено</span></td>
+            {% elif row.status == 'annulled' %}
+            <td><span class="pill pill-err" title="Тарирование сторнировано — тарой не является"><span class="dot"></span>Аннулировано</span></td>
             {% else %}
             <td class="cell-muted">Без номера ТС</td>
             {% endif %}

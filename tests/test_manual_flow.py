@@ -34,6 +34,7 @@ from agent.sync.storage import AgentStorage
 from agent.weighing.manual import ManualFlowError, ManualOperationFlow, ManualPreview
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
 from shared.messages import TareRecord
+from shared.tare import DEFAULT_MAX_TARE_KG
 
 # разные тела снимков, чтобы проверить соответствие камера → файл
 FRONT_JPEG = b"\xff\xd8\xff\xe0" + b"front-camera-frame" + b"\xff\xd9"
@@ -68,6 +69,7 @@ class FlowEnv:
         cameras: list[CameraConfig] | None = None,
         threshold: float = 500.0,
         now_utc: Callable[[], datetime] | None = None,
+        max_tare_kg: float = DEFAULT_MAX_TARE_KG,
     ) -> ManualOperationFlow:
         return ManualOperationFlow(
             scale_state=lambda: self.scale,
@@ -77,6 +79,7 @@ class FlowEnv:
             photos_dir=self.photos_dir,
             vehicle_threshold_kg=threshold,
             now_utc=now_utc,
+            max_tare_kg=max_tare_kg,
         )
 
 
@@ -375,6 +378,7 @@ class TestPrepareSuccess:
     def test_taring_does_not_lookup_tare(self, env: FlowEnv) -> None:
         """При тарировании тара не ищется: massa и есть тара этого ТС."""
         put_tare(env.storage)  # действующая тара есть, но она не нужна
+        env.set_scale(weight_kg=15300.0)  # пустая машина (лимит тары 25 т — 04.09.2026)
         flow = env.make_flow()
         preview = flow.prepare(
             Operation.TARING,
@@ -384,7 +388,7 @@ class TestPrepareSuccess:
         )
         record = preview.record
         assert record.operation is Operation.TARING
-        assert record.massa == 43310.0
+        assert record.massa == 15300.0
         assert record.tare_value is None
         assert record.tare_weighing_uuid is None
         assert record.netto is None
@@ -571,3 +575,182 @@ def test_capture_and_save_writes_immediately(env: FlowEnv) -> None:
     assert saved.massa is not None
     assert saved.netto == saved.massa - 15300.0
     assert flow.pending() is None  # подтверждать нечего — уже записано
+
+
+# --- лимит тары и правдоподобие тары (решение Игоря 04.09.2026) ---
+
+
+class TestTareLimitAndPlausibility:
+    def _prepare_taring(self, flow: ManualOperationFlow) -> ManualPreview:
+        return flow.prepare(
+            Operation.TARING, vehicle_number=VEHICLE, trailer_number=None, operator=OPERATOR
+        )
+
+    def test_heavy_taring_rejected_without_preview(self, env: FlowEnv) -> None:
+        """Тарирование тяжелее лимита — ManualFlowError с текстом про гружёную
+        машину; превью и файлов нет (снимки не делались)."""
+        env.set_scale(weight_kg=41580.0)
+        flow = env.make_flow()
+        with pytest.raises(ManualFlowError, match="гружёная машина") as info:
+            self._prepare_taring(flow)
+        assert "41 580" in str(info.value) and "25 000" in str(info.value)
+        assert flow.pending() is None
+        assert not env.photos_dir.exists() or not any(env.photos_dir.rglob("*"))
+
+    def test_limit_from_center_applies_and_zero_disables(self, env: FlowEnv) -> None:
+        """set_max_tare: новый лимит действует сразу; 0 выключает проверку."""
+        env.set_scale(weight_kg=21000.0)
+        flow = env.make_flow()
+        flow.set_max_tare(20000.0)
+        with pytest.raises(ManualFlowError):
+            self._prepare_taring(flow)
+        flow.set_max_tare(0.0)
+        preview = self._prepare_taring(flow)
+        assert preview.record.operation is Operation.TARING
+        assert preview.record.massa == 21000.0
+
+    def test_weighing_not_limited(self, env: FlowEnv) -> None:
+        """Лимит только для тарирования: брутто 43 т взвешивается как обычно."""
+        preview = prepare_weighing(env.make_flow())
+        assert preview.record.massa == 43310.0
+
+    def test_implausible_tare_not_applied(self, env: FlowEnv) -> None:
+        """Тара из реплики не меньше брутто: не подставлена, нетто пусто,
+        в превью — rejected_tare для предупреждения, expired_tare не ставится,
+        причина — в message записи."""
+        heavy = put_tare(env.storage, tare_value=50000.0)
+        preview = prepare_weighing(env.make_flow())
+        record = preview.record
+        assert record.code is ErrorCode.OK
+        assert record.tare_value is None and record.tare_weighing_uuid is None
+        assert record.netto is None
+        assert record.message is not None and "не меньше брутто" in record.message
+        assert preview.tare is None
+        assert preview.rejected_tare == heavy
+        assert preview.expired_tare is None
+        assert preview.no_valid_tare is True
+
+    def test_plausible_tare_has_no_rejection(self, env: FlowEnv) -> None:
+        """Обычная тара: подставлена, rejected_tare пуст, message пуст."""
+        put_tare(env.storage)
+        preview = prepare_weighing(env.make_flow())
+        assert preview.record.netto == 43310.0 - 15300.0
+        assert preview.rejected_tare is None
+        assert preview.record.message is None
+
+    # --- границы лимита и его источник ---
+
+    def test_limit_boundaries(self, env: FlowEnv) -> None:
+        """Ровно лимит — ещё тара; лимит + дискрета (10 кг) — отказ с обеими
+        массами в тексте (граница строгая: больше лимита)."""
+        flow = env.make_flow()
+        env.set_scale(weight_kg=DEFAULT_MAX_TARE_KG)
+        preview = self._prepare_taring(flow)
+        assert preview.record.massa == DEFAULT_MAX_TARE_KG
+        flow.discard(preview.preview_id)
+
+        env.set_scale(weight_kg=DEFAULT_MAX_TARE_KG + 10.0)
+        with pytest.raises(ManualFlowError, match="25 010") as info:
+            self._prepare_taring(flow)
+        assert "25 000" in str(info.value)
+        assert flow.pending() is None
+
+    def test_zero_limit_from_constructor(self, env: FlowEnv) -> None:
+        """max_tare_kg=0 из конфига агента ([cycle] max_tare_kg = 0) — лимит
+        выключен с самого старта, без set_max_tare."""
+        env.set_scale(weight_kg=41580.0)
+        preview = self._prepare_taring(env.make_flow(max_tare_kg=0.0))
+        assert preview.record.operation is Operation.TARING
+        assert preview.record.massa == 41580.0
+
+    def test_heavy_weight_still_ready(self, env: FlowEnv) -> None:
+        """ready() лимита не знает: 41 т — готовность есть (это может быть
+        взвешивание); отказ тарированию — только по нажатию кнопки."""
+        env.set_scale(weight_kg=41580.0)
+        assert env.make_flow().ready() is True
+
+    # --- отказ по лимиту: ДО снимков, чужое превью не трогает ---
+
+    def test_limit_refusal_precedes_camera_shots(self, env: FlowEnv, http_camera: str) -> None:
+        """С живыми камерами отказ по лимиту не оставляет ни файла: проверка
+        стоит ДО съёмки (каталог снимков даже не создаётся), pending пуст."""
+        env.set_scale(weight_kg=41580.0)
+        flow = env.make_flow(two_cameras(http_camera))
+        with pytest.raises(ManualFlowError, match="гружёная машина"):
+            self._prepare_taring(flow)
+        assert flow.pending() is None
+        assert not env.photos_dir.exists()
+
+    def test_limit_refusal_keeps_existing_preview(self, env: FlowEnv, http_camera: str) -> None:
+        """Неподтверждённое превью взвешивания переживает отказ по лимиту:
+        pending() — оно же, его снимки на месте, commit по нему проходит."""
+        flow = env.make_flow(two_cameras(http_camera))
+        preview = prepare_weighing(flow)
+        paths = [Path(photo.path) for photo in preview.photos]
+
+        env.set_scale(weight_kg=41580.0)
+        with pytest.raises(ManualFlowError):
+            self._prepare_taring(flow)
+        assert flow.pending() is preview
+        assert all(path.exists() for path in paths)
+        flow.commit(preview.preview_id)
+        assert env.storage.get_weighing(preview.record.uuid) is not None
+
+    # --- правдоподобие тары: границы, сцепка, срок, одношаговая операция ---
+
+    def test_tare_equal_to_gross_rejected_one_discrete_below_applied(self, env: FlowEnv) -> None:
+        """Тара РОВНО равна брутто — отвергается (нетто 0 — не нетто); тара на
+        дискрету (10 кг) меньше — подставляется, нетто 10 кг (граница строгая)."""
+        heavy = put_tare(env.storage, tare_value=43310.0)
+        preview = prepare_weighing(env.make_flow())
+        assert preview.rejected_tare == heavy
+        assert preview.tare is None and preview.record.netto is None
+        assert preview.record.message is not None and "43 310" in preview.record.message
+
+        put_tare(env.storage, tare_value=43300.0)
+        preview = prepare_weighing(env.make_flow())
+        assert preview.rejected_tare is None
+        assert preview.record.tare_value == 43300.0 and preview.record.netto == 10.0
+        assert preview.record.message is None
+
+    def test_implausible_tare_matched_by_coupling(self, env: FlowEnv) -> None:
+        """Правдоподобие проверяется у тары СЦЕПКИ: тяжёлая тара пары
+        голова+прицеп отвергается при взвешивании той же пары (номера
+        нормализованы), а соло-взвешивание той же головы её не видит вовсе."""
+        heavy = put_tare(env.storage, tare_value=50000.0, trailer_number="BD123AB")
+        preview = prepare_weighing(env.make_flow(), trailer_number=" bd123ab ")
+        assert preview.record.trailer_number == "BD123AB"
+        assert preview.rejected_tare == heavy
+        assert preview.record.message is not None
+
+        solo = prepare_weighing(env.make_flow())
+        assert solo.rejected_tare is None and solo.expired_tare is None
+        assert solo.record.message is None and solo.record.netto is None
+
+    def test_stale_heavy_tare_is_expired_not_rejected(self, env: FlowEnv) -> None:
+        """Тяжёлая, но УСТАРЕВШАЯ тара: правило срока раньше правдоподобия —
+        expired_tare заполнен (карточка покажет дату), rejected_tare и message пусты."""
+        stale = put_tare(
+            env.storage, tare_value=50000.0, tared_at=datetime.now(UTC) - timedelta(days=120)
+        )
+        preview = prepare_weighing(env.make_flow())
+        assert preview.expired_tare == stale
+        assert preview.rejected_tare is None
+        assert preview.tare is None and preview.record.netto is None
+        assert preview.record.message is None
+
+    def test_capture_and_save_persists_rejection(self, env: FlowEnv) -> None:
+        """Одношаговая операция (кнопка оператора) с отвергнутой тарой: запись
+        в журнале без тары, с причиной; превью очищено."""
+        put_tare(env.storage, tare_value=50000.0)
+        flow = env.make_flow()
+        preview = flow.capture_and_save(
+            Operation.WEIGHING, vehicle_number=VEHICLE, trailer_number=None, operator=OPERATOR
+        )
+        assert preview.rejected_tare is not None
+        saved = env.storage.get_weighing(preview.record.uuid)
+        assert saved is not None
+        assert saved.tare_value is None and saved.tare_weighing_uuid is None
+        assert saved.netto is None
+        assert saved.message is not None and "не меньше брутто" in saved.message
+        assert flow.pending() is None

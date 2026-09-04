@@ -601,12 +601,12 @@ def test_err_busy_carries_normalized_numbers(make_env: Callable[..., RunnerEnv])
 def test_taring_does_not_apply_tare(env: RunnerEnv) -> None:
     """Тарирование: massa и есть тара этого ТС — тара из реестра не подставляется."""
     put_tare(env.storage)  # действующая тара есть, но не нужна
-    env.drive_to_ready()
+    env.drive_to_ready(TARE_KG)  # пустая машина (лимит тары 25 т — 04.09.2026)
     record = run_handle(env, make_request(operation=Operation.TARING)).record
 
     assert record.operation is Operation.TARING
     assert record.code is ErrorCode.OK
-    assert record.massa == GROSS_KG
+    assert record.massa == TARE_KG
     assert record.tare_value is None
     assert record.tare_weighing_uuid is None
     assert record.netto is None
@@ -742,3 +742,281 @@ def test_refusal_echoes_ais_ref(env: RunnerEnv) -> None:
     result = run_handle(env, make_request(ais_ref="WEI000094177"))
     assert result.record.code is ErrorCode.ERR_VEHICLE_TIMEOUT
     assert result.record.ais_ref == "WEI000094177"
+
+
+# --- лимит тары и правдоподобие тары (решение Игоря 04.09.2026) ---
+
+
+def test_taring_above_limit_refused_without_record(env: RunnerEnv) -> None:
+    """Тарирование тяжелее лимита (25 т по умолчанию) — ERR_TARE_TOO_HEAVY:
+    снимков нет, записи нет, текст объясняет оператору АИС, что это
+    гружёная машина (Кокчо-Коз 04.09.2026: 23 машины 31–43 т прошли как тара)."""
+    env.drive_to_ready(37120.0)
+    result = run_handle(env, make_request(operation=Operation.TARING, ais_ref="TAR000012929"))
+    record = result.record
+
+    assert record.code is ErrorCode.ERR_TARE_TOO_HEAVY
+    assert record.massa is None and record.weighed_at is None
+    assert record.ais_ref == "TAR000012929"
+    assert record.message is not None
+    assert "37 120" in record.message and "25 000" in record.message
+    assert "гружёная" in record.message
+    assert env.capture.calls == []  # камеры не дёргались
+    assert stored_record(env, record) is None
+
+
+def test_taring_at_limit_allowed(env: RunnerEnv) -> None:
+    """Ровно лимит — ещё тара (граница строгая: больше лимита)."""
+    env.drive_to_ready(CFG.max_tare_kg)
+    record = run_handle(env, make_request(operation=Operation.TARING)).record
+    assert record.code is ErrorCode.OK
+    assert record.massa == CFG.max_tare_kg
+
+
+def test_zero_limit_disables_check(make_env: Callable[..., RunnerEnv]) -> None:
+    """max_tare_kg = 0 — лимит выключен: тяжёлое тарирование проходит."""
+    environment = make_env(AutoConfig(cycle=CycleConfig(max_tare_kg=0.0), tick_interval_s=0.005))
+    environment.drive_to_ready(41580.0)
+    record = run_handle(environment, make_request(operation=Operation.TARING)).record
+    assert record.code is ErrorCode.OK
+    assert record.massa == 41580.0
+
+
+def test_set_cycle_applies_new_limit(env: RunnerEnv) -> None:
+    """Лимит из настроек центра применяется без рестарта (set_cycle)."""
+    env.runner.set_cycle(CycleConfig(max_tare_kg=20000.0))
+    env.drive_to_ready(21000.0)
+    record = run_handle(env, make_request(operation=Operation.TARING)).record
+    assert record.code is ErrorCode.ERR_TARE_TOO_HEAVY
+
+
+def test_weighing_above_limit_is_not_affected(env: RunnerEnv) -> None:
+    """Лимит касается только тарирования: брутто 43 т — обычное взвешивание."""
+    env.drive_to_ready(GROSS_KG)
+    record = run_handle(env, make_request()).record
+    assert record.code is ErrorCode.OK and record.massa == GROSS_KG
+
+
+def test_implausible_replica_tare_not_applied(env: RunnerEnv) -> None:
+    """Тара из реплики не меньше брутто — тарирование сцепки ошибочно: тара
+    не подставляется, нетто пусто, причина — в message записи."""
+    heavy = put_tare(env.storage, tare_value=GROSS_KG)  # ровно брутто — уже неправдоподобно
+    env.drive_to_ready(GROSS_KG)
+    record = run_handle(env, make_request()).record
+
+    assert record.code is ErrorCode.OK
+    assert record.massa == GROSS_KG
+    assert record.tare_value is None and record.tare_weighing_uuid is None
+    assert record.netto is None
+    assert record.message is not None and "не меньше брутто" in record.message
+    assert f"{heavy.tare_value:,.0f}".replace(",", " ") in record.message
+    stored = stored_record(env, record)
+    assert stored is not None and stored.netto is None and stored.message == record.message
+
+
+def test_implausible_center_tare_not_applied(env: RunnerEnv) -> None:
+    """Тара из команды центра (tare_resolved) проверяется так же."""
+    heavy = TareRecord(
+        vehicle_number=VEHICLE,
+        tare_value=GROSS_KG + 2000.0,
+        tared_at=datetime.now(UTC) - timedelta(days=1),
+        weighing_uuid=uuid4(),
+    )
+    env.drive_to_ready(GROSS_KG)
+    record = run_handle(env, make_request(tare=heavy, tare_resolved=True)).record
+    assert record.tare_value is None and record.netto is None
+    assert record.message is not None and "не меньше брутто" in record.message
+
+
+def test_plausible_tare_keeps_no_message(env: RunnerEnv) -> None:
+    """Обычная тара меньше брутто: подставлена, message пуст (как раньше)."""
+    put_tare(env.storage)
+    env.drive_to_ready()
+    record = run_handle(env, make_request()).record
+    assert record.netto == GROSS_KG - TARE_KG
+    assert record.message is None
+
+
+# --- лимит тары: границы, фиксация, ожидание стабилизации ---
+
+
+def test_taring_one_discrete_above_limit_refused(env: RunnerEnv) -> None:
+    """Лимит + одна дискрета индикатора (10 кг) — уже отказ: граница строгая
+    (ровно лимит проходит — test_taring_at_limit_allowed); текст несёт обе массы."""
+    env.drive_to_ready(CFG.max_tare_kg + 10.0)
+    record = run_handle(env, make_request(operation=Operation.TARING)).record
+
+    assert record.code is ErrorCode.ERR_TARE_TOO_HEAVY
+    assert record.message is not None
+    assert "25 010" in record.message and "25 000" in record.message
+    assert env.storage.pending_count() == 0
+    assert env.capture.calls == []
+
+
+def test_limit_refusal_keeps_fixation_for_next_command(env: RunnerEnv) -> None:
+    """Отказ по лимиту не трогает готовую фиксацию наблюдателя: оператор АИС
+    меняет тип операции, машину не перегоняют — следующая команда ВЗВЕШИВАНИЯ
+    по той же стоянке проходит OK с тем же весом, камеры дёргаются один раз."""
+    env.drive_to_ready(37120.0)
+    refused = run_handle(env, make_request(operation=Operation.TARING)).record
+    assert refused.code is ErrorCode.ERR_TARE_TOO_HEAVY
+    assert env.watcher.phase is WatcherPhase.READY
+    assert env.watcher.fixation is not None
+
+    weighed = run_handle(env, make_request()).record
+    assert weighed.code is ErrorCode.OK
+    assert weighed.massa == 37120.0
+    assert env.storage.pending_count() == 1
+    assert env.capture.calls == [[CameraRole.FRONT, CameraRole.REAR]]  # только у взвешивания
+
+
+def test_limit_refusal_shaped_like_other_refusals(env: RunnerEnv) -> None:
+    """ERR_TARE_TOO_HEAVY — отказ как остальные: номера нормализованы, веса,
+    времени, тары и снимков нет, источник AIS, request_id совпадает."""
+    env.drive_to_ready(37120.0)
+    request = make_request(
+        operation=Operation.TARING, vehicle_number="  01kg777aaa ", trailer_number=" bd123ab "
+    )
+    result = run_handle(env, request)
+    record = result.record
+
+    assert result.request_id == request.request_id
+    assert record.code is ErrorCode.ERR_TARE_TOO_HEAVY
+    assert record.operation is Operation.TARING
+    assert record.vehicle_number == VEHICLE and record.trailer_number == TRAILER
+    assert record.massa is None and record.weighed_at is None
+    assert record.tare_value is None and record.netto is None
+    assert record.photos == []
+    assert record.source is WeighingSource.AIS
+    assert list(env.photos_dir.rglob("*.jpeg")) == []
+
+
+def test_limit_checked_after_stabilizing_wait(env: RunnerEnv) -> None:
+    """Команда тарирования пришла к только что заехавшей машине (STABILIZING):
+    runner честно дожидается фиксации и лишь по ней применяет лимит —
+    ERR_TARE_TOO_HEAVY без снимков и записи."""
+
+    async def scenario() -> None:
+        env.drive_to_stabilizing(37120.0)
+        task = asyncio.create_task(env.runner.handle(make_request(operation=Operation.TARING)))
+        await asyncio.sleep(0.05)
+        assert not task.done()  # ждёт стабилизации, отказывать рано
+
+        env.watcher_clock.advance(CFG.stable_duration_s)
+        env.watcher.tick(ok(37120.0))  # выдержка набрана → фиксация 37 120 кг
+        result = await task
+        assert result.record.code is ErrorCode.ERR_TARE_TOO_HEAVY
+        assert env.storage.pending_count() == 0
+        assert env.capture.calls == []
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=SCENARIO_TIMEOUT_S))
+
+
+def test_limit_uses_fixation_weight_not_live_reading(env: RunnerEnv) -> None:
+    """Лимит сверяется с весом ФИКСАЦИИ — тем же, что попал бы в запись, — а не
+    с сиюминутным показанием индикатора: мгновенно «полегчавшее» табло
+    (машина качнулась) лимит не обходит."""
+    env.drive_to_ready(37120.0)
+    env.scale.state = ok(20000.0, stable=False)  # живое показание ниже лимита
+    record = run_handle(env, make_request(operation=Operation.TARING)).record
+    assert record.code is ErrorCode.ERR_TARE_TOO_HEAVY
+    assert record.message is not None and "37 120" in record.message
+
+
+# --- правдоподобие тары: границы, подсказка центра «тары нет», без номера ---
+
+
+def test_center_no_tare_hint_has_no_message(env: RunnerEnv) -> None:
+    """Центр сказал «действующей тары нет» (tare_resolved, tare=None): запись
+    без тары и БЕЗ примечания — это отсутствие тары, а не её отказ."""
+    env.drive_to_ready()
+    record = run_handle(env, make_request(tare=None, tare_resolved=True)).record
+    assert record.code is ErrorCode.OK
+    assert record.tare_value is None and record.tare_weighing_uuid is None
+    assert record.netto is None
+    assert record.message is None
+
+
+def test_no_vehicle_number_skips_plausibility_check(env: RunnerEnv) -> None:
+    """Без номера ТС тара не ищется вовсе: тяжёлая тара ни из реплики, ни из
+    команды центра примечания не даёт, запись — обычное «без нетто»."""
+    put_tare(env.storage, tare_value=GROSS_KG + 1000.0)
+    env.drive_to_ready()
+    record = run_handle(env, make_request(vehicle_number=None)).record
+    assert record.code is ErrorCode.OK
+    assert record.tare_value is None and record.netto is None
+    assert record.message is None
+
+    heavy = TareRecord(
+        vehicle_number=VEHICLE,
+        tare_value=GROSS_KG + 1000.0,
+        tared_at=datetime.now(UTC) - timedelta(days=1),
+        weighing_uuid=uuid4(),
+    )
+    record = run_handle(
+        env, make_request(vehicle_number="   ", tare=heavy, tare_resolved=True)
+    ).record
+    assert record.code is ErrorCode.OK
+    assert record.vehicle_number is None
+    assert record.tare_value is None and record.netto is None
+    assert record.message is None
+
+
+def test_tare_one_discrete_below_gross_is_applied(env: RunnerEnv) -> None:
+    """Тара на одну дискрету (10 кг) меньше брутто — ещё правдоподобна:
+    подставляется, нетто = 10 кг, примечания нет (граница строгая: тара < брутто;
+    ровно брутто — отказ, test_implausible_replica_tare_not_applied)."""
+    tare = put_tare(env.storage, tare_value=GROSS_KG - 10.0)
+    env.drive_to_ready()
+    record = run_handle(env, make_request()).record
+    assert record.code is ErrorCode.OK
+    assert record.tare_value == GROSS_KG - 10.0
+    assert record.tare_weighing_uuid == tare.weighing_uuid
+    assert record.netto == 10.0
+    assert record.message is None
+
+
+def test_implausible_tare_message_dates_in_bishkek(make_env: Callable[..., RunnerEnv]) -> None:
+    """Дата тарирования в примечании — бишкекская (правило №4а): тарирование
+    31.08 в 20:30 UTC — это уже 01.09 по местному времени; брутто в тексте."""
+    fixed_now = datetime(2026, 9, 4, 6, 0, tzinfo=UTC)
+    env = make_env(now_utc=lambda: fixed_now)
+    put_tare(
+        env.storage,
+        tare_value=GROSS_KG,
+        tared_at=datetime(2026, 8, 31, 20, 30, tzinfo=UTC),
+    )
+    env.drive_to_ready()
+    record = run_handle(env, make_request()).record
+
+    assert record.code is ErrorCode.OK and record.netto is None
+    assert record.message is not None
+    assert "01.09.2026" in record.message
+    assert "31.08.2026" not in record.message
+    assert "43 310" in record.message
+
+
+def test_implausible_center_tare_leaves_no_link(env: RunnerEnv) -> None:
+    """Отвергнутая тара из команды центра не оставляет и ссылки на тарирование:
+    запись «без тары» целиком (tare_value/tare_weighing_uuid/netto), причина —
+    в message, запись сохранена локально и ждёт досылки как обычная OK."""
+    heavy = TareRecord(
+        vehicle_number=VEHICLE,
+        trailer_number=TRAILER,
+        tare_value=GROSS_KG,  # ровно брутто — уже неправдоподобно
+        tared_at=datetime.now(UTC) - timedelta(days=1),
+        weighing_uuid=uuid4(),
+    )
+    env.drive_to_ready()
+    record = run_handle(
+        env, make_request(trailer_number=TRAILER, tare=heavy, tare_resolved=True)
+    ).record
+
+    assert record.code is ErrorCode.OK
+    assert record.tare_value is None and record.tare_weighing_uuid is None
+    assert record.netto is None
+    assert record.message is not None and "не меньше брутто" in record.message
+    stored = stored_record(env, record)
+    assert stored is not None and stored.message == record.message
+    assert stored.tare_weighing_uuid is None
+    assert [r.uuid for r in env.storage.pending_records()] == [record.uuid]

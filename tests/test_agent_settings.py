@@ -250,10 +250,14 @@ class FakeRunner:
 class FakeManual:
     def __init__(self) -> None:
         self.thresholds: list[float] = []
+        self.max_tares: list[float] = []
         self.cameras: list[list[CameraConfig]] = []
 
     def set_vehicle_threshold(self, threshold_kg: float) -> None:
         self.thresholds.append(threshold_kg)
+
+    def set_max_tare(self, max_tare_kg: float) -> None:
+        self.max_tares.append(max_tare_kg)
 
     def set_cameras(self, cameras: list[CameraConfig]) -> None:
         self.cameras.append(cameras)
@@ -379,6 +383,8 @@ class TestManagerCycle:
         assert env.watcher.reconfigured == [expected]
         assert env.runner.cycles == [expected]
         assert env.manual.thresholds == [999.0]
+        # лимит тары (0.4.29) доезжает до ручного режима тем же снимком
+        assert env.manual.max_tares == [cycle.max_tare_kg]
 
     def test_cycle_resets_real_watcher_to_wait_empty(self) -> None:
         """С реальным ScaleWatcher: применение цикла сбрасывает наблюдение

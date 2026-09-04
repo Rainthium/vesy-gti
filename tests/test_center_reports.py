@@ -507,6 +507,42 @@ class TestMassReport:
         # причина у взвешивания V2 03.08 не меняется — тогда тары не было
         assert m.reasons["none"] == 2
 
+    def test_annulled_taring_is_not_a_taring_for_reasons(
+        self,
+        db: sessionmaker[Session],  # noqa: F811
+        seed: Seed,
+    ) -> None:
+        """Сторно ошибочного (тяжёлого) тарирования — «как не было» и для причин
+        «без нетто»: взвешивания сцепки до и после сторно — «действующего
+        тарирования не было», сцепка идёт к перетарированию; запись-сторно
+        (тоже TARING/OK) тарированием не считается."""
+        with db() as session:
+            heavy = _weighing(
+                session,
+                seed.scale_a,
+                _bishkek(2026, 8, 6, 9),
+                massa=41000,
+                vehicle="V9",
+                operation=Operation.TARING,
+            )
+            # взвешивание без нетто: тара ≥ брутто отвергнута агентом
+            _weighing(session, seed.scale_a, _bishkek(2026, 8, 6, 11), massa=39000, vehicle="V9")
+            # сторно тарирования — новой записью (та же операция и масса)
+            _weighing(
+                session,
+                seed.scale_a,
+                _bishkek(2026, 8, 7, 10),
+                massa=41000,
+                vehicle="V9",
+                operation=Operation.TARING,
+                storno_of=heavy.id,
+            )
+            # после сторно тары у сцепки нет вовсе
+            _weighing(session, seed.scale_a, _bishkek(2026, 8, 8, 11), massa=38000, vehicle="V9")
+            m = reports.mass_report(session, PERIOD)
+        assert m.reasons == {"expired": 1, "none": 4, "no_vehicle": 1, "not_applied": 1}
+        assert ("V9", None) in {(r.vehicle_number, r.trailer_number) for r in m.retare}
+
 
 class TestBySiteAndSeries:
     def test_by_site_rows(self, db: sessionmaker[Session], seed: Seed) -> None:  # noqa: F811

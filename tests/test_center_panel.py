@@ -39,9 +39,9 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, create_engine, select, text
+from sqlalchemy import Engine, create_engine, func, select, text
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 from starlette.middleware.sessions import SessionMiddleware
@@ -53,13 +53,17 @@ from center.db.models import (
     AgentStatus,
     AuditLog,
     Camera,
+    MonitoringEvent,
+    MonitoringSeverity,
     Scale,
     ScaleKind,
     Site,
+    TareRegistry,
     User,
     UserRole,
     Weighing,
     WeighingPhoto,
+    weighing_checksum,
 )
 from center.db.session import database_url, make_session_factory
 from center.monitoring import MonitoringService, MonitoringThresholds
@@ -2630,3 +2634,641 @@ class TestManualModeBadge:
             session.commit()
         page = panel_env.client.get("/panel/").text
         assert "Ручной режим" in page
+
+
+# ---------------------------------------------------------------------------
+# Сторнирование (правило №2: новой записью-сторно; решение Игоря 04.09.2026)
+# ---------------------------------------------------------------------------
+
+
+class TestStornoQueries:
+    """repo.storno_weighing и производные: реестр тары, подбор тары, счётчики."""
+
+    def _seed_taring(
+        self,
+        session: Session,
+        scale_id: int,
+        *,
+        days_ago: float,
+        massa: float,
+        vehicle: str = "01KG700ST",
+    ) -> Weighing:
+        return _insert_weighing(
+            session,
+            scale_id,
+            created_at=datetime.now(UTC) - timedelta(days=days_ago),
+            vehicle=vehicle,
+            massa=massa,
+            operation=Operation.TARING,
+        )
+
+    def _registry(self, session: Session, vehicle: str = "01KG700ST") -> TareRegistry | None:
+        return session.get(TareRegistry, (vehicle, ""))
+
+    def test_storno_creates_pair_and_drops_registry_row(self, db_session: Session) -> None:
+        """Единственное тарирование сцепки сторнировано: запись-сторно рядом,
+        исходная не тронута, строка реестра исчезает, аудит с причиной."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        original = self._seed_taring(db_session, scale.id, days_ago=1, massa=41580.0)
+        repo.rebuild_tare_registry_entry(db_session, "01KG700ST", None)
+        db_session.commit()
+        assert self._registry(db_session) is not None
+
+        storno = repo.storno_weighing(
+            db_session, original, actor="panel:igor", reason="  гружёная  машина  "
+        )
+        assert storno.storno_of == original.id
+        assert storno.operation is Operation.TARING and storno.massa == 41580.0
+        assert storno.vehicle_number == "01KG700ST" and storno.source is original.source
+        assert storno.message == "гружёная машина"  # пробелы схлопнуты
+        assert storno.operator == "panel:igor"
+        assert original.weighed_at is not None and storno.weighed_at is not None
+        assert storno.weighed_at > original.weighed_at
+        assert len(storno.checksum) == 64
+        db_session.refresh(original)
+        assert original.storno_of is None and original.massa == 41580.0
+        assert repo.storno_by(db_session, original.id) is not None
+        assert repo.storno_by(db_session, storno.id) is None
+        assert self._registry(db_session) is None
+        audit = (
+            db_session.execute(select(AuditLog).where(AuditLog.action == "weighing_storno"))
+            .scalars()
+            .all()
+        )
+        assert len(audit) == 1
+        details = audit[0].details or {}
+        assert details["weighing_id"] == original.id and details["storno_id"] == storno.id
+        assert details["reason"] == "гружёная машина" and audit[0].actor == "panel:igor"
+
+    def test_storno_restores_previous_taring(self, db_session: Session) -> None:
+        """Было более раннее тарирование сцепки — после сторно оно снова текущее."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        older = self._seed_taring(db_session, scale.id, days_ago=5, massa=14200.0)
+        newer = self._seed_taring(db_session, scale.id, days_ago=1, massa=39860.0)
+        repo.rebuild_tare_registry_entry(db_session, "01KG700ST", None)
+        db_session.commit()
+        registry = self._registry(db_session)
+        assert registry is not None and registry.weighing_id == newer.id
+
+        repo.storno_weighing(db_session, newer, actor="panel:igor", reason="ошибка оператора")
+        registry = self._registry(db_session)
+        assert registry is not None
+        assert registry.weighing_id == older.id and registry.tare_value == 14200.0
+        # подбор тары по журналу тоже не видит аннулированное тарирование
+        latest = repo.latest_taring_as_of(db_session, "01KG700ST", None, datetime.now(UTC))
+        assert latest is not None and latest.id == older.id
+        active = repo.find_active_tare(db_session, "01KG700ST")
+        assert active is not None and active.tare_value == 14200.0
+
+    def test_storno_of_weighing_keeps_registry(self, db_session: Session) -> None:
+        """Сторно взвешивания реестр тары не трогает."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        taring = self._seed_taring(db_session, scale.id, days_ago=2, massa=14000.0)
+        repo.rebuild_tare_registry_entry(db_session, "01KG700ST", None)
+        weighing = _insert_weighing(
+            db_session, scale.id, created_at=datetime.now(UTC), vehicle="01KG700ST", massa=40000.0
+        )
+        repo.storno_weighing(db_session, weighing, actor="panel:igor", reason="дубль")
+        registry = self._registry(db_session)
+        assert registry is not None and registry.weighing_id == taring.id
+
+    def test_storno_rules(self, db_session: Session) -> None:
+        """Причина обязательна и ограничена; дважды, сторно и отказ — нельзя."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        original = self._seed_taring(db_session, scale.id, days_ago=1, massa=30000.0)
+        for bad in ("", "   ", "x" * 501):
+            with pytest.raises(repo.StornoError):
+                repo.storno_weighing(db_session, original, actor="panel:igor", reason=bad)
+        assert repo.storno_by(db_session, original.id) is None
+        storno = repo.storno_weighing(db_session, original, actor="panel:igor", reason="ошибка")
+        with pytest.raises(repo.StornoError, match="уже аннулирована"):
+            repo.storno_weighing(db_session, original, actor="panel:igor", reason="ещё раз")
+        with pytest.raises(repo.StornoError, match="запись-сторно"):
+            repo.storno_weighing(db_session, storno, actor="panel:igor", reason="сторно сторно")
+        refused = _insert_weighing(
+            db_session,
+            scale.id,
+            created_at=datetime.now(UTC),
+            vehicle="01KG700ST",
+            code=ErrorCode.ERR_VEHICLE_TIMEOUT,
+        )
+        with pytest.raises(repo.StornoError, match="состоявшуюся"):
+            repo.storno_weighing(db_session, refused, actor="panel:igor", reason="отказ")
+
+    def test_pair_excluded_from_today_counter_and_marked(self, db_session: Session) -> None:
+        """Счётчик дашборда не считает пару; annulled_ids и карточка видят сторно."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        now = datetime.now(UTC)
+        kept = _insert_weighing(db_session, scale.id, created_at=now, vehicle="01KG111AAA")
+        original = self._seed_taring(db_session, scale.id, days_ago=0, massa=37000.0)
+        assert queries.weighings_today(db_session) == (2, 1)
+        storno = repo.storno_weighing(db_session, original, actor="panel:igor", reason="гружёная")
+        assert queries.weighings_today(db_session) == (1, 0)
+        assert queries.annulled_ids(db_session, [kept.id, original.id, storno.id]) == {original.id}
+        assert queries.annulled_ids(db_session, []) == set()
+        card = queries.weighing_card(db_session, original.id)
+        assert card is not None and card.annulled_by is not None
+        assert card.annulled_by.id == storno.id and card.annulled_by.message == "гружёная"
+        storno_card = queries.weighing_card(db_session, storno.id)
+        assert storno_card is not None and storno_card.storno_of is not None
+        assert storno_card.storno_of.id == original.id and storno_card.annulled_by is None
+        # история тарирований: сторно-строки нет, аннулированное помечает маршрут
+        rows, total = queries.tare_history(db_session)
+        assert total == 1 and rows[0][0].id == original.id
+
+    def test_rejected_tare_on_card(self, db_session: Session) -> None:
+        """Взвешивание без нетто при действующей таре не меньше брутто:
+        карточка показывает ошибочное тарирование (rejected_tare)."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        heavy = self._seed_taring(db_session, scale.id, days_ago=1, massa=41580.0)
+        repo.rebuild_tare_registry_entry(db_session, "01KG700ST", None)
+        weighing = _insert_weighing(
+            db_session, scale.id, created_at=datetime.now(UTC), vehicle="01KG700ST", massa=39000.0
+        )
+        card = queries.weighing_card(db_session, weighing.id)
+        assert card is not None
+        assert card.rejected_tare is not None and card.rejected_tare.id == heavy.id
+        assert card.expired_tare is None
+
+
+class TestStornoUniqueIndex:
+    """Одно сторно на запись закреплено в БД (миграция c5d6e7f8a9b0)."""
+
+    def test_second_storno_row_rejected_by_index(self, db_session: Session) -> None:
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        now = datetime.now(UTC)
+        original = _insert_weighing(
+            db_session, scale.id, created_at=now, vehicle="01KG700ST", operation=Operation.TARING
+        )
+        _insert_weighing(
+            db_session, scale.id, created_at=now, vehicle="01KG700ST", storno_of=original.id
+        )
+        with pytest.raises(IntegrityError):
+            _insert_weighing(
+                db_session, scale.id, created_at=now, vehicle="01KG700ST", storno_of=original.id
+            )
+        db_session.rollback()
+        # и через repo — честный отказ, а не 500
+        db_session.expire_all()
+        reloaded = db_session.get(Weighing, original.id)
+        assert reloaded is not None
+        with pytest.raises(repo.StornoError, match="уже аннулирована"):
+            repo.storno_weighing(db_session, reloaded, actor="panel:igor", reason="ещё раз")
+
+
+class TestStornoRoutes:
+    """POST /panel/journal/{id}/storno — кнопка админа на странице записи."""
+
+    def _reason(self) -> str:
+        return "гружёная машина проведена как тарирование"
+
+    def test_admin_storno_flow(self, panel_env: PanelEnv) -> None:
+        _make_admin(panel_env)
+        _login(panel_env)
+        taring_id = panel_env.taring_id
+        page = panel_env.client.get(f"/panel/journal/{taring_id}")
+        assert "Сторнировать" in page.text and 'name="reason"' in page.text
+        with panel_env.factory() as session:
+            assert session.get(TareRegistry, ("01KG555TTT", "")) is not None
+
+        response = panel_env.client.post(
+            f"/panel/journal/{taring_id}/storno",
+            data={"reason": self._reason()},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        location = response.headers["location"]
+        assert location.startswith(f"/panel/journal/{taring_id}?note=")
+        followed = panel_env.client.get(location)
+        assert "аннулирована" in followed.text and "сторно №" in followed.text
+        assert "Аннулирована" in followed.text and self._reason() in followed.text
+        assert "Сторнировать" not in followed.text  # второй раз нельзя
+
+        with panel_env.factory() as session:
+            storno = repo.storno_by(session, taring_id)
+            assert storno is not None and storno.message == self._reason()
+            assert storno.operator == f"panel:{PANEL_LOGIN}"
+            assert session.get(TareRegistry, ("01KG555TTT", "")) is None
+            storno_id = storno.id
+        # страница записи-сторно: пилюля «Сторно», карточки печати нет
+        storno_page = panel_env.client.get(f"/panel/journal/{storno_id}")
+        assert "Сторно" in storno_page.text and "Печать карточки" not in storno_page.text
+        assert panel_env.client.get(f"/panel/journal/{storno_id}/card").status_code == 404
+        # карточка аннулированной ИСХОДНОЙ записи печатается с пометкой (замечание ревью)
+        card_page = panel_env.client.get(f"/panel/journal/{taring_id}/card")
+        assert card_page.status_code == 200
+        assert "АННУЛИРОВАНА сторно от" in card_page.text and self._reason() in card_page.text
+        journal = panel_env.client.get("/panel/journal")
+        assert "Аннулирована" in journal.text and ">Сторно<" in journal.text
+        # повтор — отказ с честной заметкой, второго сторно нет
+        again = panel_env.client.post(
+            f"/panel/journal/{taring_id}/storno",
+            data={"reason": "ещё раз"},
+            follow_redirects=False,
+        )
+        assert "уже" in unquote(again.headers["location"])
+        with panel_env.factory() as session:
+            assert (
+                session.execute(
+                    select(func.count())
+                    .select_from(Weighing)
+                    .where(Weighing.storno_of == taring_id)
+                ).scalar_one()
+                == 1
+            )
+        # CSV помечает пару
+        csv_text = panel_env.client.get("/panel/journal/export.csv").text
+        assert "аннулирована" in csv_text and f"Сторно записи №{taring_id}" in csv_text
+        # событие в АИС по записи-сторно не публикуется
+        resend = panel_env.client.post(
+            f"/panel/journal/{storno_id}/ais_event", follow_redirects=False
+        )
+        assert "не публикуется" in unquote(resend.headers["location"])
+
+    def test_reason_required(self, panel_env: PanelEnv) -> None:
+        _make_admin(panel_env)
+        _login(panel_env)
+        response = panel_env.client.post(
+            f"/panel/journal/{panel_env.taring_id}/storno",
+            data={"reason": "   "},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert "укажите причину" in unquote(response.headers["location"])
+        with panel_env.factory() as session:
+            assert repo.storno_by(session, panel_env.taring_id) is None
+
+    def test_dispatcher_cannot_storno(self, panel_env: PanelEnv) -> None:
+        _login(panel_env)
+        page = panel_env.client.get(f"/panel/journal/{panel_env.taring_id}")
+        assert "Сторнировать" not in page.text
+        response = panel_env.client.post(
+            f"/panel/journal/{panel_env.taring_id}/storno",
+            data={"reason": self._reason()},
+            follow_redirects=False,
+        )
+        assert response.status_code == 403
+
+    def test_storno_broadcasts_registry(self, panel_env: PanelEnv) -> None:
+        """После сторно тарирования снимок реестра уезжает подключённым агентам."""
+        _make_admin(panel_env)
+        _login(panel_env)
+
+        class Link:
+            def __init__(self) -> None:
+                self.messages: list[str] = []
+
+            async def send_text(self, data: str) -> None:
+                self.messages.append(data)
+
+        link = Link()
+        panel_env.hub.attach(panel_env.scale_id, link)
+        response = panel_env.client.post(
+            f"/panel/journal/{panel_env.taring_id}/storno",
+            data={"reason": self._reason()},
+            follow_redirects=False,
+        )
+        assert "разослан агентам (1)" in unquote(response.headers["location"])
+        registry_updates = [m for m in link.messages if '"tare_registry"' in m]
+        assert len(registry_updates) == 1
+        assert "01KG555TTT" not in registry_updates[0]
+
+
+class TestStornoRegistryRebuild:
+    """rebuild_tare_registry_entry / storno_weighing: ключ сцепки (прицеп),
+    сторно не текущего тарирования, откат по журналу через два сторно,
+    устаревший предшественник, поля и контрольная сумма записи-сторно."""
+
+    VEHICLE = "01KG700ST"
+
+    def _taring(
+        self,
+        session: Session,
+        scale_id: int,
+        *,
+        days_ago: float,
+        massa: float,
+        trailer: str | None = None,
+    ) -> Weighing:
+        return _insert_weighing(
+            session,
+            scale_id,
+            created_at=datetime.now(UTC) - timedelta(days=days_ago),
+            vehicle=self.VEHICLE,
+            trailer=trailer,
+            massa=massa,
+            operation=Operation.TARING,
+        )
+
+    def _registry(self, session: Session, trailer: str = "") -> TareRegistry | None:
+        return session.get(TareRegistry, (self.VEHICLE, trailer))
+
+    def _storno(self, session: Session, row: Weighing, reason: str = "гружёная машина") -> Weighing:
+        return repo.storno_weighing(session, row, actor="panel:igor", reason=reason)
+
+    def _latest(self, session: Session, trailer: str | None = None) -> Weighing | None:
+        return repo.latest_taring_as_of(
+            session, self.VEHICLE, trailer, datetime.now(UTC) + timedelta(hours=1)
+        )
+
+    def test_registry_key_with_trailer_and_solo_row_untouched(self, db_session: Session) -> None:
+        """Сцепка с прицепом живёт под ключом прицепа: её сторно убирает только
+        её строку, соло-строка той же головы цела; снимок агентам — без пары."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        solo = self._taring(db_session, scale.id, days_ago=3, massa=14000.0)
+        paired = self._taring(db_session, scale.id, days_ago=1, massa=16500.0, trailer="BD123AB")
+        repo.rebuild_tare_registry_entry(db_session, self.VEHICLE, None)
+        repo.rebuild_tare_registry_entry(db_session, self.VEHICLE, "BD123AB")
+        db_session.commit()
+        solo_row = self._registry(db_session)
+        pair_row = self._registry(db_session, "BD123AB")
+        assert solo_row is not None and solo_row.weighing_id == solo.id
+        assert pair_row is not None and pair_row.weighing_id == paired.id
+        assert pair_row.tare_value == 16500.0
+
+        self._storno(db_session, paired)
+        assert self._registry(db_session, "BD123AB") is None
+        solo_row = self._registry(db_session)
+        assert solo_row is not None and solo_row.weighing_id == solo.id  # цела
+        active_solo = repo.find_active_tare(db_session, self.VEHICLE)
+        assert active_solo is not None and active_solo.tare_value == 14000.0
+        assert repo.find_active_tare(db_session, self.VEHICLE, "BD123AB") is None
+        assert self._latest(db_session, "BD123AB") is None
+        latest_solo = self._latest(db_session)
+        assert latest_solo is not None and latest_solo.id == solo.id
+        snapshot = repo.load_tare_registry(db_session)
+        assert [(r.vehicle_number, r.trailer_number, r.tare_value) for r in snapshot] == [
+            (self.VEHICLE, None, 14000.0)
+        ]
+
+    def test_empty_string_trailer_is_solo_key(self, db_session: Session) -> None:
+        """Прицеп "" в журнале (не NULL) — та же соло-сцепка: пересборка ставит
+        строку под ключом "", подбор по журналу её видит, сторно её убирает."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        row = self._taring(db_session, scale.id, days_ago=1, massa=14000.0, trailer="")
+        repo.rebuild_tare_registry_entry(db_session, self.VEHICLE, None)
+        db_session.commit()
+        registry = self._registry(db_session)
+        assert registry is not None and registry.weighing_id == row.id
+        latest = self._latest(db_session)
+        assert latest is not None and latest.id == row.id
+
+        self._storno(db_session, row)
+        assert self._registry(db_session) is None
+        assert self._latest(db_session) is None
+
+    def test_storno_of_superseded_taring_keeps_registry(self, db_session: Session) -> None:
+        """Сторнировано тарирование, уже заменённое более новым: строка реестра,
+        подбор по журналу и рассылаемый снимок не меняются."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        older = self._taring(db_session, scale.id, days_ago=5, massa=39860.0)
+        newer = self._taring(db_session, scale.id, days_ago=1, massa=14200.0)
+        repo.rebuild_tare_registry_entry(db_session, self.VEHICLE, None)
+        db_session.commit()
+
+        self._storno(db_session, older)
+        registry = self._registry(db_session)
+        assert registry is not None
+        assert registry.weighing_id == newer.id and registry.tare_value == 14200.0
+        assert registry.tared_at == newer.weighed_at
+        latest = self._latest(db_session)
+        assert latest is not None and latest.id == newer.id
+        active = repo.find_active_tare(db_session, self.VEHICLE)
+        assert active is not None and active.tare_value == 14200.0
+        # момент между тарированиями: аннулированное старое не «всплывает»
+        between = repo.latest_taring_as_of(
+            db_session, self.VEHICLE, None, datetime.now(UTC) - timedelta(days=3)
+        )
+        assert between is None
+        assert [r.tare_value for r in repo.load_tare_registry(db_session)] == [14200.0]
+
+    def test_two_stornos_roll_back_to_third_then_to_nothing(self, db_session: Session) -> None:
+        """Три тарирования; сторно двух последних по очереди — текущим становится
+        первое; сторно первого — сцепка без тары. Записи-сторно (тоже TARING/OK)
+        тарой не становятся ни в реестре, ни в подборе по журналу."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        first = self._taring(db_session, scale.id, days_ago=10, massa=14000.0)
+        second = self._taring(db_session, scale.id, days_ago=5, massa=39000.0)
+        third = self._taring(db_session, scale.id, days_ago=1, massa=41000.0)
+        repo.rebuild_tare_registry_entry(db_session, self.VEHICLE, None)
+        db_session.commit()
+        registry = self._registry(db_session)
+        assert registry is not None and registry.weighing_id == third.id
+
+        storno_third = self._storno(db_session, third)
+        registry = self._registry(db_session)
+        assert registry is not None
+        assert registry.weighing_id == second.id and registry.tare_value == 39000.0
+        latest = self._latest(db_session)
+        assert latest is not None and latest.id == second.id and latest.id != storno_third.id
+
+        storno_second = self._storno(db_session, second)
+        registry = self._registry(db_session)
+        assert registry is not None
+        assert registry.weighing_id == first.id and registry.tare_value == 14000.0
+        latest = self._latest(db_session)
+        assert latest is not None and latest.id == first.id
+        assert latest.id not in (storno_third.id, storno_second.id)
+        active = repo.find_active_tare(db_session, self.VEHICLE)
+        assert active is not None and active.tare_value == 14000.0
+
+        self._storno(db_session, first)
+        assert self._registry(db_session) is None
+        assert self._latest(db_session) is None
+        assert repo.find_active_tare(db_session, self.VEHICLE) is None
+        assert repo.load_tare_registry(db_session) == []
+        annulled = set(
+            db_session.execute(
+                select(Weighing.storno_of).where(Weighing.storno_of.is_not(None))
+            ).scalars()
+        )
+        assert annulled == {first.id, second.id, third.id}
+
+    def test_storno_restores_stale_previous_taring(self, db_session: Session) -> None:
+        """Предшественник старше 3 месяцев возвращается в реестр (снимок агентам
+        с датой — для примечания «устарело»), но действующей тарой не считается;
+        подбор по журналу срок не проверяет — статус expired ставит документ."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        stale = self._taring(db_session, scale.id, days_ago=120, massa=14000.0)
+        newer = self._taring(db_session, scale.id, days_ago=1, massa=41000.0)
+        repo.rebuild_tare_registry_entry(db_session, self.VEHICLE, None)
+        db_session.commit()
+
+        self._storno(db_session, newer)
+        registry = self._registry(db_session)
+        assert registry is not None
+        assert registry.weighing_id == stale.id and registry.tared_at == stale.weighed_at
+        assert repo.find_active_tare(db_session, self.VEHICLE) is None
+        latest = self._latest(db_session)
+        assert latest is not None and latest.id == stale.id
+        snapshot = repo.load_tare_registry(db_session)
+        assert len(snapshot) == 1 and snapshot[0].tared_at == stale.weighed_at
+
+    def test_storno_row_fields_and_checksum(self, db_session: Session) -> None:
+        """Запись-сторно: контрольная сумма по формуле журнала (без фото), свой
+        uuid, weighed_at — переданный момент, причина ровно в лимит длины
+        принимается, снимков и полей тары нет."""
+        _, scale = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
+        original = self._taring(db_session, scale.id, days_ago=1, massa=41580.0)
+        moment = datetime(2026, 9, 4, 10, 0, tzinfo=UTC)
+        reason = "x" * repo.STORNO_REASON_MAX
+
+        storno = repo.storno_weighing(
+            db_session, original, actor="panel:igor", reason=reason, now=moment
+        )
+        assert storno.uuid != original.uuid
+        assert storno.weighed_at == moment
+        assert storno.message == reason
+        assert storno.code is ErrorCode.OK and storno.stable is True
+        assert storno.checksum == weighing_checksum(
+            uuid=storno.uuid,
+            operation=original.operation.value,
+            code=ErrorCode.OK.value,
+            massa=41580.0,
+            weighed_at=moment,
+            vehicle_number=self.VEHICLE,
+            source=original.source.value,
+            photo_sha256s=[],
+        )
+        assert storno.tare_value is None and storno.netto is None
+        assert storno.tare_weighing_id is None and storno.request_payload is None
+        photos = db_session.execute(
+            select(func.count())
+            .select_from(WeighingPhoto)
+            .where(WeighingPhoto.weighing_id == storno.id)
+        ).scalar_one()
+        assert photos == 0
+
+
+class TestImplausibleTareFlag:
+    """repo._flag_implausible_tare при сохранении записи: событие
+    tare_implausible — только у взвешиваний, чья тара сцепки не меньше брутто
+    (либо старый агент записал нетто ≤ 0)."""
+
+    def _events(self, session: Session) -> list[MonitoringEvent]:
+        return list(
+            session.execute(
+                select(MonitoringEvent)
+                .where(MonitoringEvent.kind == "tare_implausible")
+                .order_by(MonitoringEvent.id)
+            ).scalars()
+        )
+
+    def _scale(self, session: Session) -> Scale:
+        _, scale = _add_site_scale(session, "a-site", "СВХ «А»", "Весы 1")
+        return scale
+
+    def test_flag_names_coupling_and_is_idempotent(self, db_session: Session) -> None:
+        """Тяжёлая тара пары голова+прицеп: warning с обоими номерами и массами,
+        в одной транзакции с записью; повтор досылки той же записи второго
+        события не даёт."""
+        scale = self._scale(db_session)
+        repo.save_weighing_record(
+            db_session, scale.id, _make_taring(massa=50000.0, trailer_number="BD123AB")
+        )
+        record = _make_record(massa=43310.0, trailer_number="BD123AB")
+        assert repo.save_weighing_record(db_session, scale.id, record) is True
+        events = self._events(db_session)
+        assert len(events) == 1
+        assert events[0].severity is MonitoringSeverity.WARNING
+        assert events[0].scale_id == scale.id
+        assert "01KG777AAA/BD123AB" in events[0].message
+        assert "50000" in events[0].message and "43310" in events[0].message
+        assert "сторнируйте" in events[0].message
+
+        assert repo.save_weighing_record(db_session, scale.id, record) is False
+        assert len(self._events(db_session)) == 1
+
+    def test_taring_never_flagged(self, db_session: Session) -> None:
+        """Тарирования (даже тяжёлые, одно поверх другого) события не дают —
+        лимит держит агент, отказ по нему — событие tare_rejected из API."""
+        scale = self._scale(db_session)
+        repo.save_weighing_record(db_session, scale.id, _make_taring(massa=50000.0))
+        repo.save_weighing_record(db_session, scale.id, _make_taring(massa=60000.0))
+        assert self._events(db_session) == []
+
+    def test_weighing_with_correct_tare_not_flagged(self, db_session: Session) -> None:
+        """Подставленная тара меньше брутто — нетто положительное, хотя бы на
+        дискрету: события нет."""
+        scale = self._scale(db_session)
+        taring = _make_taring(massa=7500.0)
+        repo.save_weighing_record(db_session, scale.id, taring)
+        repo.save_weighing_record(
+            db_session,
+            scale.id,
+            _make_record(
+                massa=15000.0, tare_value=7500.0, tare_weighing_uuid=taring.uuid, netto=7500.0
+            ),
+        )
+        repo.save_weighing_record(
+            db_session,
+            scale.id,
+            _make_record(
+                massa=7510.0, tare_value=7500.0, tare_weighing_uuid=taring.uuid, netto=10.0
+            ),
+        )
+        assert self._events(db_session) == []
+
+    def test_zero_netto_flagged(self, db_session: Session) -> None:
+        """Нетто ровно 0 (старый агент подставил тару, равную брутто) — граница
+        «≤ 0» включительно: событие с нетто и сторно-подсказкой."""
+        scale = self._scale(db_session)
+        taring = _make_taring(massa=7500.0)
+        repo.save_weighing_record(db_session, scale.id, taring)
+        repo.save_weighing_record(
+            db_session,
+            scale.id,
+            _make_record(
+                massa=7500.0, tare_value=7500.0, tare_weighing_uuid=taring.uuid, netto=0.0
+            ),
+        )
+        events = self._events(db_session)
+        assert len(events) == 1 and "нетто 0" in events[0].message
+
+    def test_weighing_without_vehicle_not_flagged(self, db_session: Session) -> None:
+        """Без номера ТС тару искать не по чему — события нет."""
+        scale = self._scale(db_session)
+        repo.save_weighing_record(db_session, scale.id, _make_taring(massa=50000.0))
+        repo.save_weighing_record(db_session, scale.id, _make_record(vehicle_number=None))
+        assert self._events(db_session) == []
+
+    def test_other_coupling_not_flagged(self, db_session: Session) -> None:
+        """Тяжёлое соло-тарирование той же головы к взвешиванию с прицепом
+        не относится (сцепка другая) — события нет."""
+        scale = self._scale(db_session)
+        repo.save_weighing_record(db_session, scale.id, _make_taring(massa=50000.0))
+        repo.save_weighing_record(
+            db_session, scale.id, _make_record(massa=15000.0, trailer_number="BD123AB")
+        )
+        assert self._events(db_session) == []
+
+    def test_stale_heavy_tare_not_flagged(self, db_session: Session) -> None:
+        """Тяжёлое тарирование старше 3 месяцев к моменту взвешивания не
+        действует (правило №4) — события нет."""
+        scale = self._scale(db_session)
+        repo.save_weighing_record(
+            db_session,
+            scale.id,
+            _make_taring(massa=50000.0, weighed_at=datetime.now(UTC) - timedelta(days=120)),
+        )
+        repo.save_weighing_record(db_session, scale.id, _make_record(massa=15000.0))
+        assert self._events(db_session) == []
+
+    def test_annulled_heavy_tare_not_flagged(self, db_session: Session) -> None:
+        """Тяжёлое тарирование уже сторнировано — для системы его не было."""
+        scale = self._scale(db_session)
+        taring = _make_taring(massa=50000.0)
+        repo.save_weighing_record(db_session, scale.id, taring)
+        row = db_session.execute(select(Weighing).where(Weighing.uuid == taring.uuid)).scalar_one()
+        repo.storno_weighing(db_session, row, actor="panel:igor", reason="гружёная машина")
+        repo.save_weighing_record(db_session, scale.id, _make_record(massa=15000.0))
+        assert self._events(db_session) == []
+
+    def test_refusal_not_saved_and_not_flagged(self, db_session: Session) -> None:
+        """Отказ (code != OK) не сохраняется и события не даёт, даже при
+        тяжёлой действующей таре."""
+        scale = self._scale(db_session)
+        repo.save_weighing_record(db_session, scale.id, _make_taring(massa=50000.0))
+        refusal = _make_record(code=ErrorCode.ERR_CAMERA, massa=None, weighed_at=None)
+        assert repo.save_weighing_record(db_session, scale.id, refusal) is False
+        assert self._events(db_session) == []

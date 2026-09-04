@@ -603,6 +603,7 @@ def build_runtime(
         cameras=config.camera_configs(),
         photos_dir=config.storage.photos_dir,
         vehicle_threshold_kg=config.cycle.vehicle_threshold_kg,
+        max_tare_kg=config.cycle.max_tare_kg,
         ffmpeg_path=config.ffmpeg_path,
         streams=streams,
         now_utc=center_clock.now,

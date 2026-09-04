@@ -114,6 +114,15 @@ class TestConfigModel:
         assert cycle.zero_threshold_kg == 200.0
         assert cycle.stable_duration_s == 5.0
         assert cycle.vehicle_timeout_s == 90.0
+        # лимит тары (решение Игоря 04.09.2026): 25 т по умолчанию
+        assert cycle.max_tare_kg == 25000.0
+
+    def test_max_tare_from_config(self) -> None:
+        """[cycle] max_tare_kg переопределяет лимит; 0 — лимит выключен."""
+        config = AgentConfig.model_validate(config_data(cycle={"max_tare_kg": 0}))
+        assert config.cycle.to_cycle_config().max_tare_kg == 0.0
+        config = AgentConfig.model_validate(config_data(cycle={"max_tare_kg": 30000}))
+        assert config.cycle.to_cycle_config().max_tare_kg == 30000.0
 
 
 class TestPhotoRetentionOption:

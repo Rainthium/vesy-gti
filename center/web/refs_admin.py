@@ -36,6 +36,7 @@ from center.db.models import (
 )
 from shared.enums import CameraRole
 from shared.messages import CycleSettings
+from shared.tare import DEFAULT_MAX_TARE_KG
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ DEFAULT_CYCLE = CycleSettings(
     stable_duration_s=5.0,
     stable_timeout_s=30.0,
     no_data_timeout_s=5.0,
+    max_tare_kg=DEFAULT_MAX_TARE_KG,
 )
 
 # код объекта попадает в пути фото и конфиги — только слаг
@@ -316,7 +318,8 @@ def save_scale_settings(
     if scale is None:
         return "весы не найдены"
     values = cycle.model_dump()
-    if any(v <= 0 for v in values.values()):
+    # лимит тары — единственный параметр цикла, где 0 законен (лимит выключен)
+    if any(v <= 0 for key, v in values.items() if key != "max_tare_kg"):
         return "все параметры цикла должны быть больше нуля"
     if cycle.vehicle_threshold_kg <= cycle.zero_threshold_kg:
         return "порог заезда должен быть больше порога пустых весов"

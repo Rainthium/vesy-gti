@@ -49,6 +49,12 @@ from agent.weighing.shots import store_shots
 from agent.weighing.watcher import ScaleWatcher, WatcherPhase
 from shared.enums import ErrorCode, Operation, ScaleStatus, WeighingSource
 from shared.messages import WeighingRecord, WeighRequest, WeighResult
+from shared.tare import (
+    implausible_tare_message,
+    tare_below_gross,
+    tare_too_heavy,
+    tare_too_heavy_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +189,17 @@ class AutoOperationRunner:
                 "загоните машину на платформу и повторите команду",
             )
 
+        limit = self._config.cycle.max_tare_kg
+        if request.operation is Operation.TARING and tare_too_heavy(fixation.weight_kg, limit):
+            # решение Игоря 04.09.2026 (Кокчо-Коз: 23 гружёные машины прошли
+            # как тарирование): тяжелее лимита — не тара; снимков и записи нет,
+            # код и текст уходят оператору АИС
+            return self._refusal(
+                request,
+                record_uuid,
+                ErrorCode.ERR_TARE_TOO_HEAVY,
+                tare_too_heavy_message(fixation.weight_kg, limit),
+            )
         logger.info(
             "операция %s по готовой фиксации: %.0f кг", request.request_id, fixation.weight_kg
         )
@@ -230,11 +247,19 @@ class AutoOperationRunner:
         # опрашивается; без такой команды (старый центр) — реплика, как раньше
         tare = None
         netto = None
+        message = None
         if request.operation is Operation.WEIGHING and vehicle is not None:
             if request.tare_resolved:
                 tare = request.tare
             else:
                 tare = self._storage.find_active_tare(vehicle, weighed_at, trailer)
+            if tare is not None and not tare_below_gross(tare.tare_value, weight_kg):
+                # тара не меньше брутто — тарирование сцепки ошибочно (гружёная
+                # машина): не подставляем, нетто не считаем; причина — в записи
+                # (решение Игоря 04.09.2026)
+                message = implausible_tare_message(tare.tare_value, tare.tared_at, weight_kg)
+                logger.warning("операция %s: %s", request.request_id, message)
+                tare = None
             if tare is not None:
                 netto = weight_kg - tare.tare_value
 
@@ -254,7 +279,7 @@ class AutoOperationRunner:
             # ФИО оператора весового контроля из запроса АИС (контракт v1) —
             # печатается на весовой карточке
             operator=(request.operator or "").strip() or None,
-            message=None,
+            message=message,
             photos=[photo_meta(p) for p in photos],
             # номер документа АИС (контракт v2) едет с записью любым путём —
             # weigh_result или offline_sync после разрыва: центр закрепит его

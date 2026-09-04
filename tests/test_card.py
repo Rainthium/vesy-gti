@@ -13,10 +13,12 @@ from shared.card import (
     fmt_dt,
     fmt_kg,
     logo_data_uri,
+    netto_note,
     verification_text,
 )
 from shared.enums import Operation
 from shared.messages import VerificationInfo
+from shared.tare import three_months_before
 
 WEIGHED_AT = datetime(2026, 8, 13, 4, 23, 1, tzinfo=UTC)  # 10:23:01 по Бишкеку
 
@@ -243,3 +245,127 @@ class TestNettoNote:
         )
         note = card["netto_note"]
         assert isinstance(note, str) and "05.03.2026 14:31:00" in note
+
+
+class TestImplausibleTareNote:
+    """Примечание, когда тара сцепки не меньше брутто (решение Игоря 04.09.2026):
+    агент 0.4.29 такую тару не подставляет, карта объясняет прочерк."""
+
+    def test_tare_not_below_gross_explained(self) -> None:
+        card = _no_netto_card(
+            latest_tared_at=datetime(2026, 8, 1, 6, 0, tzinfo=UTC),  # 12:00 по Бишкеку
+            latest_tare_value=50000.0,  # брутто карточки — 42 850
+        )
+        assert card["netto_note"] == (
+            "Нетто не рассчитано: тара сцепки 50 000 кг (тарирование от 01.08.2026 12:00:00) "
+            "не меньше брутто 42 850 кг — тарирование ошибочно (гружёная машина), "
+            "в расчёт не подставлено."
+        )
+
+    def test_equal_masses_are_implausible_too(self) -> None:
+        card = _no_netto_card(
+            latest_tared_at=datetime(2026, 8, 1, 6, 0, tzinfo=UTC), latest_tare_value=42850.0
+        )
+        note = card["netto_note"]
+        assert isinstance(note, str) and "не меньше брутто" in note
+
+    def test_expired_wins_over_implausible(self) -> None:
+        """Устаревшая тяжёлая тара — примечание про срок, как раньше."""
+        card = _no_netto_card(
+            latest_tared_at=datetime(2026, 3, 5, 8, 31, tzinfo=UTC), latest_tare_value=50000.0
+        )
+        note = card["netto_note"]
+        assert isinstance(note, str) and "устарело" in note
+
+    def test_later_heavy_taring_ignored(self) -> None:
+        """Тяжёлое тарирование ПОСЛЕ записи к ней не относится."""
+        card = _no_netto_card(
+            latest_tared_at=WEIGHED_AT + timedelta(days=1), latest_tare_value=50000.0
+        )
+        assert card["netto_note"] == (
+            "Нетто не рассчитано: действующего тарирования сцепки не было."
+        )
+
+    # --- границы: срок, момент, дискрета, пустые поля ---
+
+    def test_boundary_three_months_heavy_is_implausible_not_expired(self) -> None:
+        """Ровно 3 месяца — тара ещё действует (граница правила №4 нестрогая),
+        поэтому тяжёлая тара даёт «не меньше брутто», а не «устарело»."""
+        boundary = three_months_before(WEIGHED_AT)
+        card = _no_netto_card(latest_tared_at=boundary, latest_tare_value=50000.0)
+        note = card["netto_note"]
+        assert isinstance(note, str)
+        assert "не меньше брутто" in note and "устарело" not in note
+
+    def test_taring_at_the_same_moment_counts_later_does_not(self) -> None:
+        """Тарирование в тот же момент, что взвешивание (граница «не позже»),
+        учитывается; микросекундой позже — уже чужое, примечание общее."""
+        same = _no_netto_card(latest_tared_at=WEIGHED_AT, latest_tare_value=42850.0)
+        note = same["netto_note"]
+        assert isinstance(note, str) and "не меньше брутто" in note
+        later = _no_netto_card(
+            latest_tared_at=WEIGHED_AT + timedelta(microseconds=1), latest_tare_value=42850.0
+        )
+        assert later["netto_note"] == (
+            "Нетто не рассчитано: действующего тарирования сцепки не было."
+        )
+
+    def test_one_discrete_below_gross_is_plausible(self) -> None:
+        """Тара на дискрету (10 кг) меньше брутто правдоподобна (граница строгая:
+        тара < брутто) — нетто нет по иной причине, примечание общее."""
+        card = _no_netto_card(
+            latest_tared_at=datetime(2026, 8, 1, 6, 0, tzinfo=UTC), latest_tare_value=42840.0
+        )
+        assert card["netto_note"] == (
+            "Нетто не рассчитано: действующего тарирования сцепки не было."
+        )
+
+    def test_registry_row_without_mass_falls_back(self) -> None:
+        """Строка реестра без массы тары — сравнивать не с чем: общее
+        примечание, без падения."""
+        card = _no_netto_card(
+            latest_tared_at=datetime(2026, 8, 1, 6, 0, tzinfo=UTC), latest_tare_value=None
+        )
+        assert card["netto_note"] == (
+            "Нетто не рассчитано: действующего тарирования сцепки не было."
+        )
+
+    def test_naive_dates_compared_as_utc(self) -> None:
+        """Naive-даты обеих сторон (SQLite агента) трактуются как UTC: сравнение
+        не падает, время тарирования в тексте — бишкекское."""
+        card = _no_netto_card(
+            weighed_at=WEIGHED_AT.replace(tzinfo=None),
+            latest_tared_at=datetime(2026, 8, 1, 6, 0),
+            latest_tare_value=50000.0,
+        )
+        note = card["netto_note"]
+        assert isinstance(note, str)
+        assert "не меньше брутто" in note and "01.08.2026 12:00:00" in note
+
+    def test_netto_note_without_massa_keeps_old_behaviour(self) -> None:
+        """Вызов netto_note без massa (экраны, не передающие брутто): проверка
+        правдоподобия пропускается — общее примечание, а не ложное «не меньше»."""
+        note = netto_note(
+            operation=Operation.WEIGHING,
+            code_ok=True,
+            weighed_at=WEIGHED_AT,
+            vehicle_number="P18035",
+            netto=None,
+            latest_tared_at=datetime(2026, 8, 1, 6, 0, tzinfo=UTC),
+            latest_tare_value=50000.0,
+        )
+        assert note == "Нетто не рассчитано: действующего тарирования сцепки не было."
+
+    def test_taring_card_never_notes_even_with_heavy_registry_row(self) -> None:
+        """У карточки тарирования примечания нет: massa там — масса тары,
+        сравнивать её со строкой реестра бессмысленно."""
+        card = _weighing_card(
+            operation=Operation.TARING,
+            massa=50000.0,
+            tare_value=None,
+            netto=None,
+            tared_at=None,
+            latest_tared_at=datetime(2026, 8, 1, 6, 0, tzinfo=UTC),
+            latest_tare_value=42850.0,
+        )
+        assert card["netto_note"] is None

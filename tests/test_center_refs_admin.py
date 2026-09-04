@@ -1733,6 +1733,8 @@ class TestScaleSettingsRoutes:
                 "stable_duration_s": 5.0,
                 "stable_timeout_s": 30.0,
                 "no_data_timeout_s": 5.0,
+                # форма без поля лимита → умолчание 25 т (04.09.2026)
+                "max_tare_kg": 25000.0,
             }
             assert scale.port_cfg == {"port": "COM11", "baudrate": 19200}
         # сохранённые значения видны на странице при следующем GET
@@ -2036,3 +2038,68 @@ class TestScaleSettingsManualAllowed:
             )
             session.refresh(scale)
             assert scale.manual_allowed is True
+
+
+class TestMaxTareSetting:
+    """Лимит массы тары в настройках весов (решение Игоря 04.09.2026)."""
+
+    def test_default_cycle_has_limit(self) -> None:
+        assert refs_admin.DEFAULT_CYCLE.max_tare_kg == 25000.0
+
+    def test_zero_limit_accepted_and_saved(self, db_session: Session) -> None:
+        """0 — лимит выключен: единственный параметр цикла, где ноль законен."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        cycle = _make_cycle(max_tare_kg=0.0)
+        error = refs_admin.save_scale_settings(
+            db_session, scale.id, cycle=cycle, port="", baudrate=None
+        )
+        assert error is None
+        db_session.refresh(scale)
+        assert scale.thresholds is not None and scale.thresholds["max_tare_kg"] == 0.0
+        # снимок настроек несёт лимит агенту
+        settings = repo.load_scale_settings(db_session, scale.id)
+        assert settings is not None and settings.cycle is not None
+        assert settings.cycle.max_tare_kg == 0.0
+
+    def test_negative_limit_rejected_by_route(self, refs_env: RefsEnv) -> None:
+        """Отрицательный лимит ловит маршрут ДО сборки модели (иначе 500)."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        form = _settings_form()
+        form["max_tare_kg"] = "-5"
+        response = refs_env.client.post(
+            f"/panel/refs/scales/{refs_env.scale_id}/settings", data=form, follow_redirects=False
+        )
+        assert response.status_code == 303
+        assert "лимит" in _settings_note(response, refs_env.scale_id)
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None and scale.thresholds is None
+
+    def test_limit_roundtrip_via_route(self, refs_env: RefsEnv) -> None:
+        """Лимит с формы сохраняется в thresholds и виден на GET."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        form = _settings_form()
+        form["max_tare_kg"] = "30000"
+        response = refs_env.client.post(
+            f"/panel/refs/scales/{refs_env.scale_id}/settings", data=form, follow_redirects=False
+        )
+        assert response.status_code == 303
+        with refs_env.factory() as session:
+            scale = session.get(Scale, refs_env.scale_id)
+            assert scale is not None and scale.thresholds is not None
+            assert scale.thresholds["max_tare_kg"] == 30000.0
+        page = refs_env.client.get(f"/panel/refs/scales/{refs_env.scale_id}/settings")
+        assert 'name="max_tare_kg"' in page.text and "30000" in page.text
+
+    def test_old_thresholds_without_field_get_default(self, db_session: Session) -> None:
+        """Настройки, сохранённые до 0.4.29 (без ключа), читаются с лимитом 25 т."""
+        site = _add_site(db_session)
+        scale = _add_scale(db_session, site.id)
+        old = _make_cycle().model_dump()
+        old.pop("max_tare_kg")
+        scale.thresholds = old
+        db_session.commit()
+        settings = repo.load_scale_settings(db_session, scale.id)
+        assert settings is not None and settings.cycle is not None
+        assert settings.cycle.max_tare_kg == 25000.0

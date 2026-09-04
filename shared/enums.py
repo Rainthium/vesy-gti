@@ -18,6 +18,9 @@ class ErrorCode(StrEnum):
     ERR_UNSTABLE = "ERR_UNSTABLE"  # вес не стабилизировался за таймаут
     ERR_CAMERA = "ERR_CAMERA"  # камера недоступна — операция не проведена (реш. 09.08.2026)
     ERR_BUSY = "ERR_BUSY"  # на этих весах уже выполняется операция
+    # тарирование гружёной машины: масса больше лимита тары весов (решение
+    # Игоря 04.09.2026, Кокчо-Коз) — операция не проводится, записи нет
+    ERR_TARE_TOO_HEAVY = "ERR_TARE_TOO_HEAVY"
     ERR_INTERNAL = "ERR_INTERNAL"  # прочее, детали в поле message
 
 

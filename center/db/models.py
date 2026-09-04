@@ -280,6 +280,13 @@ class Weighing(Base):
     __table_args__ = (
         Index("ix_weighings_scale_created", "scale_id", "created_at"),
         Index("ix_weighings_vehicle", "vehicle_number"),
+        # одно сторно на запись (миграция c5d6e7f8a9b0, 04.09.2026)
+        Index(
+            "uq_weighings_storno_of",
+            "storno_of",
+            unique=True,
+            postgresql_where=text("storno_of IS NOT NULL"),
+        ),
     )
 
 

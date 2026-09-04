@@ -1118,3 +1118,8 @@ table.report-table td.avail-warn { color: #b5780f; font-weight: 700; }
   .print-page table.journal td, .print-page table.journal th { padding: 6px 10px; font-size: 11.5px; }
   .print-page .kpi-v { font-size: 22px; }
 }
+
+/* сторно записи (04.09.2026): поле причины + кнопка в подвале карточки записи */
+.storno-form { display: flex; gap: 8px; align-items: center; flex: 1; }
+.storno-form input { flex: 1; min-width: 240px; padding: 8px 10px; border: 1px solid #d8dde3; border-radius: 8px; font: inherit; }
+.btn-storno { color: #c2333e; border-color: #c2333e; }

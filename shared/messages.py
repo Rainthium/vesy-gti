@@ -21,6 +21,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, TypeAdapter
 
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
+from shared.tare import DEFAULT_MAX_TARE_KG
 
 PROTOCOL_VERSION = 1
 
@@ -335,6 +336,11 @@ class CycleSettings(BaseModel):
     stable_duration_s: float
     stable_timeout_s: float
     no_data_timeout_s: float
+    # лимит массы тарирования, кг (агент 0.4.29; решение Игоря 04.09.2026):
+    # тяжелее — гружёная машина, тарирование отклоняется кодом
+    # ERR_TARE_TOO_HEAVY; 0 — лимит выключен. Умолчание — для снимков
+    # настроек, сохранённых до появления поля; агенты до 0.4.29 поле отбрасывают
+    max_tare_kg: float = Field(default=DEFAULT_MAX_TARE_KG, ge=0)
 
 
 class CameraSettings(BaseModel):

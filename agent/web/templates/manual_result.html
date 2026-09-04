@@ -27,7 +27,11 @@
         {% if preview.tare %}
         <div class="netto-box"><span>Нетто</span><b>{{ preview.record.netto | fmt_kg }} <small>kg</small></b></div>
         {% endif %}
-        {% if preview.no_valid_tare %}
+        {% if preview.rejected_tare %}
+        <div class="warn"><b>Тара не подставлена — тарирование сцепки ошибочно</b>
+          <p>Последнее тарирование сцепки — {{ preview.rejected_tare.tared_at | fmt_date }}, тара {{ preview.rejected_tare.tare_value | fmt_kg }} kg — не меньше брутто: так тарируют гружёную машину.
+            Нетто не рассчитано; протарируйте сцепку пустой — тогда тара подставится.</p></div>
+        {% elif preview.no_valid_tare %}
         <div class="warn"><b>Нет тарирования за последние 3 месяца</b>
           <p>{% if preview.expired_tare %}Последнее тарирование сцепки — {{ preview.expired_tare.tared_at | fmt_date }}, тара {{ preview.expired_tare.tare_value | fmt_kg }} kg — устарело.
             {% endif %}Нетто не рассчитано; запись сохранена с признаком «нет тары»;

@@ -32,6 +32,7 @@ from center.db import repo
 from center.db.models import AuditLog, Scale, Weighing, WeighingPhoto
 from shared.enums import CameraRole, ErrorCode, Operation
 from shared.messages import WeighRequest, WeighResult
+from shared.tare import tare_below_gross
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,14 @@ def create_api_v1_router(
                 vehicle = record.vehicle_number
                 trailer = record.trailer_number
                 tare = _db(lambda s: repo.find_active_tare(s, vehicle, trailer))
-                if tare is not None and record.massa is not None:
+                # тара не меньше брутто не подставляется (decisions 04.09.2026) —
+                # та же проверка, что у агента 0.4.29; иначе АИС получила бы
+                # отрицательное нетто, которого нет в журнале
+                if (
+                    tare is not None
+                    and record.massa is not None
+                    and tare_below_gross(tare.tare_value, record.massa)
+                ):
                     tare_value = tare.tare_value
                     netto = record.massa - tare.tare_value
                     tare_datetime = bishkek_iso(tare.tared_at)
@@ -214,6 +222,15 @@ def create_api_v1_router(
         # любая ошибка цикла — только {code, message}; ERR_CAMERA тоже:
         # без снимков обеих камер операция не проводится (решение 09.08.2026)
         if code is not ErrorCode.OK:
+            if code is ErrorCode.ERR_TARE_TOO_HEAVY:
+                # гружёная машина как тарирование (04.09.2026) — событие мониторинга
+                alert = (
+                    f"тарирование отклонено — {result.record.message or code.value} "
+                    f"(ТС {vehicle_number}" + (f"/{trailer_number}" if trailer_number else "") + ")"
+                )
+                await asyncio.to_thread(
+                    _db, lambda s: repo.record_scale_alert(s, scale.id, alert, kind="tare_rejected")
+                )
             return _error(code, result.record.message or code.value)
 
         response = await asyncio.to_thread(_build_success_response, request, result)

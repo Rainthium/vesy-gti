@@ -190,6 +190,7 @@ class SettingsManager:
             self._watcher.reconfigure(cycle)
             self._runner.set_cycle(cycle)
             self._manual.set_vehicle_threshold(cycle.vehicle_threshold_kg)
+            self._manual.set_max_tare(cycle.max_tare_kg)
             logger.info("настройки центра: параметры цикла применены")
 
         if settings.cameras:  # пустой список — как «не задано» (см. merge)

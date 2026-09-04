@@ -83,7 +83,7 @@ ALL_TABLES = (
     "weighing_events",
 )
 
-HEAD_REVISION = "b4c5d6e7f8a9"  # manual_allowed весов — ручной режим при связи (03.09.2026)
+HEAD_REVISION = "c5d6e7f8a9b0"  # одно сторно на запись — уникальный индекс storno_of (04.09.2026)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64

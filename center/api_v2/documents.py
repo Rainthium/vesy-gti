@@ -5,7 +5,8 @@
 журнала (запись неизменяема — правило №2), центр ничего не досчитывает
 поверх неё. Позже заполняются только сопутствующие поля: доступность
 файлов фото, номер документа АИС у офлайн-операций (обратная связь) и,
-как следствие, ``tare.ais_ref``.
+как следствие, ``tare.ais_ref``; с 04.09.2026 — ``storno`` (запись
+аннулирована сторнированием) и ``tare.reason`` у не подставленной тары.
 """
 
 from datetime import UTC, datetime
@@ -20,7 +21,7 @@ from center.db import repo
 from center.db.models import Scale, Site, Weighing, WeighingPhoto
 from shared.card import card_number
 from shared.enums import CameraRole, Operation
-from shared.tare import three_months_before
+from shared.tare import tare_below_gross, three_months_before
 
 PHOTO_KEY_BY_ROLE = {CameraRole.FRONT: "front", CameraRole.REAR: "rear"}
 
@@ -38,6 +39,19 @@ def _photo_available(photos_dir: Path, db_path: str) -> bool:
     return full.is_file()
 
 
+def _storno_block(session: Session, weighing: Weighing) -> dict[str, Any] | None:
+    """Вложение ``storno``: запись аннулирована сторнированием (04.09.2026).
+
+    Исходная запись неизменяема; рядом лежит запись-сторно с причиной —
+    её момент и причина уходят АИС новым полем (незнакомые поля АИС
+    игнорирует, раздел 3 контракта). Не аннулирована — None.
+    """
+    storno = repo.storno_by(session, weighing.id)
+    if storno is None:
+        return None
+    return {"at": bishkek_iso(storno.weighed_at), "reason": storno.message}
+
+
 def _taring_block(
     session: Session, taring: Weighing | None, status: str, massa: float
 ) -> dict[str, Any]:
@@ -48,6 +62,8 @@ def _taring_block(
     weighed_at = taring.weighed_at if taring is not None else None
     return {
         "status": status,
+        # почему действующая тара не подставлена (только у not_applied)
+        "reason": None,
         "id": str(taring.uuid) if taring is not None else None,
         "card_number": (
             card_number(Operation.TARING, weighed_at) if weighed_at is not None else None
@@ -55,6 +71,7 @@ def _taring_block(
         "ais_ref": ais_ref,
         "tared_at": bishkek_iso(weighed_at),
         "massa": massa,
+        "storno": _storno_block(session, taring) if taring is not None else None,
     }
 
 
@@ -83,7 +100,18 @@ def tare_block(session: Session, weighing: Weighing) -> dict[str, Any] | None:
     if latest is None or latest.weighed_at is None or latest.massa is None:
         return None
     expired = _as_utc(latest.weighed_at) < three_months_before(_as_utc(weighing.weighed_at))
-    return _taring_block(session, latest, "expired" if expired else "not_applied", latest.massa)
+    block = _taring_block(session, latest, "expired" if expired else "not_applied", latest.massa)
+    if not expired:
+        # почему действующая тара не подставлена (5.3, уточнение 04.09.2026):
+        # тара не меньше брутто — агент 0.4.29 её отверг как неправдоподобную
+        # (тарирование сцепки ошибочно); иначе — отставшая реплика реестра на
+        # весовом ПК (офлайн-взвешивание)
+        block["reason"] = (
+            "tare_not_below_gross"
+            if weighing.massa is not None and not tare_below_gross(latest.massa, weighing.massa)
+            else "replica_lag"
+        )
+    return block
 
 
 def _verification(scale: Scale) -> dict[str, Any] | None:
@@ -148,5 +176,7 @@ def build_document(session: Session, weighing: Weighing, *, photos_dir: Path) ->
         "tare": tare_block(session, weighing),
         "netto": weighing.netto,
         "photos": photos,
+        # сторнирование (04.09.2026): null, пока запись не аннулирована
+        "storno": _storno_block(session, weighing),
         "checksum": weighing.checksum,
     }

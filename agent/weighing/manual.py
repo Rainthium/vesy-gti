@@ -35,6 +35,13 @@ from agent.sync.storage import AgentStorage, StoredPhoto
 from agent.weighing.shots import store_shots
 from shared.enums import ErrorCode, Operation, ScaleStatus, WeighingSource
 from shared.messages import TareRecord, WeighingRecord
+from shared.tare import (
+    DEFAULT_MAX_TARE_KG,
+    implausible_tare_message,
+    tare_below_gross,
+    tare_too_heavy,
+    tare_too_heavy_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +68,10 @@ class ManualPreview:
     # оператор видит дату и массу на карточке результата (просьба Игоря
     # 14.08.2026); в расчёт нетто оно не подставляется (правило №4)
     expired_tare: TareRecord | None = None
+    # тара, отвергнутая как неправдоподобная — не меньше брутто (0.4.29,
+    # решение Игоря 04.09.2026): в расчёт не подставлена, на карточке
+    # результата — предупреждение оператору
+    rejected_tare: TareRecord | None = None
 
     @property
     def no_valid_tare(self) -> bool:
@@ -92,6 +103,7 @@ class ManualOperationFlow:
         streams: CameraStreams | None = None,
         now_utc: Callable[[], datetime] | None = None,
         busy: Callable[[], bool] | None = None,
+        max_tare_kg: float = DEFAULT_MAX_TARE_KG,
     ) -> None:
         self._scale_state = scale_state
         self._manual_allowed = manual_allowed
@@ -100,6 +112,7 @@ class ManualOperationFlow:
         self._cameras = cameras
         self._photos_dir = Path(photos_dir)
         self._vehicle_threshold_kg = vehicle_threshold_kg
+        self._max_tare_kg = max_tare_kg
         self._ffmpeg_path = ffmpeg_path
         # буфер потоковых камер: кадр мгновенно, без RTSP-подключения
         self._streams = streams
@@ -115,6 +128,10 @@ class ManualOperationFlow:
     def set_vehicle_threshold(self, threshold_kg: float) -> None:
         """Новый порог заезда (настройки из центра)."""
         self._vehicle_threshold_kg = threshold_kg
+
+    def set_max_tare(self, max_tare_kg: float) -> None:
+        """Новый лимит массы тарирования (настройки из центра; 0 — выключен)."""
+        self._max_tare_kg = max_tare_kg
 
     # --- шаг 1: фиксация (кнопка «Взвесить») ---
 
@@ -165,6 +182,10 @@ class ManualOperationFlow:
             raise ManualFlowError("Масса нестабильна — дождитесь остановки АТС")
 
         weight = scale.weight_kg
+        if operation is Operation.TARING and tare_too_heavy(weight, self._max_tare_kg):
+            # решение Игоря 04.09.2026: тяжелее лимита — гружёная машина,
+            # тарирование не проводится (снимков и записи нет)
+            raise ManualFlowError(tare_too_heavy_message(weight, self._max_tare_kg))
         weighed_at = self._now_utc()
         record_uuid = uuid4()
 
@@ -181,12 +202,21 @@ class ManualOperationFlow:
         tare: TareRecord | None = None
         netto: float | None = None
         expired_tare: TareRecord | None = None
+        rejected_tare: TareRecord | None = None
+        message: str | None = None
         if operation is Operation.WEIGHING:
             # правило №4 (ред. 09.08.2026): тара — только совпавшей СЦЕПКИ
             tare = self._storage.find_active_tare(vehicle_number, weighed_at, trailer_number)
+            if tare is not None and not tare_below_gross(tare.tare_value, weight):
+                # тара не меньше брутто — тарирование сцепки ошибочно (гружёная
+                # машина): не подставляем, нетто не считаем (решение 04.09.2026)
+                rejected_tare = tare
+                message = implausible_tare_message(tare.tare_value, tare.tared_at, weight)
+                logger.warning("ручная операция %s: %s", vehicle_number, message)
+                tare = None
             if tare is not None:
                 netto = weight - tare.tare_value
-            else:
+            elif rejected_tare is None:
                 # строка реестра без действующей тары — устаревшее тарирование
                 expired_tare = self._storage.latest_tare(vehicle_number, trailer_number)
 
@@ -204,6 +234,7 @@ class ManualOperationFlow:
             netto=netto,
             source=WeighingSource.LOCAL_OFFLINE,
             operator=operator,
+            message=message,
         )
         preview = ManualPreview(
             preview_id=secrets.token_urlsafe(16),
@@ -211,6 +242,7 @@ class ManualOperationFlow:
             photos=photos,
             tare=tare,
             expired_tare=expired_tare,
+            rejected_tare=rejected_tare,
         )
         with self._lock:
             old = self._pending

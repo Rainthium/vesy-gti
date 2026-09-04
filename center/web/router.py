@@ -62,13 +62,14 @@ from shared.messages import (
     EquipmentStatus,
     OperatorsRegistryUpdate,
     ScaleConfigUpdate,
+    TareRegistryUpdate,
     UpdateCommand,
     VerificationInfo,
     supports_log_tail,
     supports_photo_cleanup,
     supports_secure_sync,
 )
-from shared.tare import three_months_before
+from shared.tare import DEFAULT_MAX_TARE_KG, three_months_before
 
 logger = logging.getLogger(__name__)
 
@@ -851,12 +852,16 @@ def create_panel_router(
         photos = await asyncio.to_thread(
             _db, lambda s: queries.photos_for_weighings(s, [w.id for w, _, _ in rows])
         )
+        annulled = await asyncio.to_thread(
+            _db, lambda s: queries.annulled_ids(s, [w.id for w, _, _ in rows])
+        )
         return render(
             "journal.html",
             request,
             user=user,
             rows=rows,
             photos=photos,
+            annulled=annulled,
             total=total,
             page=page,
             pages=max(1, -(-total // PAGE_SIZE)),
@@ -897,6 +902,9 @@ def create_panel_router(
             _db,
             lambda s: queries.journal_export_rows(s, filters, limit=EXPORT_LIMIT, site_scope=scope),
         )
+        annulled = await asyncio.to_thread(
+            _db, lambda s: queries.annulled_ids(s, [w.id for w, _, _ in rows])
+        )
         logger.info("панель (%s): выгрузка журнала, строк %d", user, len(rows))
         buffer = io.StringIO()
         writer = csv.writer(buffer, delimiter=";", lineterminator="\r\n")
@@ -928,7 +936,14 @@ def create_panel_router(
                     _csv_number(weighing.massa),
                     _csv_number(weighing.tare_value),
                     _csv_number(weighing.netto),
-                    "АИС" if weighing.source is WeighingSource.AIS else "Вручную (офлайн)",
+                    (
+                        f"Сторно записи №{weighing.storno_of}"
+                        if weighing.storno_of
+                        else (
+                            "АИС" if weighing.source is WeighingSource.AIS else "Вручную (офлайн)"
+                        )
+                        + (" — аннулирована" if weighing.id in annulled else "")
+                    ),
                     _csv_text(weighing.operator),
                 ]
             )
@@ -953,13 +968,22 @@ def create_panel_router(
         )
         if card is None:
             raise HTTPException(status_code=404)
+        is_admin = request.session.get("panel_role") == "admin"
+        w = card.weighing
         return render(
             "record.html",
             request,
             user=user,
             card=card,
-            can_resend=request.session.get("panel_role") == "admin",
+            can_resend=is_admin and w.storno_of is None,
+            # сторнировать можно состоявшуюся операцию, ещё не аннулированную
+            # и не являющуюся сторно (decisions 04.09.2026)
+            can_storno=is_admin
+            and w.code is ErrorCode.OK
+            and w.storno_of is None
+            and card.annulled_by is None,
             ais_note=request.query_params.get("ais_note"),
+            note=request.query_params.get("note"),
         )
 
     @router.post("/journal/{weighing_id}/ais_event")
@@ -973,6 +997,9 @@ def create_panel_router(
             card = queries.weighing_card(session, weighing_id, site_scope=scope)
             if card is None:
                 raise HTTPException(status_code=404)
+            if card.weighing.storno_of is not None:
+                # запись-сторно — не операция: в АИС не публикуется (04.09.2026)
+                return "запись-сторно в АИС не публикуется — событие не отправлено"
             scale = session.get(Scale, card.weighing.scale_id)
             if scale is None or not scale.ais_object:
                 # поток weighing.completed.* — только для привязанных весов
@@ -997,6 +1024,41 @@ def create_panel_router(
         return RedirectResponse(
             f"/panel/journal/{weighing_id}?ais_note={quote(note)}", status_code=303
         )
+
+    @router.post("/journal/{weighing_id}/storno")
+    async def journal_storno(
+        request: Request,
+        admin: PanelAdmin,
+        scope: PanelScope,
+        weighing_id: int,
+        reason: Annotated[str, Form()] = "",
+    ) -> RedirectResponse:
+        """Сторнировать запись: новой записью-сторно, исходная не трогается
+        (правило №2; решение Игоря 04.09.2026 — причина обязательна)."""
+
+        def apply(session: Session) -> tuple[str, bool]:
+            card = queries.weighing_card(session, weighing_id, site_scope=scope)
+            if card is None:
+                raise HTTPException(status_code=404)
+            try:
+                storno = repo.storno_weighing(
+                    session, card.weighing, actor=f"panel:{admin}", reason=reason
+                )
+            except repo.StornoError as exc:
+                return f"сторно не выполнено: {exc}", False
+            return (
+                f"запись аннулирована — сторно №{storno.id}",
+                card.weighing.operation is Operation.TARING,
+            )
+
+        note, taring = await asyncio.to_thread(_db, apply)
+        if taring:
+            # реестр тары сцепки пересобран — разослать снимок всем агентам
+            records = await asyncio.to_thread(_db, repo.load_tare_registry)
+            sent = await hub.broadcast_tare_registry(TareRegistryUpdate(records=records))
+            note += f"; реестр тары разослан агентам ({sent})"
+        logger.info("панель (%s): сторно записи id=%d — %s", admin, weighing_id, note)
+        return RedirectResponse(f"/panel/journal/{weighing_id}?note={quote(note)}", status_code=303)
 
     def _print_card_context(card: queries.WeighingCard) -> dict[str, object]:
         """Контекст печатной карточки из карточки записи журнала.
@@ -1028,6 +1090,9 @@ def create_panel_router(
                 verified_on=card.scale.verif_date,
                 valid_until=card.scale.verif_until,
             )
+        # примечание «почему нет нетто»: устаревшая либо отвергнутая (не меньше
+        # брутто) тара сцепки — строка реестра на момент показа
+        latest_tare = card.expired_tare or card.rejected_tare
         return weight_card.build_card(
             operation=w.operation,
             weighed_at=w.weighed_at,
@@ -1046,8 +1111,14 @@ def create_panel_router(
             photos_note=note,
             record_uuid=str(w.uuid),
             code_ok=w.code is ErrorCode.OK,
-            latest_tared_at=card.expired_tare.weighed_at if card.expired_tare else None,
-            latest_tare_value=card.expired_tare.massa if card.expired_tare else None,
+            latest_tared_at=latest_tare.weighed_at if latest_tare else None,
+            latest_tare_value=latest_tare.massa if latest_tare else None,
+            annulled_note=(
+                f"АННУЛИРОВАНА сторно от {weight_card.fmt_dt(card.annulled_by.weighed_at)}: "
+                f"{card.annulled_by.message}"
+                if card.annulled_by is not None and card.annulled_by.weighed_at is not None
+                else None
+            ),
         )
 
     @router.get("/journal/{weighing_id}/card", response_class=HTMLResponse)
@@ -1062,7 +1133,12 @@ def create_panel_router(
         card = await asyncio.to_thread(
             _db, lambda s: queries.weighing_card(s, weighing_id, site_scope=scope)
         )
-        if card is None or card.weighing.weighed_at is None or card.weighing.massa is None:
+        if (
+            card is None
+            or card.weighing.weighed_at is None
+            or card.weighing.massa is None
+            or card.weighing.storno_of is not None  # у записи-сторно карточки нет
+        ):
             raise HTTPException(status_code=404)
         return render(
             "card.html",
@@ -1121,6 +1197,12 @@ def create_panel_router(
                 }
                 for weighing, row_scale, row_site, registry in raw_history
             ]
+            annulled = await asyncio.to_thread(
+                _db, lambda s: queries.annulled_ids(s, [r["weighing"].id for r in rows])
+            )
+            for row in rows:
+                if row["weighing"].id in annulled:
+                    row["status"] = "annulled"
         else:
             raw_active, total = await asyncio.to_thread(
                 _db,
@@ -1598,6 +1680,7 @@ def create_panel_router(
         stable_duration_s: Annotated[float, Form()],
         stable_timeout_s: Annotated[float, Form()],
         no_data_timeout_s: Annotated[float, Form()],
+        max_tare_kg: Annotated[float, Form()] = DEFAULT_MAX_TARE_KG,
         port: Annotated[str, Form()] = "",
         baudrate: Annotated[str, Form()] = "",
         indicator_model: Annotated[str, Form()] = "",
@@ -1619,6 +1702,8 @@ def create_panel_router(
         parsed_baudrate, baudrate_ok = _parse_opt_int(baudrate)
         if not baudrate_ok:
             return back("скорость порта — число")
+        if max_tare_kg < 0:
+            return back("лимит массы тары не может быть отрицательным (0 — без лимита)")
         parsed_retention, retention_ok = _parse_opt_int(photo_retention_days)
         if not retention_ok:
             return back("срок хранения локальных фото — число дней (пусто = локальный конфиг)")
@@ -1630,6 +1715,7 @@ def create_panel_router(
             stable_duration_s=stable_duration_s,
             stable_timeout_s=stable_timeout_s,
             no_data_timeout_s=no_data_timeout_s,
+            max_tare_kg=max_tare_kg,
         )
 
         def save_settings(s: Session) -> str | None:

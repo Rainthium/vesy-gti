@@ -14,6 +14,8 @@
           <h1>Запись №{{ w.id }} · {{ 'Взвешивание' if is_weighing else 'Тарирование' }}</h1>
           <span class="pill {{ 'pill-info' if w.source.value == 'ais' else 'pill-warn' }}"><span class="dot"></span>{{ 'АИС' if w.source.value == 'ais' else 'Вручную (офлайн)' }}</span>
           <span class="pill {{ 'pill-ok' if w.code.value == 'OK' else 'pill-err' }}"><span class="dot"></span>{{ w.code.value }}</span>
+          {% if w.storno_of %}<span class="pill pill-err"><span class="dot"></span>Сторно</span>
+          {% elif card.annulled_by %}<span class="pill pill-err"><span class="dot"></span>Аннулирована</span>{% endif %}
         </div>
         <div class="record-sub">{{ w.weighed_at | fmt_dt }} · {{ card.site.name }} · {{ card.scale.name }}{% if w.operator %} · оператор {{ w.operator }}{% endif %}</div>
       </div>
@@ -56,6 +58,9 @@
           <small><a href="/panel/journal/{{ card.tare_weighing.id }}">тарирование от {{ card.tare_weighing.weighed_at | fmt_dt }}</a></small>
           {% elif card.expired_tare %}
           <small><a href="/panel/journal/{{ card.expired_tare.id }}">тарирование от {{ card.expired_tare.weighed_at | fmt_dt }}</a>, тара {{ card.expired_tare.massa | fmt_kg }} kg — устарело, нетто не рассчитано</small>
+          {% elif card.rejected_tare %}
+          <small><a href="/panel/journal/{{ card.rejected_tare.id }}">тарирование от {{ card.rejected_tare.weighed_at | fmt_dt }}</a>, тара {{ card.rejected_tare.massa | fmt_kg }} kg —
+            не меньше брутто, в расчёт не подставлено: тарирование сцепки ошибочно (гружёная машина) — сторнируйте его</small>
           {% elif w.tare_value is none %}
           <small>действующего тарирования сцепки не было</small>
           {% endif %}
@@ -83,6 +88,10 @@
       {% if w.message %}
       <div class="record-message"><b>Сообщение:</b> {{ w.message }}</div>
       {% endif %}
+      {% if card.annulled_by %}
+      <div class="record-message"><b>Аннулирована:</b> сторно <a href="/panel/journal/{{ card.annulled_by.id }}">№{{ card.annulled_by.id }}</a> от {{ card.annulled_by.weighed_at | fmt_dt }}
+        ({{ card.annulled_by.operator }}) — {{ card.annulled_by.message }}.{% if not is_weighing %} В реестре тары не действует.{% endif %}</div>
+      {% endif %}
       {% if card.storno_of %}
       <div class="record-message"><b>Сторно:</b> запись сторнирует <a href="/panel/journal/{{ card.storno_of.id }}">запись №{{ card.storno_of.id }} от {{ card.storno_of.weighed_at | fmt_dt }}</a></div>
       {% endif %}
@@ -108,7 +117,16 @@
       </div>
     </div>
     <div class="record-foot">
-      <a href="/panel/journal/{{ w.id }}/card" target="_blank" class="btn-outline">Печать карточки</a>
+      {% if not w.storno_of %}<a href="/panel/journal/{{ w.id }}/card" target="_blank" class="btn-outline">Печать карточки</a>{% endif %}
+      {% if can_storno %}
+      {# сторно (правило №2): исходная запись остаётся, рядом появляется запись-сторно; причина обязательна (решение Игоря 04.09.2026) #}
+      <form method="post" action="/panel/journal/{{ w.id }}/storno" class="inline-form storno-form"
+            onsubmit="return confirm('Сторнировать запись №{{ w.id }}? Запись останется в журнале, рядом появится запись-сторно, для системы операция будет «как не было».')">
+        <input name="reason" maxlength="500" required placeholder="Причина сторнирования (обязательно)">
+        <button type="submit" class="btn-outline btn-storno">Сторнировать</button>
+      </form>
+      {% endif %}
+      {% if note %}<span class="ais-note">{{ note }}</span>{% endif %}
       <a href="/panel/journal" class="btn-muted">Закрыть</a>
     </div>
   </section>

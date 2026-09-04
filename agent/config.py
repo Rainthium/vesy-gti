@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, model_validato
 from agent.cameras.capture import DEFAULT_TIMEOUT_S, CameraConfig
 from agent.weighing.cycle import CycleConfig
 from shared.enums import CameraRole
+from shared.tare import DEFAULT_MAX_TARE_KG
 
 
 class _Section(BaseModel):
@@ -53,6 +54,8 @@ class CycleSection(_Section):
     stable_duration_s: float = 5.0  # фиксация после 5 с неизменной массы
     stable_timeout_s: float = 30.0
     no_data_timeout_s: float = 5.0
+    # лимит массы тарирования (0.4.29, решение Игоря 04.09.2026): 0 — выключен
+    max_tare_kg: float = DEFAULT_MAX_TARE_KG
 
     def to_cycle_config(self) -> CycleConfig:
         return CycleConfig(**self.model_dump())

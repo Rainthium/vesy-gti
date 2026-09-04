@@ -8,8 +8,9 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from uuid import uuid4
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import Select, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -18,6 +19,7 @@ from center.db.models import (
     Agent,
     AgentOperator,
     AgentStatus,
+    AuditLog,
     Camera,
     MonitoringEvent,
     MonitoringSeverity,
@@ -44,7 +46,7 @@ from shared.messages import (
     VerificationInfo,
     WeighingRecord,
 )
-from shared.tare import three_months_before
+from shared.tare import tare_below_gross, three_months_before
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,11 @@ logger = logging.getLogger(__name__)
 PHOTO_INDEX_BY_ROLE = {CameraRole.FRONT: 1, CameraRole.REAR: 2}
 # событие контракта v2 (раздел 7): состоявшаяся операция → АИС
 EVENT_WEIGHING_COMPLETED = "weighing.completed"
+
+
+def _as_utc(moment: datetime) -> datetime:
+    """Naive-время трактуем как UTC (так пишет БД и агент)."""
+    return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
 
 
 def canonical_photo_path(record: WeighingRecord, role: CameraRole) -> str:
@@ -210,6 +217,8 @@ def save_weighing_record(
                 record.uuid,
                 scale_id,
             )
+    # тара не меньше брутто → событие мониторинга (той же транзакцией)
+    _flag_implausible_tare(session, scale_id, record)
     session.commit()
     return True
 
@@ -256,6 +265,69 @@ def record_update_failure(session: Session, scale_id: int, version: str, error: 
     record_update_event(
         session, scale_id, f"автообновление агента до {version} не выполнено — {error}"
     )
+
+
+def record_scale_alert(
+    session: Session,
+    scale_id: int,
+    message: str,
+    *,
+    kind: str,
+    severity: MonitoringSeverity = MonitoringSeverity.WARNING,
+    commit: bool = True,
+) -> None:
+    """Событие мониторинга по весам без антидребезга: «События» + Telegram."""
+    session.add(
+        MonitoringEvent(
+            scale_id=scale_id,
+            kind=kind,
+            severity=severity,
+            message=f"{scale_title(session, scale_id)}: {message}",
+        )
+    )
+    if commit:
+        session.commit()
+
+
+def _flag_implausible_tare(session: Session, scale_id: int, record: WeighingRecord) -> None:
+    """Тара сцепки не меньше брутто → событие мониторинга (решение 04.09.2026).
+
+    Агент 0.4.29 такую тару не подставляет (нетто пусто, причина в
+    ``message``); агент старее подставил бы её и записал нетто ≤ 0. В обоих
+    случаях тарирование сцепки ошибочно (гружёная машина прошла как
+    тарирование) — его надо сторнировать, событие говорит об этом дежурному.
+    """
+    if record.operation is not Operation.WEIGHING or record.massa is None:
+        return
+    unit = record.vehicle_number or "без номера"
+    if record.trailer_number:
+        unit += f"/{record.trailer_number}"
+    if record.netto is not None and record.netto <= 0:
+        message = (
+            f"взвешивание {unit}: нетто {record.netto:.0f} кг — подставленная тара "
+            f"{record.tare_value or 0:.0f} кг не меньше брутто {record.massa:.0f} кг; "
+            "тарирование сцепки ошибочно (гружёная машина) — сторнируйте его в журнале"
+        )
+    elif record.tare_value is None and record.vehicle_number:
+        # что система знала о таре сцепки НА МОМЕНТ взвешивания (как документ
+        # v2): по журналу, без аннулированных, не позже weighed_at и не истёкшее
+        moment = record.weighed_at or datetime.now(UTC)
+        latest = latest_taring_as_of(session, record.vehicle_number, record.trailer_number, moment)
+        if latest is None or latest.massa is None or latest.weighed_at is None:
+            return
+        if _as_utc(latest.weighed_at) < three_months_before(_as_utc(moment)):
+            return  # устарело — нетто нет по сроку, не по правдоподобию
+        if tare_below_gross(latest.massa, record.massa):
+            return
+        message = (
+            f"взвешивание {unit}: тара сцепки {latest.massa:.0f} кг не меньше брутто "
+            f"{record.massa:.0f} кг — не подставлена, нетто не рассчитано; тарирование "
+            "сцепки ошибочно (гружёная машина) — сторнируйте его в журнале"
+        )
+    else:
+        return
+    logger.warning("весы %d: %s", scale_id, message)
+    record_scale_alert(session, scale_id, message, kind="tare_implausible", commit=False)
 
 
 # --- контракт v2 с АИС «СВХ» (согласован 17.08.2026) ---
@@ -394,6 +466,30 @@ def link_ais_ref(session: Session, weighing: Weighing, ais_ref: str, *, origin: 
     return "linked"
 
 
+def _valid_tarings(vehicle_number: str, trailer_number: str | None) -> Select[tuple[Weighing]]:
+    """Состоявшиеся тарирования СЦЕПКИ, не тронутые сторно.
+
+    Ни записи-сторно, ни аннулированные ими тарирования (сторнирование —
+    decisions 04.09.2026) тарой быть не могут. «Без прицепа» в журнале —
+    NULL (агент нормализует пустую строку в None); пустую строку тоже
+    принимаем, чтобы не зависеть от источника записи.
+    """
+    trailer = (trailer_number or "").strip().upper() or None
+    query = select(Weighing).where(
+        Weighing.operation == Operation.TARING,
+        Weighing.code == ErrorCode.OK,
+        Weighing.vehicle_number == vehicle_number,
+        Weighing.weighed_at.is_not(None),
+        Weighing.storno_of.is_(None),
+        Weighing.id.not_in(annulled_weighing_ids()),
+    )
+    if trailer is None:
+        query = query.where(or_(Weighing.trailer_number.is_(None), Weighing.trailer_number == ""))
+    else:
+        query = query.where(Weighing.trailer_number == trailer)
+    return query
+
+
 def latest_taring_as_of(
     session: Session, vehicle_number: str, trailer_number: str | None, moment: datetime
 ) -> Weighing | None:
@@ -403,26 +499,14 @@ def latest_taring_as_of(
     знала о таре сцепки на момент взвешивания. Ищется по журналу, а не по
     реестру (реестр хранит только последнее тарирование вообще — после
     перетарирования он уже не скажет, какая тара действовала тогда).
+    Аннулированные сторно тарирования не учитываются.
     """
-    trailer = (trailer_number or "").strip().upper() or None
     query = (
-        select(Weighing)
-        .where(
-            Weighing.operation == Operation.TARING,
-            Weighing.code == ErrorCode.OK,
-            Weighing.vehicle_number == vehicle_number,
-            Weighing.weighed_at.is_not(None),
-            Weighing.weighed_at <= moment,
-        )
+        _valid_tarings(vehicle_number, trailer_number)
+        .where(Weighing.weighed_at <= moment)
         .order_by(Weighing.weighed_at.desc(), Weighing.id.desc())
         .limit(1)
     )
-    if trailer is None:
-        # «без прицепа» в журнале — NULL (агент нормализует пустую строку в None);
-        # пустую строку тоже принимаем, чтобы не зависеть от источника записи
-        query = query.where(or_(Weighing.trailer_number.is_(None), Weighing.trailer_number == ""))
-    else:
-        query = query.where(Weighing.trailer_number == trailer)
     return session.execute(query).scalar_one_or_none()
 
 
@@ -449,6 +533,148 @@ def _upsert_tare(session: Session, row: Weighing, record: WeighingRecord) -> Non
         )
     )
     session.execute(statement)
+
+
+class StornoError(ValueError):
+    """Сторнирование невозможно; текст — для панели."""
+
+
+STORNO_REASON_MAX = 500
+
+
+def annulled_weighing_ids() -> Select[tuple[int | None]]:
+    """Подзапрос: id записей, у которых есть запись-сторно."""
+    return select(Weighing.storno_of).where(Weighing.storno_of.is_not(None))
+
+
+def storno_by(session: Session, weighing_id: int) -> Weighing | None:
+    """Запись-сторно, аннулирующая запись ``weighing_id`` (None — не аннулирована)."""
+    return session.execute(
+        select(Weighing).where(Weighing.storno_of == weighing_id)
+    ).scalar_one_or_none()
+
+
+def storno_weighing(
+    session: Session,
+    weighing: Weighing,
+    *,
+    actor: str,
+    reason: str,
+    now: datetime | None = None,
+) -> Weighing:
+    """Сторнировать запись журнала (правило №2: исходная запись не трогается).
+
+    Рядом появляется запись-сторно с ``storno_of`` = id исходной: та же
+    операция, те же номера и масса, ``weighed_at`` — момент сторнирования,
+    ``message`` — причина (обязательна, решение Игоря 04.09.2026),
+    ``operator`` — кто сторнировал, снимков нет. Пара «запись + сторно» для
+    системы «как не было»: реестр тары сцепки пересобирается по журналу без
+    аннулированных тарирований, отчёты пару не считают, АИС видит у исходной
+    записи поле ``storno`` (сами записи-сторно из API v2 и событий
+    исключены — сверка АИС приняла бы их за новые операции). Аудит
+    ``weighing_storno`` — в той же транзакции.
+    """
+    reason = " ".join(reason.split())
+    if not reason:
+        raise StornoError("укажите причину сторнирования")
+    if len(reason) > STORNO_REASON_MAX:
+        raise StornoError(f"причина сторнирования: не длиннее {STORNO_REASON_MAX} символов")
+    if weighing.code is not ErrorCode.OK:
+        raise StornoError("сторнировать можно только состоявшуюся операцию")
+    if weighing.storno_of is not None:
+        raise StornoError("это запись-сторно — её не сторнируют")
+    if storno_by(session, weighing.id) is not None:
+        raise StornoError("запись уже аннулирована")
+    moment = now or datetime.now(UTC)
+    row_uuid = uuid4()
+    row = Weighing(
+        uuid=row_uuid,
+        scale_id=weighing.scale_id,
+        operation=weighing.operation,
+        code=ErrorCode.OK,
+        massa=weighing.massa,
+        unit=weighing.unit,
+        stable=True,
+        weighed_at=moment,
+        vehicle_number=weighing.vehicle_number,
+        trailer_number=weighing.trailer_number,
+        source=weighing.source,
+        operator=actor,
+        message=reason,
+        storno_of=weighing.id,
+        checksum=weighing_checksum(
+            uuid=row_uuid,
+            operation=weighing.operation.value,
+            code=ErrorCode.OK.value,
+            massa=weighing.massa,
+            weighed_at=moment,
+            vehicle_number=weighing.vehicle_number,
+            source=weighing.source.value,
+            photo_sha256s=[],
+        ),
+    )
+    session.add(row)
+    try:
+        session.flush()
+    except IntegrityError as exc:
+        # гонка двух сторно одной записи: частичный уникальный индекс
+        # uq_weighings_storno_of (миграция c5d6e7f8a9b0) пропускает одно
+        session.rollback()
+        raise StornoError("запись уже аннулирована") from exc
+    if weighing.operation is Operation.TARING and weighing.vehicle_number:
+        rebuild_tare_registry_entry(session, weighing.vehicle_number, weighing.trailer_number)
+    session.add(
+        AuditLog(
+            actor=actor,
+            action="weighing_storno",
+            details={
+                "weighing_id": weighing.id,
+                "record_uuid": str(weighing.uuid),
+                "storno_id": row.id,
+                "storno_uuid": str(row_uuid),
+                "operation": weighing.operation.value,
+                "reason": reason,
+            },
+        )
+    )
+    session.commit()
+    logger.info("запись id=%d сторнирована (%s): %s", weighing.id, actor, reason)
+    return row
+
+
+def rebuild_tare_registry_entry(
+    session: Session, vehicle_number: str, trailer_number: str | None
+) -> None:
+    """Пересобрать строку реестра тары СЦЕПКИ по журналу (после сторно).
+
+    Реестр — производный снимок «текущая тара сцепки»: строка удаляется и,
+    если у сцепки есть более раннее не аннулированное тарирование, ставится
+    по нему (срок действия проверит подстановка, правило №4); иначе сцепка
+    остаётся без тары. Рассылку снимка агентам делает вызывающий маршрут.
+    """
+    key = trailer_number or ""
+    session.execute(
+        delete(TareRegistry).where(
+            TareRegistry.vehicle_number == vehicle_number, TareRegistry.trailer_number == key
+        )
+    )
+    latest = session.execute(
+        _valid_tarings(vehicle_number, trailer_number)
+        .where(Weighing.massa.is_not(None))
+        .order_by(Weighing.weighed_at.desc(), Weighing.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if latest is not None and latest.weighed_at is not None and latest.massa is not None:
+        session.add(
+            TareRegistry(
+                vehicle_number=vehicle_number,
+                trailer_number=key,
+                weighing_id=latest.id,
+                tare_value=latest.massa,
+                tared_at=latest.weighed_at,
+            )
+        )
+    session.flush()
 
 
 def load_tare_registry(session: Session) -> list[TareRecord]:
@@ -671,10 +897,16 @@ def find_active_tare(
 
 __all__ = [
     "CameraRole",
+    "StornoError",
+    "annulled_weighing_ids",
     "authenticate_agent",
     "find_active_tare",
     "hash_agent_token",
     "load_tare_registry",
+    "rebuild_tare_registry_entry",
+    "record_scale_alert",
     "save_weighing_record",
     "set_agent_status",
+    "storno_by",
+    "storno_weighing",
 ]

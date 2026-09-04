@@ -71,6 +71,8 @@
     .sheet { max-width: 100%; margin: 0; padding: 0; box-shadow: none; }
     .no-print { display: none; }
   }
+  /* запись аннулирована сторно (04.09.2026): бумага не должна выглядеть действующей */
+  .annulled-note { margin: 4mm 0; padding: 3mm 4mm; border: 1.2mm solid #000; font-weight: 700; font-size: 14pt; text-align: center; text-transform: uppercase; }
 </style>
 </head>
 <body>
@@ -95,6 +97,7 @@
   <div class="rule"></div>
 
   <h1>ВЕСОВАЯ КАРТОЧКА № {{ card.number }}</h1>
+  {% if card.annulled_note %}<div class="annulled-note">{{ card.annulled_note }}</div>{% endif %}
 
   <table class="props">
     <tr><td>Объект:</td><td>{{ card.site_name }}</td></tr>

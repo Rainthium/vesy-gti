@@ -49,7 +49,7 @@ from center.api_v1.router import ApiV1Config, create_api_v1_router
 from center.api_v1.schemas import WeighV1Request, bishkek_iso
 from center.app import create_app
 from center.db import repo
-from center.db.models import AuditLog, Scale, ScaleKind, Site
+from center.db.models import AuditLog, MonitoringEvent, Scale, ScaleKind, Site
 from center.db.session import database_url, make_session_factory
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 from shared.messages import (
@@ -978,3 +978,95 @@ class TestTareHintToAgent:
         _post(api_env, operation="taring", vehicle_number="01KG777AAA")
         _post(api_env)  # без номера ТС
         assert [r.tare_resolved for r in link.requests] == [False, False]
+
+
+# ---------------------------------------------------------------------------
+# Лимит тары и правдоподобие тары на замороженном v1 (решение Игоря 04.09.2026)
+# ---------------------------------------------------------------------------
+
+
+def _monitoring_rows(env: ApiEnv, kind: str) -> list[str]:
+    with env.factory() as session:
+        return list(
+            session.execute(
+                select(MonitoringEvent.message)
+                .where(MonitoringEvent.kind == kind)
+                .order_by(MonitoringEvent.id)
+            ).scalars()
+        )
+
+
+class TestTareLimitAndPlausibilityV1:
+    """v1 заморожен, но новый отказ агента проходит через него как любой отказ
+    ({code, message}), а событие tare_rejected уходит в «События»/Telegram;
+    тара ≥ брутто не должна подставляться и фолбэком центра."""
+
+    def _attach(self, env: ApiEnv, record: WeighingRecord) -> ScriptedAgentLink:
+        link = ScriptedAgentLink(env.hub, env.scale_id, record)
+        env.hub.attach(env.scale_id, link)
+        return link
+
+    def test_tare_too_heavy_code_message_and_alert(self, api_env: ApiEnv) -> None:
+        """ERR_TARE_TOO_HEAVY: только {code, message}; событие tare_rejected с
+        массой и нормализованной сцепкой; аудит с кодом; в журнале ничего."""
+        message = (
+            "Масса 37 120 кг больше допустимой тары 25 000 кг — это гружёная машина: "
+            "проведите взвешивание, а не тарирование"
+        )
+        refusal = _make_record(
+            operation=Operation.TARING,
+            code=ErrorCode.ERR_TARE_TOO_HEAVY,
+            massa=None,
+            stable=False,
+            weighed_at=None,
+            message=message,
+        )
+        self._attach(api_env, refusal)
+
+        data = _post(
+            api_env, operation="taring", vehicle_number=" 01kg777aaa ", trailer_number="bd123ab"
+        ).json()
+        assert data == {"code": "ERR_TARE_TOO_HEAVY", "message": message}
+        alerts = _monitoring_rows(api_env, "tare_rejected")
+        assert len(alerts) == 1
+        assert "37 120" in alerts[0] and "01KG777AAA/BD123AB" in alerts[0]
+        assert _audit_details(api_env)[-1][1]["code"] == "ERR_TARE_TOO_HEAVY"
+        with api_env.factory() as session:
+            assert repo.find_active_tare(session, "01KG777AAA", "BD123AB") is None
+
+    def test_other_refusal_gives_no_tare_rejected(self, api_env: ApiEnv) -> None:
+        """Прочие отказы тарирования события tare_rejected не дают."""
+        refusal = _make_record(
+            operation=Operation.TARING,
+            code=ErrorCode.ERR_VEHICLE_TIMEOUT,
+            massa=None,
+            stable=False,
+            weighed_at=None,
+            message="на весах нет АТС с зафиксированным весом",
+        )
+        self._attach(api_env, refusal)
+        data = _post(api_env, operation="taring", vehicle_number="01KG777AAA").json()
+        assert data["code"] == "ERR_VEHICLE_TIMEOUT"
+        assert _monitoring_rows(api_env, "tare_rejected") == []
+
+    def test_center_fallback_respects_tare_plausibility(self, api_env: ApiEnv) -> None:
+        """Агент 0.4.29 не подставил тару ≥ брутто (tare/netto пусты, причина в
+        message): ответ v1 обязан быть «без тары» (no_valid_tare), а не
+        подставлять её заново с отрицательным нетто."""
+        _seed_taring(api_env, massa=50000.0)
+        record = _make_record(
+            tare_value=None,
+            netto=None,
+            message=(
+                "Тара 50 000 кг (тарирование от 05.08.2026) не меньше брутто 43 310 кг — "
+                "в расчёт не подставлена, нетто не рассчитано: тарирование сцепки "
+                "ошибочно (так тарируют гружёную машину)"
+            ),
+        )
+        self._attach(api_env, record)
+
+        data = _post(api_env, vehicle_number="01KG777AAA").json()
+        assert data["code"] == "OK"
+        assert data["tare"] is None
+        assert data["netto"] is None
+        assert data["no_valid_tare"] is True

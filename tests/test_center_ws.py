@@ -1479,6 +1479,8 @@ CYCLE_THRESHOLDS: dict[str, float] = {
     "stable_duration_s": 5.0,
     "stable_timeout_s": 30.0,
     "no_data_timeout_s": 5.0,
+    # лимит тары (04.09.2026): полный набор цикла теперь включает его
+    "max_tare_kg": 25000.0,
 }
 
 
