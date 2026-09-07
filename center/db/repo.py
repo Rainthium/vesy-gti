@@ -38,6 +38,7 @@ from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 from shared.messages import (
     AgentOperatorInfo,
     CameraSettings,
+    ConfigStatus,
     CycleSettings,
     OperatorRecord,
     PhotoMeta,
@@ -287,6 +288,52 @@ def record_scale_alert(
     )
     if commit:
         session.commit()
+
+
+def record_config_status(
+    session: Session, agent_id: int, scale_id: int, status: ConfigStatus
+) -> None:
+    """Отчёт агента о применении настроек центра (07.09.2026).
+
+    Откат COM-порта (индикатор молчит на новом порту) раньше только
+    логировался, и администратор после «Сохранить» видел «отправлены
+    агенту» без итога. Теперь: неудача — событие мониторинга
+    ``config_rejected`` («События» + Telegram) и аудит; успешная смена
+    порта (агент 0.4.30+ присылает ``applied_port``) — событие
+    ``config_port`` уровня OK и аудит; обычное «применено» без смены
+    порта — только лог (иначе аудит засорится при каждом hello).
+    """
+    if status.ok and not status.applied_port:
+        logger.info("весы %d: настройки применены агентом", scale_id)
+        return
+    if status.ok:
+        kind, severity = "config_port", MonitoringSeverity.OK
+        speed = f" · {status.applied_baudrate}" if status.applied_baudrate else ""
+        message = f"COM-порт индикатора применён: {status.applied_port}{speed}"
+        logger.info("весы %d: %s", scale_id, message)
+    else:
+        kind, severity = "config_rejected", MonitoringSeverity.WARNING
+        suffix = " (откат COM-порта)" if status.rolled_back else ""
+        message = (
+            f"настройки центра не применены агентом{suffix}: {status.error or 'причина не указана'}"
+        )
+        logger.error("весы %d: %s", scale_id, message)
+    record_scale_alert(session, scale_id, message, kind=kind, severity=severity, commit=False)
+    session.add(
+        AuditLog(
+            actor=f"agent:{agent_id}",
+            action="agent_config_status",
+            details={
+                "scale_id": scale_id,
+                "ok": status.ok,
+                "rolled_back": status.rolled_back,
+                "error": status.error,
+                "applied_port": status.applied_port,
+                "applied_baudrate": status.applied_baudrate,
+            },
+        )
+    )
+    session.commit()
 
 
 def _flag_implausible_tare(session: Session, scale_id: int, record: WeighingRecord) -> None:
@@ -904,6 +951,7 @@ __all__ = [
     "hash_agent_token",
     "load_tare_registry",
     "rebuild_tare_registry_entry",
+    "record_config_status",
     "record_scale_alert",
     "save_weighing_record",
     "set_agent_status",

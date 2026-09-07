@@ -64,6 +64,7 @@ from center.db.models import (
     Agent,
     AgentOperator,
     AgentStatus,
+    AuditLog,
     Camera,
     MonitoringEvent,
     MonitoringSeverity,
@@ -1742,6 +1743,63 @@ class TestAgentsWsScaleConfig:
             # цикл приёма жив: hello после отчётов обслуживается
             registry = _hello_and_registry(ws)
             assert registry["records"] == []
+
+    def test_config_status_outcome_recorded(self, ws_env: WsEnv) -> None:
+        """Откат COM-порта → событие «Настройки» (WARNING) и аудит; успешная
+        смена порта (agent 0.4.30, applied_port) → событие «Порт» (OK) и аудит;
+        обычное «применено» без смены порта — ни события, ни аудита
+        (Кара-Суу 07.09.2026: откат был виден только в логе центра)."""
+        with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            ws.send_text(
+                ConfigStatus(
+                    ok=False,
+                    rolled_back=True,
+                    error="индикатор молчит на порту COM4 — возвращён socket://127.0.0.1:4001",
+                ).model_dump_json()
+            )
+            ws.send_text(
+                ConfigStatus(ok=True, applied_port="COM4", applied_baudrate=9600).model_dump_json()
+            )
+            ws.send_text(ConfigStatus(ok=True).model_dump_json())
+            _hello_and_registry(ws)  # синхронизация: отчёты уже обработаны
+        with ws_env.factory() as session:
+            events = (
+                session.execute(
+                    select(MonitoringEvent)
+                    .where(MonitoringEvent.scale_id == ws_env.scale_id)
+                    .order_by(MonitoringEvent.id)
+                )
+                .scalars()
+                .all()
+            )
+            assert [(e.kind, e.severity) for e in events] == [
+                ("config_rejected", MonitoringSeverity.WARNING),
+                ("config_port", MonitoringSeverity.OK),
+            ]
+            assert "откат COM-порта" in events[0].message
+            assert "COM4" in events[0].message
+            assert "применён: COM4 · 9600" in events[1].message
+            audits = (
+                session.execute(
+                    select(AuditLog)
+                    .where(AuditLog.action == "agent_config_status")
+                    .order_by(AuditLog.id)
+                )
+                .scalars()
+                .all()
+            )
+            assert [a.actor for a in audits] == [f"agent:{ws_env.agent_id}"] * 2
+            assert audits[0].details["rolled_back"] is True
+            assert audits[0].details["applied_port"] is None
+            assert audits[0].details["scale_id"] == ws_env.scale_id
+            assert audits[1].details == {
+                "scale_id": ws_env.scale_id,
+                "ok": True,
+                "rolled_back": False,
+                "error": None,
+                "applied_port": "COM4",
+                "applied_baudrate": 9600,
+            }
 
 
 # ---------------------------------------------------------------------------

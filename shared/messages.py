@@ -412,6 +412,10 @@ class ConfigStatus(BaseModel):
     error: str | None = None
     # смена COM-порта, после которой индикатор замолчал, откатывается
     rolled_back: bool = False
+    # порт и скорость, на которые агент реально переключился (агент 0.4.30+;
+    # None — порт не менялся): центр пишет событие мониторинга «порт применён»
+    applied_port: str | None = None
+    applied_baudrate: int | None = None
 
 
 class HeartbeatAck(BaseModel):

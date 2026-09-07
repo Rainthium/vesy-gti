@@ -1624,7 +1624,12 @@ def create_panel_router(
             )
         sent = await hub.send_scale_config(scale_id, ScaleConfigUpdate(settings=settings))
         if sent:
-            return " — отправлены агенту (отчёт о применении в логах центра)"
+            # итог применения (в т.ч. откат COM-порта) агент докладывает
+            # отчётом config_status → «События» панели (07.09.2026)
+            return (
+                " — отправлены агенту; отказ или откат порта покажут «События», "
+                "с агента 0.4.30 — и успешную смену порта"
+            )
         return " — агент офлайн, применятся при следующем подключении"
 
     @router.get("/refs/scales/{scale_id}/settings", response_class=HTMLResponse)
@@ -1740,6 +1745,7 @@ def create_panel_router(
                 indicator_model=indicator_model,
                 photo_retention_days=parsed_retention,
                 manual_allowed=manual_flag,
+                actor=f"panel:{admin}",
             )
 
         error = await asyncio.to_thread(_db, save_settings)

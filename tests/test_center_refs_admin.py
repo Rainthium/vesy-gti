@@ -1709,6 +1709,50 @@ class TestScaleSettingsRoutes:
             assert scale is not None
             assert scale.thresholds is None, "диспетчер изменил настройки весов"
 
+    def test_post_audits_changed_settings_once(self, refs_env: RefsEnv) -> None:
+        """Аудит scale_settings: только изменившиеся поля «old → new» в той же
+        транзакции; повтор без изменений строки не добавляет; смена одного
+        порта — строка только с портом и скоростью (07.09.2026: смена порта
+        Кара-Суу на COM4 следа в аудите не оставила)."""
+        _login(refs_env, ADMIN_LOGIN, ADMIN_PASSWORD)
+        url = f"/panel/refs/scales/{refs_env.scale_id}/settings"
+        response = refs_env.client.post(url, data=_settings_form(), follow_redirects=False)
+        assert response.status_code == 303
+        with refs_env.factory() as session:
+            entry = session.execute(
+                select(AuditLog).where(AuditLog.action == "scale_settings")
+            ).scalar_one()
+            assert entry.actor == f"panel:{ADMIN_LOGIN}"
+            assert entry.details["scale_id"] == refs_env.scale_id
+            changes = entry.details["changes"]
+            assert changes["port"] == {"old": None, "new": "COM11"}
+            assert changes["baudrate"] == {"old": None, "new": 19200}
+            assert changes["thresholds.zero_threshold_kg"]["new"] == 150.0
+            assert "indicator_model" not in changes  # пусто → пусто: не менялось
+        # повтор с теми же значениями — без новой строки аудита
+        response = refs_env.client.post(url, data=_settings_form(), follow_redirects=False)
+        assert response.status_code == 303
+        # смена только порта и скорости
+        response = refs_env.client.post(
+            url, data=_settings_form(port="COM4", baudrate="9600"), follow_redirects=False
+        )
+        assert response.status_code == 303
+        with refs_env.factory() as session:
+            entries = (
+                session.execute(
+                    select(AuditLog)
+                    .where(AuditLog.action == "scale_settings")
+                    .order_by(AuditLog.id)
+                )
+                .scalars()
+                .all()
+            )
+            assert len(entries) == 2
+            assert entries[1].details["changes"] == {
+                "port": {"old": "COM11", "new": "COM4"},
+                "baudrate": {"old": 19200, "new": 9600},
+            }
+
     def test_post_saves_and_redirects_with_note(self, refs_env: RefsEnv) -> None:
         """POST: настройки в БД, редирект на страницу настроек с note;
         агента в хабе нет → «агент офлайн, применятся при подключении»."""

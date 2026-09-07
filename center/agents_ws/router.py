@@ -216,15 +216,12 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                         await broadcast_tare_registry()
 
                 elif isinstance(message, ConfigStatus):
-                    if message.ok:
-                        logger.info("весы %d: настройки применены агентом", scale_id)
-                    else:
-                        logger.error(
-                            "весы %d: настройки НЕ применены%s: %s",
-                            scale_id,
-                            " (откат COM-порта)" if message.rolled_back else "",
-                            message.error,
-                        )
+                    # откат COM-порта / успешная смена порта — в «События»
+                    # панели, Telegram и аудит (07.09.2026, Кара-Суу)
+                    await asyncio.to_thread(
+                        _db,
+                        lambda s, m=message: repo.record_config_status(s, agent_id, scale_id, m),
+                    )
 
                 elif isinstance(message, LogTailResponse):
                     if not hub.resolve_log_tail(message, scale_id=scale_id):

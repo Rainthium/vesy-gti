@@ -28,6 +28,7 @@ from center.api_v2.schemas import AIS_OBJECT_RE
 from center.db import repo
 from center.db.models import (
     Agent,
+    AuditLog,
     Camera,
     ReleaseChannel,
     Scale,
@@ -297,8 +298,16 @@ def save_scale_settings(
     indicator_model: str = "",
     photo_retention_days: int | None = None,
     manual_allowed: bool | None = None,
+    actor: str | None = None,
 ) -> str | None:
     """Сохранить настройки весов (страница настроек, решение Игоря 10.08.2026).
+
+    actor — кто сохраняет (``panel:<логин>``): при заданном actor и реально
+    изменившихся полях (цикл, COM-порт/скорость, подпись индикатора, срок
+    хранения фото) в ТУ ЖЕ транзакцию ложится строка аудита
+    ``scale_settings`` с парами «старое → новое» (07.09.2026: смена порта
+    Кара-Суу на COM4 не оставила в аудите следа). None — скрипты заведения,
+    без аудита.
 
     manual_allowed — ручной режим оператору при живой связи с центром
     (03.09.2026, объект без АИС «СВХ»; агент 0.4.28+): None — не трогать
@@ -335,15 +344,50 @@ def save_scale_settings(
         return "модель индикатора: не длиннее 120 символов"
     if photo_retention_days is not None and not 0 <= photo_retention_days <= 3650:
         return "срок хранения локальных фото: от 0 до 3650 дней"
+    before = _settings_snapshot(scale)
     scale.thresholds = values
     scale.port_cfg = {"port": port, "baudrate": baudrate or 9600} if port else None
     scale.indicator_model = indicator_model or None
     scale.photo_retention_days = photo_retention_days
     if manual_allowed is not None:
         scale.manual_allowed = manual_allowed
+    changes = settings_changes(before, _settings_snapshot(scale))
+    if actor is not None and changes:
+        session.add(
+            AuditLog(
+                actor=actor,
+                action="scale_settings",
+                details={"scale_id": scale_id, "changes": changes},
+            )
+        )
     session.commit()
     logger.info("справочники: настройки весов id=%d сохранены", scale_id)
     return None
+
+
+def _settings_snapshot(scale: Scale) -> dict[str, object]:
+    """Плоский снимок полей настроек весов для сравнения «до/после»."""
+    snapshot: dict[str, object] = {}
+    for key, value in (scale.thresholds or {}).items():
+        snapshot[f"thresholds.{key}"] = value
+    port_cfg = scale.port_cfg or {}
+    snapshot["port"] = port_cfg.get("port")
+    snapshot["baudrate"] = port_cfg.get("baudrate")
+    snapshot["indicator_model"] = scale.indicator_model
+    snapshot["photo_retention_days"] = scale.photo_retention_days
+    return snapshot
+
+
+def settings_changes(
+    before: dict[str, object], after: dict[str, object]
+) -> dict[str, dict[str, object]]:
+    """Только изменившиеся поля: {поле: {"old": …, "new": …}} (для аудита)."""
+    changes: dict[str, dict[str, object]] = {}
+    for key in sorted(set(before) | set(after)):
+        old, new = before.get(key), after.get(key)
+        if old != new:
+            changes[key] = {"old": old, "new": new}
+    return changes
 
 
 def _parse_form_date(raw: str) -> tuple[date | None, bool]:

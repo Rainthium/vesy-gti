@@ -63,8 +63,34 @@ def _check_production_env() -> None:
         raise RuntimeError("Отказ старта в проде (CENTER_ENV=production): " + "; ".join(problems))
 
 
+def _configure_logging() -> None:
+    """Лог приложения — в stderr процесса (в контейнере: ``docker compose logs app``).
+
+    uvicorn настраивает только свои логгеры; корневой без обработчика
+    показывал через lastResort лишь WARNING и выше — INFO-строки центра
+    (применение настроек агентом, команды АИС, выкладки) в логах
+    контейнера не появлялись (07.09.2026). Уровень — CENTER_LOG_LEVEL.
+    Если обработчики уже есть (pytest, внешняя настройка) — только уровень.
+    """
+    raw = os.environ.get("CENTER_LOG_LEVEL", "INFO").strip().upper() or "INFO"
+    level = logging.getLevelNamesMapping().get(raw)
+    if level is None:
+        # опечатка в env не должна ронять контейнер в рестарт-цикл
+        level = logging.INFO
+    root = logging.getLogger()
+    if root.handlers:
+        root.setLevel(level)
+        return
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if raw != logging.getLevelName(level):
+        logging.getLogger(__name__).warning(
+            "CENTER_LOG_LEVEL=%r не распознан — уровень лога INFO", raw
+        )
+
+
 def create_app() -> FastAPI:
     """Фабрика приложения центра (конфигурация — из переменных окружения)."""
+    _configure_logging()
     if os.environ.get("CENTER_ENV") == "production":
         _check_production_env()
     engine = make_engine()
