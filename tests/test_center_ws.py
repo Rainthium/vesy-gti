@@ -1789,9 +1789,11 @@ class TestAgentsWsScaleConfig:
                 .all()
             )
             assert [a.actor for a in audits] == [f"agent:{ws_env.agent_id}"] * 2
-            assert audits[0].details["rolled_back"] is True
-            assert audits[0].details["applied_port"] is None
-            assert audits[0].details["scale_id"] == ws_env.scale_id
+            rejected = audits[0].details
+            assert rejected is not None
+            assert rejected["rolled_back"] is True
+            assert rejected["applied_port"] is None
+            assert rejected["scale_id"] == ws_env.scale_id
             assert audits[1].details == {
                 "scale_id": ws_env.scale_id,
                 "ok": True,

@@ -31,6 +31,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
@@ -1723,8 +1724,10 @@ class TestScaleSettingsRoutes:
                 select(AuditLog).where(AuditLog.action == "scale_settings")
             ).scalar_one()
             assert entry.actor == f"panel:{ADMIN_LOGIN}"
-            assert entry.details["scale_id"] == refs_env.scale_id
-            changes = entry.details["changes"]
+            details = entry.details
+            assert details is not None
+            assert details["scale_id"] == refs_env.scale_id
+            changes = cast(dict[str, dict[str, object]], details["changes"])
             assert changes["port"] == {"old": None, "new": "COM11"}
             assert changes["baudrate"] == {"old": None, "new": 19200}
             assert changes["thresholds.zero_threshold_kg"]["new"] == 150.0
@@ -1748,7 +1751,9 @@ class TestScaleSettingsRoutes:
                 .all()
             )
             assert len(entries) == 2
-            assert entries[1].details["changes"] == {
+            second = entries[1].details
+            assert second is not None
+            assert second["changes"] == {
                 "port": {"old": "COM11", "new": "COM4"},
                 "baudrate": {"old": 19200, "new": 9600},
             }

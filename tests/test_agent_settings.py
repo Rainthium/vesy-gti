@@ -955,8 +955,10 @@ class TestManagerCycleWithPort:
         )
 
         async def run_both() -> list[ConfigStatus]:
-            return await asyncio.gather(
-                environment.manager.handle(first), environment.manager.handle(second)
+            return list(
+                await asyncio.gather(
+                    environment.manager.handle(first), environment.manager.handle(second)
+                )
             )
 
         try:
