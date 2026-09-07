@@ -6,8 +6,10 @@ AnyDesk — параметры цикла, камеры (URL с паролями
 
 Порядок применения:
 - цикл: новый CycleConfig подставляется наблюдателю (наблюдение начинается
-  заново с WAIT_EMPTY — стоящая на весах машина потребует пересъезда,
-  как после рестарта агента), авторежиму и порогу ручного режима;
+  заново с WAIT_EMPTY только при смене порогов наблюдения — тогда стоящая
+  на весах машина потребует пересъезда, как после рестарта агента; при
+  прочих параметрах фаза и фиксация сохраняются, 07.09.2026), авторежиму
+  и порогу ручного режима;
 - камеры: списки камер операций, ручного режима и фоновой проверки;
 - COM-порт: драйвер перезапускается на новом порту; если за
   PORT_CHECK_TIMEOUT_S индикатор не ожил — откат на прежний порт
@@ -254,7 +256,7 @@ class SettingsManager:
         await asyncio.to_thread(self._driver.set_port, port, baudrate)
         if await self._wait_indicator_alive():
             logger.info("настройки центра: индикатор отвечает на %s", port)
-            return ConfigStatus(ok=True)
+            return ConfigStatus(ok=True, applied_port=port, applied_baudrate=self._driver.baudrate)
         logger.error("настройки центра: индикатор молчит на %s — откат на %s", port, old_port)
         await asyncio.to_thread(self._driver.set_port, old_port, old_baudrate)
         return ConfigStatus(

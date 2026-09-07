@@ -244,6 +244,32 @@ class TestCleanupOrphanPhotos:
 
 
 class TestBuildRuntime:
+    def test_info_port_label_follows_driver(self, tmp_path: Path) -> None:
+        """Строка порта на экранах — живая, из драйвера: после смены порта из
+        центра (driver.set_port) экран показывает новый порт без перезапуска
+        (Кара-Суу 07.09.2026: до перезапуска висел socket://…)."""
+        config = AgentConfig.model_validate(
+            config_data(
+                storage={
+                    "db_path": str(tmp_path / "agent.sqlite3"),
+                    "photos_dir": str(tmp_path / "photos"),
+                }
+            )
+        )
+        runtime, driver, storage, _client, _uploader, _camera_health, _watcher, _auto, streams = (
+            build_runtime(config)
+        )
+        streams.stop_all()
+        try:
+            assert runtime.info.port_label == "socket://127.0.0.1:4001 · 9600 · 8-N-1"
+            driver.set_port("COM4", 19200)
+            assert runtime.info.port_label == "COM4 · 19200 · 8-N-1"
+            # прочие сведения не затронуты
+            assert runtime.info.site_name == "Тестовый объект"
+        finally:
+            driver.stop()
+            storage.close()
+
     def test_services_glued(self, tmp_path: Path) -> None:
         """Сервисы собираются из конфига; инфо, камеры, тара, правило №3."""
         config = AgentConfig.model_validate(

@@ -191,6 +191,11 @@ class ManualPermit:
         self.by_center = False
 
 
+def port_label(port: str, baudrate: int) -> str:
+    """Строка порта для экранов оператора: «COM4 · 9600 · 8-N-1»."""
+    return f"{port} · {baudrate} · 8-N-1"
+
+
 class AgentRuntime:
     """Реализация AgentServices: связывает веб-интерфейс с кирпичами агента."""
 
@@ -243,14 +248,20 @@ class AgentRuntime:
             scale_name=config.scale_name,
             indicator_model=config.indicator_model,
             driver_name=config.scale.driver,
-            port_label=f"{config.scale.port} · {config.scale.baudrate} · 8-N-1",
+            port_label=port_label(config.scale.port, config.scale.baudrate),
             agent_version=agent.__version__,
             center_url=config.center.url,
         )
 
     @property
     def info(self) -> AgentInfo:
-        return self._info
+        # порт — живой, из драйвера: центр меняет его на лету
+        # (SettingsManager._apply_port), а строка, собранная при старте,
+        # устаревала — Кара-Суу 07.09.2026: после перехода на COM4 экран до
+        # перезапуска показывал socket://127.0.0.1:4001
+        return replace(
+            self._info, port_label=port_label(self._driver.port_url, self._driver.baudrate)
+        )
 
     def set_indicator_model(self, model: str) -> None:
         """Подпись индикатора из центра — в шапку и «Оборудование» на лету

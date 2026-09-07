@@ -43,6 +43,16 @@ class Fixation:
     fixed_at_monotonic: float
 
 
+# параметры CycleConfig, от которых зависит само наблюдение (фазы и фиксация);
+# остальные (таймауты операции, лимит тары) автомат не читает
+OBSERVATION_FIELDS = (
+    "zero_threshold_kg",
+    "vehicle_threshold_kg",
+    "stable_duration_s",
+    "no_data_timeout_s",
+)
+
+
 class ScaleWatcher:
     """Вечный автомат наблюдения; tick() дёргается опросом драйвера (5–10 раз/с)."""
 
@@ -68,10 +78,20 @@ class ScaleWatcher:
     def reconfigure(self, config: CycleConfig) -> None:
         """Применить новые пороги/таймауты (настройки из центра).
 
-        Наблюдение начинается заново с WAIT_EMPTY: старая фиксация могла
-        быть снята по прежним порогам — стоящая машина потребует пересъезда
-        (та же семантика, что после рестарта агента)."""
+        Наблюдение начинается заново с WAIT_EMPTY только если изменились
+        параметры, по которым оно ведётся (OBSERVATION_FIELDS): старая
+        фиксация могла быть снята по прежним порогам — стоящая машина
+        потребует пересъезда (та же семантика, что после рестарта агента).
+        Прочие параметры (таймауты операции, лимит тары) фазу и фиксацию
+        не трогают: панель центра шлёт цикл целиком при каждом «Сохранить»,
+        и безусловный сброс лишал стоящую на весах машину готовой фиксации
+        (Кара-Суу 07.09.2026 — шесть ERR_VEHICLE_TIMEOUT подряд)."""
+        changed = any(
+            getattr(config, field) != getattr(self._config, field) for field in OBSERVATION_FIELDS
+        )
         self._config = config
+        if not changed:
+            return
         self._phase = WatcherPhase.WAIT_EMPTY
         self._fixation = None
         self._no_data_since = None

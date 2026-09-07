@@ -10,7 +10,15 @@
   потребителям; COM-порт: тот же порт не трогается, живой новый порт
   применяется, молчащий — откатывается с rolled_back=True и снимком БЕЗ
   порта; исключение внутри применения → ConfigStatus(ok=False), клиент
-  не падает; успешный снимок сохраняется в storage и переживает рестарт.
+  не падает; успешный снимок сохраняется в storage и переживает рестарт;
+- цикл и COM-порт одним снимком: порт ожил → applied_port заполнен, watcher
+  получает reconfigure ровно один раз; порт молчит → откат не трогает уже
+  применённое наблюдение (реальный ScaleWatcher держит READY); смена только
+  лимита тары доезжает до ручного режима и авторежима без сброса наблюдения;
+  один и тот же цикл при каждом hello — идемпотентен для наблюдения;
+  смена только скорости на том же порту идёт через проверку живости и
+  откат, applied_baudrate — фактическая скорость драйвера (и когда payload
+  её не задал); параллельные handle сериализуются, ничего не теряется.
 
 Реального ожидания 12 с нет: PORT_CHECK_TIMEOUT_S ужимается monkeypatch.
 """
@@ -415,6 +423,39 @@ class TestManagerCycle:
         finally:
             environment.close()
 
+    def test_cycle_same_observation_params_keeps_real_watcher_ready(self) -> None:
+        """Панель шлёт цикл при каждом «Сохранить»: если пороги наблюдения не
+        менялись (правили лимит тары/таймаут операции), реальный ScaleWatcher
+        держит READY и фиксацию — стоящей машине пересъезд не нужен
+        (Кара-Суу 07.09.2026: шесть ERR_VEHICLE_TIMEOUT подряд)."""
+        clock = {"now": 0.0}
+        base = make_cycle_settings()
+        watcher = ScaleWatcher(CycleConfig(**base.model_dump()), clock=lambda: clock["now"])
+        watcher.tick(ScaleState(status=ScaleStatus.OK, weight_kg=0.0, stable=True))
+        clock["now"] = 1.0
+        watcher.tick(ScaleState(status=ScaleStatus.OK, weight_kg=12000.0, stable=True))
+        clock["now"] = 2.0
+        watcher.tick(ScaleState(status=ScaleStatus.OK, weight_kg=12000.0, stable=True))
+        clock["now"] = 2.0 + base.stable_duration_s
+        watcher.tick(ScaleState(status=ScaleStatus.OK, weight_kg=12000.0, stable=True))
+        phase_before: WatcherPhase = watcher.phase
+        assert phase_before is WatcherPhase.READY
+        fixation = watcher.fixation
+        assert fixation is not None
+
+        environment = ManagerEnv(watcher=watcher)
+        try:
+            payload = ScaleSettingsPayload(
+                cycle=make_cycle_settings(max_tare_kg=12_345.0, vehicle_timeout_s=5.0)
+            )
+            status = environment.handle(payload)
+            assert status.ok is True
+            phase_after: WatcherPhase = watcher.phase
+            assert phase_after is WatcherPhase.READY
+            assert watcher.fixation == fixation
+        finally:
+            environment.close()
+
     def test_cycle_snapshot_persisted(self, env: ManagerEnv) -> None:
         """Применённый снимок сохранён в SQLite и восстановим после рестарта."""
         cycle = make_cycle_settings()
@@ -567,6 +608,7 @@ class TestManagerPort:
         стоять на весах — лишний рестарт потока чтения ни к чему)."""
         status = env.handle(ScaleSettingsPayload(scale_port="COM5", baudrate=9600))
         assert status.ok is True
+        assert status.applied_port is None  # порт не менялся — событие не нужно
         assert env.driver.set_port_calls == []
         # снимок сохранён с портом: после рестарта порт останется под центром
         stored = env.stored_payload()
@@ -584,6 +626,8 @@ class TestManagerPort:
         status = env.handle(ScaleSettingsPayload(scale_port="COM11", baudrate=19200))
         assert status.ok is True
         assert status.rolled_back is False
+        # центр по applied_port пишет событие «порт переключён» (0.4.30)
+        assert status.applied_port == "COM11"
         assert env.driver.set_port_calls == [("COM11", 19200)]
         assert env.driver.port_url == "COM11"
         assert env.driver.baudrate == 19200
@@ -599,6 +643,7 @@ class TestManagerPort:
         status = env.handle(ScaleSettingsPayload(cycle=cycle, scale_port="COM99", baudrate=19200))
         assert status.ok is False
         assert status.rolled_back is True
+        assert status.applied_port is None
         assert status.error and "COM99" in status.error
         # два вызова: попытка нового порта и откат на прежние параметры
         assert env.driver.set_port_calls == [("COM99", 19200), ("COM5", 9600)]
@@ -680,3 +725,253 @@ class TestManualAllowedFromCenter:
     def test_none_leaves_permit_untouched(self, env: ManagerEnv) -> None:
         env.handle(ScaleSettingsPayload(indicator_model="CAS"))
         assert env.info_sink.manual == []
+
+
+# --- цикл и COM-порт одним снимком; идемпотентность цикла (0.4.30, 07.09.2026) ---
+
+
+def make_ready_watcher(
+    cycle: CycleSettings, *, weight_kg: float = 12000.0
+) -> tuple[ScaleWatcher, dict[str, float]]:
+    """Реальный ScaleWatcher по параметрам cycle, доведённый до READY."""
+    clock = {"now": 0.0}
+    watcher = ScaleWatcher(CycleConfig(**cycle.model_dump()), clock=lambda: clock["now"])
+    watcher.tick(ScaleState(status=ScaleStatus.OK, weight_kg=0.0, stable=True))
+    clock["now"] = 1.0
+    watcher.tick(ScaleState(status=ScaleStatus.OK, weight_kg=weight_kg, stable=True))
+    clock["now"] = 2.0
+    watcher.tick(ScaleState(status=ScaleStatus.OK, weight_kg=weight_kg, stable=True))
+    clock["now"] = 2.0 + cycle.stable_duration_s
+    watcher.tick(ScaleState(status=ScaleStatus.OK, weight_kg=weight_kg, stable=True))
+    phase: WatcherPhase = watcher.phase
+    assert phase is WatcherPhase.READY
+    assert watcher.fixation is not None
+    return watcher, clock
+
+
+class TestManagerCycleWithPort:
+    def test_cycle_and_alive_port_applied_together(
+        self, env: ManagerEnv, fast_port_check: None
+    ) -> None:
+        """Цикл и живой новый порт одним снимком: цикл доезжает до всех
+        потребителей ровно по разу, порт применён и отражён в applied_port,
+        снимок сохранён целиком (цикл + порт + скорость)."""
+        env.driver.alive_ports = {"COM11"}
+        cycle = make_cycle_settings()
+        status = env.handle(ScaleSettingsPayload(cycle=cycle, scale_port="COM11", baudrate=19200))
+        assert status.ok is True
+        assert status.rolled_back is False
+        assert status.applied_port == "COM11"
+        assert status.applied_baudrate == 19200
+        assert status.error is None
+
+        expected = CycleConfig(**cycle.model_dump())
+        assert isinstance(env.watcher, FakeWatcher)
+        assert env.watcher.reconfigured == [expected]
+        assert env.runner.cycles == [expected]
+        assert env.manual.thresholds == [cycle.vehicle_threshold_kg]
+        assert env.manual.max_tares == [cycle.max_tare_kg]
+        assert env.driver.set_port_calls == [("COM11", 19200)]
+
+        stored = env.stored_payload()
+        assert stored is not None
+        assert stored.cycle is not None
+        assert stored.cycle.model_dump() == cycle.model_dump()
+        assert (stored.scale_port, stored.baudrate) == ("COM11", 19200)
+
+    def test_cycle_and_silent_port_rollback_keeps_real_watcher_ready(
+        self, fast_port_check: None
+    ) -> None:
+        """Цикл с теми же параметрами наблюдения + молчащий порт: откат порта
+        не трогает уже применённое наблюдение — реальный ScaleWatcher держит
+        READY и фиксацию; отчёт rolled_back без applied_port; снимок — цикл
+        есть, порта нет."""
+        base = make_cycle_settings()
+        watcher, _ = make_ready_watcher(base)
+        fixation = watcher.fixation
+        environment = ManagerEnv(watcher=watcher)
+        try:
+            payload = ScaleSettingsPayload(
+                cycle=make_cycle_settings(max_tare_kg=12_345.0),
+                scale_port="COM99",
+                baudrate=19200,
+            )
+            status = environment.handle(payload)
+            assert status.ok is False
+            assert status.rolled_back is True
+            assert status.applied_port is None
+            phase_after: WatcherPhase = watcher.phase
+            assert phase_after is WatcherPhase.READY
+            assert watcher.fixation == fixation
+            assert environment.driver.set_port_calls == [("COM99", 19200), ("COM5", 9600)]
+            assert environment.runner.cycles[-1].max_tare_kg == 12_345.0
+            assert environment.manual.max_tares == [12_345.0]
+            stored = environment.stored_payload()
+            assert stored is not None
+            assert stored.cycle is not None and stored.cycle.max_tare_kg == 12_345.0
+            assert stored.scale_port is None and stored.baudrate is None
+        finally:
+            environment.close()
+
+    def test_observation_change_and_alive_port_resets_watcher_and_reports_port(
+        self, fast_port_check: None
+    ) -> None:
+        """Смена порога наблюдения + живой порт: наблюдение начинается заново
+        (WAIT_EMPTY), порт применён — оба эффекта в одном отчёте."""
+        base = make_cycle_settings()
+        watcher, _ = make_ready_watcher(base)
+        environment = ManagerEnv(watcher=watcher)
+        environment.driver.alive_ports = {"COM11"}
+        try:
+            payload = ScaleSettingsPayload(
+                cycle=make_cycle_settings(vehicle_threshold_kg=1500.0), scale_port="COM11"
+            )
+            status = environment.handle(payload)
+            assert status.ok is True
+            assert status.applied_port == "COM11"
+            # скорость в payload не задана — в отчёте фактическая скорость драйвера
+            assert status.applied_baudrate == 9600
+            phase_after: WatcherPhase = watcher.phase
+            assert phase_after is WatcherPhase.WAIT_EMPTY
+            assert watcher.fixation is None
+            assert environment.manual.thresholds == [1500.0]
+        finally:
+            environment.close()
+
+    def test_only_max_tare_change_reaches_manual_and_runner_without_reset(self) -> None:
+        """Правили только лимит тары: новое значение доезжает до ручного режима
+        (set_max_tare) и авторежима (set_cycle), сохраняется в снимке, а
+        наблюдение реального ScaleWatcher не сбрасывается — READY и фиксация
+        те же (Кара-Суу 07.09.2026)."""
+        base = make_cycle_settings()
+        watcher, _ = make_ready_watcher(base)
+        fixation = watcher.fixation
+        environment = ManagerEnv(watcher=watcher)
+        try:
+            environment.handle(ScaleSettingsPayload(cycle=base))
+            phase_mid: WatcherPhase = watcher.phase
+            assert phase_mid is WatcherPhase.READY
+
+            status = environment.handle(
+                ScaleSettingsPayload(cycle=make_cycle_settings(max_tare_kg=7_000.0))
+            )
+            assert status.ok is True
+            assert environment.manual.max_tares == [base.max_tare_kg, 7_000.0]
+            assert [cycle.max_tare_kg for cycle in environment.runner.cycles] == [
+                base.max_tare_kg,
+                7_000.0,
+            ]
+            # лимит 0 — «выключен» — тоже управление, а не «не задано»
+            environment.handle(ScaleSettingsPayload(cycle=make_cycle_settings(max_tare_kg=0.0)))
+            assert environment.manual.max_tares[-1] == 0.0
+
+            phase_after: WatcherPhase = watcher.phase
+            assert phase_after is WatcherPhase.READY
+            assert watcher.fixation == fixation
+            stored = environment.stored_payload()
+            assert stored is not None and stored.cycle is not None
+            assert stored.cycle.max_tare_kg == 0.0
+        finally:
+            environment.close()
+
+    def test_same_cycle_on_every_hello_is_idempotent_for_watcher(self) -> None:
+        """Центр шлёт scale_config при каждом hello: тот же цикл трижды подряд
+        не сбрасывает накопление реального ScaleWatcher — READY наступает в
+        тот же момент, что и без применений; потребители при этом получают
+        значения каждый раз (менеджер не дедуплицирует — это дёшево)."""
+        base = make_cycle_settings()
+        clock = {"now": 0.0}
+        watcher = ScaleWatcher(CycleConfig(**base.model_dump()), clock=lambda: clock["now"])
+        heavy = ScaleState(status=ScaleStatus.OK, weight_kg=12000.0, stable=True)
+        watcher.tick(ScaleState(status=ScaleStatus.OK, weight_kg=0.0, stable=True))
+        clock["now"] = 1.0
+        watcher.tick(heavy)  # заезд
+        clock["now"] = 2.0
+        watcher.tick(heavy)  # кандидат: выдержка 3 с закончится в 5.0
+        environment = ManagerEnv(watcher=watcher)
+        try:
+            for step in (3.0, 3.5, 4.0):
+                clock["now"] = step
+                status = environment.handle(ScaleSettingsPayload(cycle=base))
+                assert status.ok is True
+                phase_mid: WatcherPhase = watcher.tick(heavy)
+                assert phase_mid is WatcherPhase.STABILIZING
+            clock["now"] = 4.9
+            phase_before: WatcherPhase = watcher.tick(heavy)
+            assert phase_before is WatcherPhase.STABILIZING
+            clock["now"] = 5.0
+            phase_after: WatcherPhase = watcher.tick(heavy)
+            assert phase_after is WatcherPhase.READY
+            assert len(environment.runner.cycles) == 3
+            assert environment.manual.thresholds == [base.vehicle_threshold_kg] * 3
+        finally:
+            environment.close()
+
+    def test_baudrate_only_change_alive_reports_applied_port(
+        self, env: ManagerEnv, fast_port_check: None
+    ) -> None:
+        """Тот же порт, другая скорость: драйвер перезапускается на новой
+        скорости через проверку живости; в отчёте applied_port = тот же порт
+        и applied_baudrate = новая скорость (центр пишет «COM5 · 19200»),
+        снимок — с новой скоростью."""
+        env.driver.alive_ports = {"COM5"}
+        status = env.handle(ScaleSettingsPayload(scale_port="COM5", baudrate=19200))
+        assert status.ok is True
+        assert status.rolled_back is False
+        assert status.applied_port == "COM5"
+        assert status.applied_baudrate == 19200
+        assert env.driver.set_port_calls == [("COM5", 19200)]
+        assert env.driver.baudrate == 19200
+        stored = env.stored_payload()
+        assert stored is not None
+        assert (stored.scale_port, stored.baudrate) == ("COM5", 19200)
+
+    def test_baudrate_only_change_silent_rolls_back(
+        self, env: ManagerEnv, fast_port_check: None
+    ) -> None:
+        """Тот же порт, другая скорость, индикатор замолчал: откат на прежнюю
+        скорость, rolled_back, снимок без порта и скорости."""
+        status = env.handle(ScaleSettingsPayload(scale_port="COM5", baudrate=19200))
+        assert status.ok is False
+        assert status.rolled_back is True
+        assert status.applied_port is None
+        assert status.applied_baudrate is None
+        assert env.driver.set_port_calls == [("COM5", 19200), ("COM5", 9600)]
+        assert env.driver.baudrate == 9600
+        stored = env.stored_payload()
+        assert stored is not None
+        assert stored.scale_port is None and stored.baudrate is None
+
+    def test_concurrent_handles_are_serialized(self, fast_port_check: None) -> None:
+        """Два scale_config подряд без ожидания (hello и тут же «Сохранить»):
+        замок сериализует применение — оба отчёта ok, ни одно применение не
+        потеряно, драйвер переключён один раз, снимок — от последнего."""
+        environment = ManagerEnv()
+        environment.driver.alive_ports = {"COM11"}
+        cycle = make_cycle_settings()
+        first = ScaleConfigUpdate(settings=ScaleSettingsPayload(cycle=cycle, scale_port="COM11"))
+        second = ScaleConfigUpdate(
+            settings=ScaleSettingsPayload(cycle=make_cycle_settings(max_tare_kg=5_000.0))
+        )
+
+        async def run_both() -> list[ConfigStatus]:
+            return await asyncio.gather(
+                environment.manager.handle(first), environment.manager.handle(second)
+            )
+
+        try:
+            statuses = asyncio.run(run_both())
+            assert [status.ok for status in statuses] == [True, True]
+            assert statuses[0].applied_port == "COM11"
+            assert statuses[1].applied_port is None
+            assert isinstance(environment.watcher, FakeWatcher)
+            assert [config.max_tare_kg for config in environment.watcher.reconfigured] == [
+                cycle.max_tare_kg,
+                5_000.0,
+            ]
+            assert environment.driver.set_port_calls == [("COM11", None)]
+            stored = environment.stored_payload()
+            assert stored is not None and stored.cycle is not None
+            assert stored.cycle.max_tare_kg == 5_000.0
+        finally:
+            environment.close()
