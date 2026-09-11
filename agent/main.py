@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,7 +43,7 @@ from agent.config import AgentConfig, load_config
 from agent.diagnostics import default_log_path, read_log_tail
 from agent.drivers import create_driver
 from agent.drivers.base import ScaleState, SerialScaleDriver
-from agent.photos import THUMB_SUFFIX, PhotoLibrary
+from agent.photos import THUMB_SUFFIX, PhotoLibrary, shrink_preview
 from agent.selfcheck import UpdateSelfCheck
 from agent.settings import SettingsManager, merge_center_settings
 from agent.sync.photo_uploader import PhotoUploader
@@ -114,6 +115,12 @@ PREVIEW_TTL_S = 1.5
 PREVIEW_FAST_TTL_S = 0.75
 PREVIEW_INTERVAL_MS = 2000
 PREVIEW_FAST_INTERVAL_MS = 1000
+# 0.4.31 (урок Канта 11.09.2026): при срыве съёмки превью отдаётся последний
+# удачный кадр не старше PREVIEW_STALE_MAX_S — единичная осечка камеры не
+# превращается в «Нет сигнала» на экране оператора; срывы пишутся в лог не
+# чаще раза в PREVIEW_WARN_EVERY_S на камеру (мёртвая камера не забивает лог)
+PREVIEW_STALE_MAX_S = 10.0
+PREVIEW_WARN_EVERY_S = 30.0
 
 
 class CameraHealth:
@@ -121,8 +128,10 @@ class CameraHealth:
 
     Раз в ``interval_s`` пробует снимок каждой камеры (недоступная камера —
     это видно диспетчеру на экране объектов, запрос Игоря 09.08.2026).
-    Снимок-проба и снимок операции не конфликтуют: камеры отдают JPEG
-    любому числу клиентов.
+    Проба идёт под замком съёмки превью той же камеры (``set_capture_lock``,
+    0.4.31): одновременных HTTP-запросов к одной камере не делаем — на
+    Канте задняя Hikvision при наложении отвечала срывом. Снимок операции
+    замок не берёт (по замыслу: операцию не задерживаем).
     """
 
     def __init__(
@@ -139,10 +148,24 @@ class CameraHealth:
         # живой буфер потока считается пробой камеры: не дёргаем её лишний раз
         self._streams = streams
         self._statuses: dict[CameraRole, CameraStatus] = {}
+        # замок съёмки по роли от превью (0.4.31): проба и превью не ходят к
+        # одной камере одновременно — на Канте задняя Hikvision при наложении
+        # двух HTTP-запросов отвечала срывом, и оператор видел «Нет сигнала»
+        self._capture_lock: Callable[[CameraRole], threading.Lock] | None = None
 
     @property
     def statuses(self) -> list[CameraStatus]:
         return list(self._statuses.values())
+
+    def set_capture_lock(self, provider: Callable[[CameraRole], threading.Lock]) -> None:
+        """Брать замок съёмки камеры (тот же, что у превью) на время пробы."""
+        self._capture_lock = provider
+
+    def _probe(self, camera: CameraConfig) -> CameraShot:
+        if self._capture_lock is None:
+            return shot_or_capture(camera, self._streams, ffmpeg_path=self._ffmpeg_path)
+        with self._capture_lock(camera.role):
+            return shot_or_capture(camera, self._streams, ffmpeg_path=self._ffmpeg_path)
 
     def set_cameras(self, cameras: list[CameraConfig]) -> None:
         """Новый список камер (настройки из центра); статусы обнуляются
@@ -152,9 +175,7 @@ class CameraHealth:
 
     async def check_once(self) -> None:
         for camera in self._cameras:
-            shot = await asyncio.to_thread(
-                shot_or_capture, camera, self._streams, ffmpeg_path=self._ffmpeg_path
-            )
+            shot = await asyncio.to_thread(self._probe, camera)
             previous = self._statuses.get(camera.role)
             self._statuses[camera.role] = CameraStatus(
                 role=camera.role,
@@ -231,6 +252,16 @@ class AgentRuntime:
         self._preview_locks: dict[CameraRole, threading.Lock] = {
             camera.role: threading.Lock() for camera in config.cameras
         }
+        # 0.4.31: последний удачный кадр по роли (подмена при срыве съёмки),
+        # время последнего предупреждения о срыве и памятка ужатого кадра
+        # (кадр потоковой камеры между запросами браузера один и тот же —
+        # не пережимаем его каждый раз)
+        self._preview_last_ok: dict[CameraRole, tuple[CameraShot, float]] = {}
+        self._preview_warned_at: dict[CameraRole, float] = {}
+        self._preview_small: dict[CameraRole, tuple[datetime, bytes]] = {}
+        # поколение набора камер: съёмка, начатая до set_cameras, не кладёт
+        # кадр прежней камеры в памятки (иначе он отдавался бы до 10 с)
+        self._preview_generation = 0
         # камеры превью изменяемы: применение scale_config на лету заменяет
         # их через set_cameras (боевой урок Кызыл-Кыи 14.08.2026 — свап ролей
         # из центра доезжал до съёмки операций, но не до превью оператора)
@@ -304,7 +335,15 @@ class AgentRuntime:
         отдаваться как «свежий» после смены URL или ролей.
         """
         self._preview_cameras = {camera.role: camera for camera in cameras}
+        self._preview_generation += 1
         self._preview_cache.clear()
+        self._preview_last_ok.clear()
+        self._preview_small.clear()
+        self._preview_warned_at.clear()
+
+    def preview_lock(self, role: CameraRole) -> threading.Lock:
+        """Замок съёмки камеры: под ним же идёт проба CameraHealth (0.4.31)."""
+        return self._preview_locks.setdefault(role, threading.Lock())
 
     def preview_interval_ms(self) -> int:
         """Период опроса превью браузером оператора.
@@ -341,27 +380,71 @@ class AgentRuntime:
             # живое, ffmpeg на каждый запрос браузера не запускается
             streamed = self._streams.shot(role)
             if streamed is not None:
-                return streamed
+                return self._shrunk(streamed)
         cached = self._preview_cache.get(role)
         now = time.monotonic()
         if cached is not None and now - cached[1] < ttl:
-            return cached[0]
-        lock = self._preview_locks.setdefault(role, threading.Lock())
+            return self._preview_result(role, cached[0], now)
+        lock = self.preview_lock(role)
         if not lock.acquire(blocking=False):
             # съёмка уже идёт в соседнем запросе — не плодим вторую
             if cached is not None:
-                return cached[0]
+                return self._preview_result(role, cached[0], now)
             return CameraShot(
                 role=role, jpeg=None, captured_at=datetime.now(UTC), error="съёмка уже идёт"
             )
         try:
+            generation = self._preview_generation
             shot = capture(camera, ffmpeg_path=self._config.ffmpeg_path)
+            taken = time.monotonic()
+            if generation != self._preview_generation:
+                # камеры сменились, пока шла съёмка: кадр прежней камеры
+                # отдаём один раз, в памятки не кладём
+                return self._shrunk(shot) if shot.ok else shot
+            if shot.ok:
+                shot = self._shrunk(shot)
+                self._preview_last_ok[role] = (shot, taken)
+            else:
+                self._warn_preview_failure(role, shot.error, taken)
             # ошибку тоже кэшируем: мёртвая камера не должна заставлять
             # каждый запрос превью висеть полный таймаут съёмки
-            self._preview_cache[role] = (shot, time.monotonic())
-            return shot
+            self._preview_cache[role] = (shot, taken)
+            return self._preview_result(role, shot, taken)
         finally:
             lock.release()
+
+    def _preview_result(self, role: CameraRole, shot: CameraShot, now: float) -> CameraShot:
+        """Кадр как есть; при срыве — последний удачный, пока он не старше
+        PREVIEW_STALE_MAX_S (единичная осечка камеры оператору не видна)."""
+        if shot.ok:
+            return shot
+        last = self._preview_last_ok.get(role)
+        if last is not None and now - last[1] <= PREVIEW_STALE_MAX_S:
+            return last[0]
+        return shot
+
+    def _shrunk(self, shot: CameraShot) -> CameraShot:
+        """Ужатая копия кадра для превью (снимки операций не задеты).
+
+        Памятка по времени съёмки: буфер потоковой камеры отдаёт один и тот
+        же кадр между запросами браузера — пережимать его каждый раз незачем.
+        """
+        if shot.jpeg is None:
+            return shot
+        memo = self._preview_small.get(shot.role)
+        if memo is not None and memo[0] == shot.captured_at:
+            return replace(shot, jpeg=memo[1])
+        small = shrink_preview(shot.jpeg)
+        self._preview_small[shot.role] = (shot.captured_at, small)
+        return replace(shot, jpeg=small)
+
+    def _warn_preview_failure(self, role: CameraRole, error: str | None, now: float) -> None:
+        last = self._preview_warned_at.get(role)
+        if last is not None and now - last < PREVIEW_WARN_EVERY_S:
+            return
+        self._preview_warned_at[role] = now
+        # текст ошибки capture уже начинается с роли («rear: … (url)»)
+        logger.warning("превью камеры: %s", error)
 
     def photo_roles(self, weighing_uuid: UUID) -> list[CameraRole]:
         return self._photos.roles_of(weighing_uuid)
@@ -662,6 +745,8 @@ def build_runtime(
     manager_ref[-1].set_preview(runtime)
     manager_ref[-1].set_info_sink(runtime)
     manager_ref[-1].set_retention(retention)
+    # проба камеры и съёмка превью — под одним замком на роль (0.4.31)
+    camera_health.set_capture_lock(runtime.preview_lock)
     runtime.selfcheck = selfcheck
     runtime.retention = retention
     return runtime, driver, storage, client, uploader, camera_health, watcher, auto_config, streams

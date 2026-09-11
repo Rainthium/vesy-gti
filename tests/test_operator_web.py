@@ -1292,3 +1292,13 @@ class TestSessionFollowsPassword:
         services.stamps[OPERATOR_LOGIN] = None  # учётка заблокирована/удалена
         response = operator_client.get("/equipment", follow_redirects=False)
         assert response.status_code == 303 and "/login" in response.headers["Location"]
+
+
+class TestPreviewScript:
+    def test_main_page_waits_for_previous_frame(self, operator_client: TestClient) -> None:
+        """Страница не обрывает недогруженный кадр превью и снимает «Нет сигнала»
+        после удачной загрузки (0.4.31, урок Канта 11.09.2026)."""
+        page = operator_client.get("/").text
+        assert "dataset.loading === '1'" in page
+        assert "PREVIEW_STUCK_MS" in page
+        assert "onload=\"this.classList.remove('failed')" in page

@@ -359,3 +359,43 @@ class TestThumbnailGeneration:
         assert _library(storage, center).photo_bytes(uuid, CameraRole.FRONT, thumb=True) == (
             b"not-a-jpeg-at-all"
         )
+
+
+# --- ужатие кадра превью (0.4.31, урок Канта 11.09.2026) ---
+
+
+def _jpeg(width: int, height: int) -> bytes:
+    from PIL import Image as _Image
+
+    buffer = io.BytesIO()
+    _Image.new("RGB", (width, height), (120, 130, 140)).save(buffer, "JPEG", quality=90)
+    return buffer.getvalue()
+
+
+class TestShrinkPreview:
+    def test_big_frame_is_shrunk_to_max_side(self) -> None:
+        """Кадр 1600×900 → не больше 640 по большей стороне и заметно легче."""
+        from PIL import Image as _Image
+
+        from agent.photos import PREVIEW_MAX_SIDE, shrink_preview
+
+        big = _jpeg(1600, 900)
+        small = shrink_preview(big)
+        with _Image.open(io.BytesIO(small)) as image:
+            assert max(image.size) <= PREVIEW_MAX_SIDE
+            assert image.size == (640, 360)
+        assert len(small) < len(big)
+
+    def test_small_frame_untouched(self) -> None:
+        """Кадр не больше предела возвращается теми же байтами (без перекодирования)."""
+        from agent.photos import shrink_preview
+
+        small = _jpeg(320, 180)
+        assert shrink_preview(small) is small
+
+    def test_garbage_returned_as_is(self) -> None:
+        """Не-JPEG/битые данные — как есть: превью не место для отказа."""
+        from agent.photos import shrink_preview
+
+        junk = b"\xff\xd8not-really-a-jpeg"
+        assert shrink_preview(junk) is junk

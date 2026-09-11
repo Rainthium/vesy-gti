@@ -82,6 +82,37 @@ def make_thumbnail(original: bytes) -> bytes:
     return buffer.getvalue()
 
 
+# кадр превью оператора ужимается самим агентом (0.4.31, урок Канта
+# 11.09.2026): Hikvision там отдаёт по «лёгкому» каналу тот же кадр
+# 2560×1440 (300–350 КБ), у Dahua уменьшенного снимка нет вовсе — через
+# медленный канал до браузера такие кадры не успевали догрузиться.
+# 640 px по большей стороне → 20–40 КБ; снимки операций не трогаются.
+PREVIEW_MAX_SIDE = 640
+PREVIEW_QUALITY = 72
+
+
+def shrink_preview(jpeg: bytes, *, max_side: int = PREVIEW_MAX_SIDE) -> bytes:
+    """Уменьшенная копия кадра для превью; кадр не больше ``max_side`` — как есть.
+
+    Битый или не-JPEG кадр возвращается нетронутым: превью — не место
+    для отказа, пусть браузер покажет что есть. Декодирование JPEG идёт
+    сразу в уменьшенном масштабе (``draft``) — на весовом ПК это единицы
+    миллисекунд даже для кадра 4K.
+    """
+    try:
+        with Image.open(io.BytesIO(jpeg)) as image:
+            if max(image.size) <= max_side:
+                return jpeg
+            image.draft("RGB", (max_side, max_side))
+            image.thumbnail((max_side, max_side))
+            small = image if image.mode == "RGB" else image.convert("RGB")
+            buffer = io.BytesIO()
+            small.save(buffer, "JPEG", quality=PREVIEW_QUALITY)
+            return buffer.getvalue()
+    except Exception:
+        return jpeg
+
+
 def _ensure_thumb(data: bytes) -> bytes | None:
     """Данные размера миниатюры: как есть, если не больше THUMB_MAX_SIDE,
     иначе ужатая копия; None — это не картинка (или битая)."""

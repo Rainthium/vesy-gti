@@ -26,6 +26,7 @@ from pydantic import ValidationError
 from agent.cameras.capture import CameraConfig, CameraShot
 from agent.config import AgentConfig, load_config
 from agent.main import (
+    AgentRuntime,
     CameraHealth,
     build_runtime,
     cleanup_orphan_photos,
@@ -568,5 +569,183 @@ class TestManualPermitRestore:
         streams.stop_all()
         try:
             assert runtime.manual_allowed_by_center() is False
+        finally:
+            storage.close()
+
+
+# --- превью 0.4.31 (урок Канта 11.09.2026): ужатие, запасной кадр, лог, замок ---
+
+
+def _big_jpeg() -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (1600, 900), (10, 20, 30)).save(buffer, "JPEG", quality=90)
+    return buffer.getvalue()
+
+
+def _runtime_with_cameras(tmp_path: Path) -> tuple[AgentRuntime, AgentStorage, CameraHealth]:
+    config = AgentConfig.model_validate(
+        config_data(
+            storage={
+                "db_path": str(tmp_path / "agent.sqlite3"),
+                "photos_dir": str(tmp_path / "photos"),
+            }
+        )
+    )
+    runtime, _, storage, _, _, camera_health, _, _, streams = build_runtime(config)
+    streams.stop_all()
+    return runtime, storage, camera_health
+
+
+class TestPreviewRobustness:
+    def test_preview_frame_is_shrunk(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Кадр превью ужимается агентом до 640 px: Hikvision Канта отдаёт по
+        «лёгкому» каналу полный кадр 2560×1440, Dahua уменьшенного не имеет."""
+        import io
+
+        from PIL import Image
+
+        runtime, storage, _ = _runtime_with_cameras(tmp_path)
+        try:
+            big = _big_jpeg()
+            monkeypatch.setattr(
+                "agent.main.capture",
+                lambda camera, *, ffmpeg_path: CameraShot(
+                    role=camera.role, jpeg=big, captured_at=datetime.now(UTC)
+                ),
+            )
+            shot = runtime.camera_snapshot(CameraRole.FRONT)
+            assert shot.ok and shot.jpeg is not None
+            with Image.open(io.BytesIO(shot.jpeg)) as image:
+                assert image.size == (640, 360)
+            assert len(shot.jpeg) < len(big)
+        finally:
+            storage.close()
+
+    def test_failure_serves_last_frame_then_error_and_logs_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Срыв съёмки: пока последний удачный кадр моложе PREVIEW_STALE_MAX_S —
+        отдаётся он (оператор не видит «Нет сигнала» от единственной осечки);
+        старше — ошибка. Срывы подряд пишутся в лог один раз (PREVIEW_WARN_EVERY_S)."""
+        runtime, storage, _ = _runtime_with_cameras(tmp_path)
+        try:
+            monkeypatch.setattr("agent.main.PREVIEW_TTL_S", 0.0)  # каждый запрос — новая съёмка
+            outcomes: list[bool] = [True, False, False]
+
+            def fake_capture(camera: CameraConfig, *, ffmpeg_path: str) -> CameraShot:
+                ok = outcomes.pop(0) if outcomes else False
+                if ok:
+                    return CameraShot(
+                        role=camera.role, jpeg=_big_jpeg(), captured_at=datetime.now(UTC)
+                    )
+                return CameraShot(
+                    role=camera.role,
+                    jpeg=None,
+                    captured_at=datetime.now(UTC),
+                    error="front: таймаут",
+                )
+
+            monkeypatch.setattr("agent.main.capture", fake_capture)
+            first = runtime.camera_snapshot(CameraRole.FRONT)
+            assert first.ok
+            with caplog.at_level("WARNING", logger="agent.main"):
+                second = runtime.camera_snapshot(CameraRole.FRONT)
+                third = runtime.camera_snapshot(CameraRole.FRONT)
+            # два срыва подряд — оператору по-прежнему последний удачный кадр
+            assert second.ok and second.jpeg == first.jpeg
+            assert third.ok and third.jpeg == first.jpeg
+            warnings = [r for r in caplog.records if "превью камеры: front" in r.getMessage()]
+            assert len(warnings) == 1, "срывы подряд должны попадать в лог один раз"
+            assert "таймаут" in warnings[0].getMessage()
+            # запасной кадр устарел — отдаётся ошибка (браузер покажет «Нет сигнала»)
+            monkeypatch.setattr("agent.main.PREVIEW_STALE_MAX_S", -1.0)
+            stale = runtime.camera_snapshot(CameraRole.FRONT)
+            assert not stale.ok and stale.error == "front: таймаут"
+        finally:
+            storage.close()
+
+    def test_set_cameras_forgets_last_frame(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """После смены камер из центра запасной кадр прежней камеры не отдаётся."""
+        runtime, storage, _ = _runtime_with_cameras(tmp_path)
+        try:
+            monkeypatch.setattr("agent.main.PREVIEW_TTL_S", 0.0)
+            monkeypatch.setattr(
+                "agent.main.capture",
+                lambda camera, *, ffmpeg_path: CameraShot(
+                    role=camera.role, jpeg=_big_jpeg(), captured_at=datetime.now(UTC)
+                ),
+            )
+            assert runtime.camera_snapshot(CameraRole.FRONT).ok
+            runtime.set_cameras(
+                [CameraConfig(role=CameraRole.FRONT, snapshot_url="http://u:p@10.9.9.9/new")]
+            )
+            monkeypatch.setattr(
+                "agent.main.capture",
+                lambda camera, *, ffmpeg_path: CameraShot(
+                    role=camera.role, jpeg=None, captured_at=datetime.now(UTC), error="front: нет"
+                ),
+            )
+            assert not runtime.camera_snapshot(CameraRole.FRONT).ok
+        finally:
+            storage.close()
+
+
+class TestCameraHealthLock:
+    def test_probe_waits_for_preview_lock(self) -> None:
+        """Проба камеры не ходит к камере, пока идёт съёмка превью (тот же замок)."""
+        import threading
+
+        health = CameraHealth(
+            [
+                CameraConfig(
+                    role=CameraRole.FRONT,
+                    snapshot_url=f"http://127.0.0.1:{_free_port()}/pic",
+                    timeout_s=0.3,
+                )
+            ],
+            interval_s=60.0,
+            ffmpeg_path="ffmpeg",
+        )
+        lock = threading.Lock()
+        health.set_capture_lock(lambda role: lock)
+        lock.acquire()  # «съёмка превью идёт»
+        worker = threading.Thread(target=lambda: asyncio.run(health.check_once()), daemon=True)
+        worker.start()
+        try:
+            worker.join(0.4)
+            assert worker.is_alive(), "проба должна ждать замок съёмки"
+            assert health.statuses == []
+        finally:
+            lock.release()
+        worker.join(5.0)
+        assert not worker.is_alive()
+        [status] = health.statuses
+        assert status.available is False  # порт закрыт: камера недоступна, но проба прошла
+
+    def test_build_runtime_shares_lock_with_preview(self, tmp_path: Path) -> None:
+        """build_runtime связывает пробу CameraHealth с замком превью рантайма."""
+        import threading
+
+        runtime, storage, camera_health = _runtime_with_cameras(tmp_path)
+        try:
+            lock = runtime.preview_lock(CameraRole.FRONT)
+            lock.acquire()
+            worker = threading.Thread(
+                target=lambda: asyncio.run(camera_health.check_once()), daemon=True
+            )
+            worker.start()
+            try:
+                worker.join(0.4)
+                assert worker.is_alive()
+            finally:
+                lock.release()
+            worker.join(10.0)
+            assert not worker.is_alive()
         finally:
             storage.close()

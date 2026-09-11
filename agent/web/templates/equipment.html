@@ -28,7 +28,8 @@
       <span class="pill pill-err cam-fail"><span class="dot"></span>Нет сигнала</span>
     </h2>
     <div class="cam-frame">
-      <img src="/cameras/{{ role.value }}.jpg" alt="Камера {{ role.value }}" onerror="this.classList.add('failed')">
+      <img src="/cameras/{{ role.value }}.jpg" alt="Камера {{ role.value }}"
+           onerror="this.classList.add('failed')" onload="this.classList.remove('failed')">
       <span class="no-signal">Поток недоступен</span>
     </div>
   </section>

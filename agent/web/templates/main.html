@@ -39,7 +39,8 @@
     <figure class="camera">
       <div class="camera-frame">
         <img src="/cameras/{{ role }}.jpg" alt="Камера {{ 'ПЕРЕД' if role == 'front' else 'ЗАД' }}"
-             onerror="this.classList.add('failed')">
+             onerror="this.classList.add('failed'); this.dataset.loading = ''"
+             onload="this.classList.remove('failed'); this.dataset.loading = ''">
         <span class="no-signal">Нет сигнала</span>
       </div>
       <figcaption class="camera-caption">
@@ -95,9 +96,23 @@
       ws.onclose = function () { setTimeout(connect, 1000); };
     }
     connect();
+    // Кадр превью запрашивается заново только когда предыдущий догрузился
+    // (или завис дольше PREVIEW_STUCK_MS): смена src обрывает незавершённую
+    // загрузку, и на медленном канале до агента (урок Канта 11.09.2026)
+    // ни один кадр не успевал долететь — картинка стояла, «Нет сигнала»
+    // после единственного сбоя не снимался (теперь снимает onload).
+    var PREVIEW_STUCK_MS = 15000;
+    // начальная загрузка картинок тоже «в полёте»: первый тик её не обрывает
+    document.querySelectorAll('.camera img').forEach(function (img) {
+      if (!img.complete) { img.dataset.loading = '1'; img.dataset.since = String(Date.now()); }
+    });
     setInterval(function () {
+      var now = Date.now();
       document.querySelectorAll('.camera img').forEach(function (img) {
-        img.src = img.src.split('?')[0] + '?t=' + Date.now();
+        if (img.dataset.loading === '1' && now - Number(img.dataset.since || 0) < PREVIEW_STUCK_MS) { return; }
+        img.dataset.loading = '1';
+        img.dataset.since = String(now);
+        img.src = img.src.split('?')[0] + '?t=' + now;
       });
     }, {{ preview_interval_ms | default(2000) }});
   })();
