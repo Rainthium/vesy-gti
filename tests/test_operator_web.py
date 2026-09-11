@@ -1302,3 +1302,13 @@ class TestPreviewScript:
         assert "dataset.loading === '1'" in page
         assert "PREVIEW_STUCK_MS" in page
         assert "onload=\"this.classList.remove('failed')" in page
+
+
+class TestPreviewHeaders:
+    def test_snapshot_headers_carry_capture_time(self, operator_client: TestClient) -> None:
+        """Ответ превью несёт время съёмки и возраст кадра (0.4.32) — видно в DevTools."""
+        response = operator_client.get("/cameras/front.jpg")
+        assert response.status_code == 200
+        captured = response.headers["X-Captured-At"]
+        assert captured.endswith("+00:00") and "T" in captured
+        assert response.headers["X-Preview-Age-Ms"].isdigit()

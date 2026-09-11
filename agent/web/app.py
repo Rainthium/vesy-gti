@@ -322,10 +322,19 @@ def create_app(
             raise HTTPException(status_code=404, detail="камера не настроена") from exc
         if not shot.ok or shot.jpeg is None:
             raise HTTPException(status_code=502, detail=shot.error or "камера недоступна")
+        captured_at = shot.captured_at
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=UTC)
+        age_ms = max(0, int((datetime.now(UTC) - captured_at).total_seconds() * 1000))
         return Response(
             content=shot.jpeg,
             media_type="image/jpeg",
-            headers={"Cache-Control": "no-store"},
+            headers={
+                "Cache-Control": "no-store",
+                # 0.4.32: возраст кадра виден в DevTools без чтения журнала
+                "X-Captured-At": captured_at.isoformat(timespec="milliseconds"),
+                "X-Preview-Age-Ms": str(age_ms),
+            },
         )
 
     # --- снимки записей журнала ---

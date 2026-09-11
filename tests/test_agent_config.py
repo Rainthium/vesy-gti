@@ -749,3 +749,69 @@ class TestCameraHealthLock:
             assert not worker.is_alive()
         finally:
             storage.close()
+
+
+class TestPreviewStamp:
+    def test_preview_frame_carries_time_overlay(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """На кадре превью прожигается плашка «камера · дата время» (0.4.32):
+        свежесть кадра видна глазами; момент — время съёмки, веса нет."""
+        import io
+
+        from PIL import Image
+
+        from agent.cameras.overlay import OverlayInfo
+        from agent.cameras.overlay import burn_overlay as real_burn
+
+        runtime, storage, _ = _runtime_with_cameras(tmp_path)
+        try:
+            big = _big_jpeg()
+            moment = datetime(2026, 9, 11, 16, 31, 5, tzinfo=UTC)
+            monkeypatch.setattr(
+                "agent.main.capture",
+                lambda camera, *, ffmpeg_path: CameraShot(
+                    role=camera.role, jpeg=big, captured_at=moment
+                ),
+            )
+            burned: list[OverlayInfo] = []
+
+            def spy(jpeg: bytes, info: OverlayInfo) -> bytes:
+                burned.append(info)
+                return real_burn(jpeg, info)
+
+            monkeypatch.setattr("agent.main.burn_overlay", spy)
+            shot = runtime.camera_snapshot(CameraRole.FRONT)
+            assert shot.ok and shot.jpeg is not None
+            assert burned == [OverlayInfo(role=CameraRole.FRONT, moment=moment, weight_kg=None)]
+            with Image.open(io.BytesIO(shot.jpeg)) as image:
+                assert image.size == (640, 360)  # плашка не меняет размер ужатого кадра
+            # тот же кадр из кэша — плашка не прожигается заново
+            again = runtime.camera_snapshot(CameraRole.FRONT)
+            assert again.jpeg == shot.jpeg and len(burned) == 1
+        finally:
+            storage.close()
+
+    def test_slow_capture_logged_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Съёмка дольше PREVIEW_SLOW_S попадает в лог с длительностью, не чаще
+        раза в PREVIEW_WARN_EVERY_S на камеру."""
+        runtime, storage, _ = _runtime_with_cameras(tmp_path)
+        try:
+            monkeypatch.setattr("agent.main.PREVIEW_TTL_S", 0.0)
+            monkeypatch.setattr("agent.main.PREVIEW_SLOW_S", -1.0)  # любая съёмка «медленная»
+            monkeypatch.setattr(
+                "agent.main.capture",
+                lambda camera, *, ffmpeg_path: CameraShot(
+                    role=camera.role, jpeg=_big_jpeg(), captured_at=datetime.now(UTC)
+                ),
+            )
+            with caplog.at_level("WARNING", logger="agent.main"):
+                runtime.camera_snapshot(CameraRole.FRONT)
+                runtime.camera_snapshot(CameraRole.FRONT)
+            slow = [r for r in caplog.records if "кадр снят за" in r.getMessage()]
+            assert len(slow) == 1
+            assert "превью камеры front" in slow[0].getMessage()
+        finally:
+            storage.close()

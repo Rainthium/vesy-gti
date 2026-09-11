@@ -37,6 +37,7 @@ import uvicorn
 
 import agent
 from agent.cameras.capture import CameraConfig, CameraShot, capture
+from agent.cameras.overlay import OverlayInfo, burn_overlay
 from agent.cameras.stream import CameraStreams, shot_or_capture
 from agent.clock import CenterClock
 from agent.config import AgentConfig, load_config
@@ -121,6 +122,11 @@ PREVIEW_FAST_INTERVAL_MS = 1000
 # чаще раза в PREVIEW_WARN_EVERY_S на камеру (мёртвая камера не забивает лог)
 PREVIEW_STALE_MAX_S = 10.0
 PREVIEW_WARN_EVERY_S = 30.0
+# 0.4.32: съёмка превью дольше PREVIEW_SLOW_S попадает в лог (с длительностью,
+# не чаще раза в PREVIEW_WARN_EVERY_S на камеру) — на Канте кадры доходили
+# до экрана редко, а по журналу всё было «200 OK»: без длительности съёмки
+# не отличить медленную камеру от залипшего кэша
+PREVIEW_SLOW_S = 1.5
 
 
 class CameraHealth:
@@ -258,6 +264,7 @@ class AgentRuntime:
         # не пережимаем его каждый раз)
         self._preview_last_ok: dict[CameraRole, tuple[CameraShot, float]] = {}
         self._preview_warned_at: dict[CameraRole, float] = {}
+        self._preview_slow_warned_at: dict[CameraRole, float] = {}
         self._preview_small: dict[CameraRole, tuple[datetime, bytes]] = {}
         # поколение набора камер: съёмка, начатая до set_cameras, не кладёт
         # кадр прежней камеры в памятки (иначе он отдавался бы до 10 с)
@@ -395,8 +402,11 @@ class AgentRuntime:
             )
         try:
             generation = self._preview_generation
+            started = time.monotonic()
             shot = capture(camera, ffmpeg_path=self._config.ffmpeg_path)
             taken = time.monotonic()
+            if taken - started >= PREVIEW_SLOW_S:
+                self._note_slow_preview(role, taken - started, taken)
             if generation != self._preview_generation:
                 # камеры сменились, пока шла съёмка: кадр прежней камеры
                 # отдаём один раз, в памятки не кладём
@@ -424,19 +434,33 @@ class AgentRuntime:
         return shot
 
     def _shrunk(self, shot: CameraShot) -> CameraShot:
-        """Ужатая копия кадра для превью (снимки операций не задеты).
+        """Ужатая копия кадра для превью с плашкой «камера · дата время»
+        (снимки операций не задеты).
 
-        Памятка по времени съёмки: буфер потоковой камеры отдаёт один и тот
-        же кадр между запросами браузера — пережимать его каждый раз незачем.
+        Плашка со временем съёмки (0.4.32) — чтобы свежесть кадра была видна
+        глазами: на Канте картинка «не обновлялась», а по журналу всё было
+        200 OK. Памятка по времени съёмки: буфер потоковой камеры отдаёт один
+        и тот же кадр между запросами браузера — пережимать его каждый раз
+        незачем.
         """
         if shot.jpeg is None:
             return shot
         memo = self._preview_small.get(shot.role)
         if memo is not None and memo[0] == shot.captured_at:
             return replace(shot, jpeg=memo[1])
-        small = shrink_preview(shot.jpeg)
+        small = burn_overlay(
+            shrink_preview(shot.jpeg),
+            OverlayInfo(role=shot.role, moment=shot.captured_at, weight_kg=None),
+        )
         self._preview_small[shot.role] = (shot.captured_at, small)
         return replace(shot, jpeg=small)
+
+    def _note_slow_preview(self, role: CameraRole, seconds: float, now: float) -> None:
+        last = self._preview_slow_warned_at.get(role)
+        if last is not None and now - last < PREVIEW_WARN_EVERY_S:
+            return
+        self._preview_slow_warned_at[role] = now
+        logger.warning("превью камеры %s: кадр снят за %.1f с", role.value, seconds)
 
     def _warn_preview_failure(self, role: CameraRole, error: str | None, now: float) -> None:
         last = self._preview_warned_at.get(role)
