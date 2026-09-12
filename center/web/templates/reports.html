@@ -2,6 +2,8 @@
 {% from "_reports_blocks.html" import kpi_row, masses_block, sites_table, dynamics_block, manual_table, reliability_table, retare_table with context %}
 {% block title %}Отчёты — Весовая система{% endblock %}
 {% block body %}
+{# всплывающие подсказки графиков (data-tip) — см. charts.py #}
+<script src="/panel/static/charts.js?v={{ static_v }}" defer></script>
 {% set active_tab = 'reports' %}
 {% include "_header.html" %}
 {# Экран по макету center-reports.dc.html (5.7): период + объект → счётчики,

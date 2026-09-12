@@ -155,8 +155,16 @@ class TestReportPage:
         assert "тарирование устарело: 1" in page
         assert "действующего тарирования не было: 2" in page
         assert "V3" in page and "V2" in page
-        # отказы АИС по кодам
+        # отказы АИС: подпись по-человечески, код — в подсказке (12.09.2026)
         assert "ERR_UNSTABLE" in page and "ERR_VEHICLE_TIMEOUT" in page
+        assert "вес не стабилизировался" in page
+        assert "машина не заехала за отведённое время" in page
+        # сцепки к перетарированию ведут в журнал (в истории тар пусто у никогда
+        # не тарировавшихся сцепок — замечание Игоря 12.09.2026)
+        assert 'href="/panel/journal?vehicle=V3"' in page
+        assert "/panel/tares?show=all&search=" not in page
+        # подсказки графиков: скрипт подключён, у точек и столбиков есть data-tip
+        assert "/panel/static/charts.js" in page and 'data-tip="' in page
         # графики — inline SVG
         assert page.count("<svg") == 4
         # ссылки печати/экспорта несут те же фильтры
@@ -495,6 +503,7 @@ class TestCharts:
         assert svg.startswith("<svg") and svg.endswith("</svg>")
         assert "&lt;А&gt;" in svg and "&amp;" in svg and "<А>" not in svg
         assert "10,0 т" in svg and "0,0 т" in svg
+        assert 'data-tip="СВХ &lt;А&gt;: 10,0 т"' in svg
         # столбик пустого значения нулевой ширины, максимальный — во всю шкалу
         assert 'width="0.0"' in svg and 'width="440.0"' in svg
         assert "нет данных" in charts.bar_chart_horizontal([])
@@ -503,12 +512,17 @@ class TestCharts:
         labels = [f"{d:02d}.08" for d in range(1, 41)]
         values = [float(i % 7) for i in range(40)]
         svg = charts.column_chart(labels, values, title="c")
-        assert svg.count("<rect") == 40
+        # на отрезок — столбик и невидимая зона попадания с подсказкой
+        assert svg.count("<rect") == 80 and svg.count("chart-hit") == 40
+        assert 'data-tip="03.08: 2"' in svg
         # подписи оси X прорежены (не больше 16), деления оси Y без дробей
         assert svg.count(">01.08<") == 1 and svg.count("<text") < 40 + 30
         assert ">8<" in svg  # верх шкалы 8 при максимуме 6 → 4 деления по 2
         line = charts.line_chart(["a", "b", "c"], [("Первый", [1, 2, 3]), ("Второй", [0, 0, 5])])
         assert line.count("<path") == 2 and "Первый" in line and "Второй" in line
+        # подсказка точки: «объект · отрезок: значение», зона попадания и у нулей
+        assert 'data-tip="Первый · b: 2"' in line and 'data-tip="Второй · a: 0"' in line
+        assert line.count("chart-hit") == 6
         assert "нет данных" in charts.line_chart(["a"], [])
         with pytest.raises(ValueError):
             charts.column_chart(["a", "b"], [1.0])

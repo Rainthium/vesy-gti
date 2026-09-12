@@ -197,6 +197,7 @@ def create_panel_router(
     templates.env.filters["fmt_hours"] = report_view.fmt_hours
     templates.env.filters["fmt_delta"] = report_view.fmt_delta
     templates.env.filters["fmt_pct_change"] = report_view.fmt_pct_change
+    templates.env.filters["code_label"] = report_view.error_code_label
     templates.env.filters["plural_ru"] = _plural_ru
     templates.env.globals["expires"] = queries.tare_expires_at
     templates.env.globals["source_label"] = lambda source: SOURCE_LABELS.get(source, source.value)

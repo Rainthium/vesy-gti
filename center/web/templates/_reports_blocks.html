@@ -230,7 +230,8 @@
     <td class="num {{ 'cell-warn' if row.camera_incidents else '' }}">{{ row.camera_incidents }}</td>
     <td class="num">{{ row.other_incidents }}</td>
     <td class="num {{ 'cell-warn' if row.refusals_total else '' }}">{{ row.refusals_total }}</td>
-    <td class="cell-muted">{% for code, n in row.refusals.items() %}<span class="mono">{{ code }}</span> × {{ n }}{{ ', ' if not loop.last else '' }}{% else %}—{% endfor %}</td>
+    {# подпись по-человечески, код — в подсказке (для разбора с программистами АИС) #}
+    <td class="cell-muted">{% for code, n in row.refusals.items() %}<span class="code-label" title="{{ code }}">{{ code | code_label }}</span> × {{ n }}{{ ', ' if not loop.last else '' }}{% else %}—{% endfor %}</td>
   </tr>
   {% else %}
   <tr><td colspan="9" class="empty">Объектов нет</td></tr>
@@ -257,7 +258,9 @@
       <td class="cell-muted">{{ row.last_weighed_at | fmt_dt }}</td>
       <td class="cell-muted">{% if row.last_tared_at %}{{ row.last_tared_at | fmt_dt }} <span class="pill pill-warn"><span class="dot"></span>устарело</span>{% else %}не было{% endif %}</td>
       <td class="num">{{ row.last_tare_value | fmt_kg }}</td>
-      <td class="cell-print"><a class="print-link" href="/panel/tares?show=all&search={{ row.vehicle_number | urlencode }}">История</a></td>
+      {# в журнале видно и взвешивания без нетто, и старые тарирования сцепки; история
+         тар пуста у сцепок, которые не тарировались никогда (замечание Игоря 12.09.2026) #}
+      <td class="cell-print"><a class="print-link" href="/panel/journal?vehicle={{ row.vehicle_number | urlencode }}">Журнал</a></td>
     </tr>
     {% endfor %}
     </tbody>

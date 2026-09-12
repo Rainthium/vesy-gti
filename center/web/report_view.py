@@ -127,6 +127,32 @@ def bucket_title(bucket: date, step: reports.Step) -> str:
     return f"{MONTHS_SHORT[bucket.month - 1]} {bucket.year}"
 
 
+# коды отказов команд АИС — по-человечески (таблица «Надёжность», выгрузки;
+# пожелание Игоря 12.09.2026); сам код остаётся в подсказке для разбора с АИС
+ERROR_CODE_LABELS: dict[str, str] = {
+    "ERR_AGENT_OFFLINE": "нет связи с агентом объекта",
+    "ERR_SCALE_OFFLINE": "индикатор не отдаёт вес",
+    "ERR_NOT_ZERO": "весы не пусты перед операцией",
+    "ERR_VEHICLE_TIMEOUT": "машина не заехала за отведённое время",
+    "ERR_UNSTABLE": "вес не стабилизировался",
+    "ERR_CAMERA": "нет снимка камеры",
+    "ERR_BUSY": "весы заняты другой операцией",
+    "ERR_TARE_TOO_HEAVY": "тара тяжелее лимита (гружёная машина)",
+    "ERR_VALIDATION": "запрос АИС не прошёл проверку",
+    "ERR_INTERNAL": "внутренняя ошибка центра",
+}
+
+
+def error_code_label(code: str) -> str:
+    """Подпись кода отказа; незнакомый код — как есть."""
+    return ERROR_CODE_LABELS.get(code, code)
+
+
+def refusals_text(refusals: dict[str, int]) -> str:
+    """«машина не заехала … × 3, вес не стабилизировался × 1» для выгрузок."""
+    return ", ".join(f"{error_code_label(code)} × {n}" for code, n in refusals.items())
+
+
 STEP_LABELS: dict[reports.Step, str] = {
     "day": "по дням",
     "week": "по неделям",

@@ -207,7 +207,7 @@ def report_tables(report: reports.Report, *, site_name: str | None) -> list[Tabl
                 row.camera_incidents,
                 row.other_incidents,
                 row.refusals_total,
-                ", ".join(f"{code} × {n}" for code, n in row.refusals.items()),
+                report_view.refusals_text(row.refusals),
             ]
             for row in report.reliability
         ],

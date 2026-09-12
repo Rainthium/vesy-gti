@@ -4,8 +4,11 @@
 дизайн-системы ГТИ, поэтому графики собираются здесь строками SVG:
 горизонтальные столбики «по объектам», столбики динамики по отрезкам
 периода и линии по объектам. Цвета — из палитры ДС (панель и печать
-одинаковы). Числа подписываются на самих столбиках, всплывающая
-подсказка — стандартный ``<title>``.
+одинаковы). Числа подписываются на самих столбиках; всплывающая подсказка
+«кто и сколько» — атрибут ``data-tip`` на столбиках, точках и невидимых
+зонах попадания, её рисует ``static/charts.js`` (пожелание Игоря
+12.09.2026: стандартный ``<title>`` появлялся с задержкой и только при
+точном попадании в линию, у точек подсказки не было).
 
 Все функции возвращают готовую разметку ``<svg …>`` (в шаблоне — ``| safe``);
 тексты экранируются.
@@ -115,8 +118,14 @@ def bar_chart_horizontal(
         y = top + index * row_h
         bar_w = scale_w * (value / max_value) if max_value > 0 else 0
         text_value = fmt_number(value, decimals=decimals) + (f" {unit}" if unit else "")
-        parts.append("<g>")
-        parts.append(f"<title>{escape(label)}: {escape(text_value)}</title>")
+        tip = escape(f"{label}: {text_value}")
+        # data-tip на группе: подпись, столбик и число — одна подсказка; невидимая
+        # зона на всю строку ловит курсор в пустом месте между ними
+        parts.append(f'<g data-tip="{tip}">')
+        parts.append(
+            f'<rect class="chart-hit" x="0" y="{y:.1f}" width="{width}" height="{row_h}" '
+            'fill="transparent"/>'
+        )
         parts.append(
             _text(
                 label_w - 12,
@@ -220,8 +229,14 @@ def column_chart(
         h = plot_h * (value / top) if top > 0 else 0
         y = pad_t + plot_h - h
         text_value = fmt_number(value, decimals=decimals) + (f" {unit}" if unit else "")
-        parts.append("<g>")
-        parts.append(f"<title>{escape(label)}: {escape(text_value)}</title>")
+        tip = escape(f"{label}: {text_value}")
+        parts.append(f'<g data-tip="{tip}">')
+        # зона попадания — весь слот отрезка по высоте графика (тонкие столбики
+        # и нули иначе не поймать)
+        parts.append(
+            f'<rect class="chart-hit" x="{pad_l + slot * index:.1f}" y="{pad_t}" '
+            f'width="{slot:.1f}" height="{plot_h}" fill="transparent"/>'
+        )
         bar_h = max(h, 1.5 if value > 0 else 0)
         parts.append(
             f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{bar_h:.1f}" '
@@ -323,15 +338,24 @@ def line_chart(
             f"{'M' if i == 0 else 'L'}{x:.1f},{y:.1f}" for i, (x, y, _) in enumerate(points)
         )
         parts.append("<g>")
-        parts.append(f"<title>{escape(name)}</title>")
         if len(points) > 1:
             parts.append(
                 f'<path d="{path}" fill="none" stroke="{color}" stroke-width="2.2" '
-                'stroke-linejoin="round" stroke-linecap="round"/>'
+                f'stroke-linejoin="round" stroke-linecap="round" data-tip="{escape(name)}"/>'
             )
-        for x, y, value in points:
+        for index, (x, y, value) in enumerate(points):
+            label = labels[index] if index < len(labels) else ""
+            text_value = fmt_number(value, decimals=decimals) + (f" {unit}" if unit else "")
+            tip = escape(f"{name} · {label}: {text_value}")
             if value > 0 or len(points) == 1:
-                parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.2" fill="{color}"/>')
+                parts.append(
+                    f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.2" fill="{color}" data-tip="{tip}"/>'
+                )
+            # широкая невидимая зона: в точку радиусом 3 px мышью не попасть
+            parts.append(
+                f'<circle class="chart-hit" cx="{x:.1f}" cy="{y:.1f}" r="9" '
+                f'fill="transparent" data-tip="{tip}"/>'
+            )
         parts.append("</g>")
         # легенда
         col, row = s_index % 4, s_index // 4
