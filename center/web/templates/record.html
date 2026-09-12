@@ -12,7 +12,7 @@
       <div>
         <div class="record-title">
           <h1>Запись №{{ w.id }} · {{ 'Взвешивание' if is_weighing else 'Тарирование' }}</h1>
-          <span class="pill {{ 'pill-info' if w.source.value == 'ais' else 'pill-warn' }}"><span class="dot"></span>{{ 'АИС' if w.source.value == 'ais' else 'Вручную (офлайн)' }}</span>
+          <span class="pill {{ source_pill(w.source) }}"{% if w.source.value == 'imported' %} title="Тарирование перенесено из выгрузки АИС «СВХ» при переключении объекта — проведено через UniServer, снимков и карточки нет"{% endif %}><span class="dot"></span>{{ source_label(w.source) }}</span>
           <span class="pill {{ 'pill-ok' if w.code.value == 'OK' else 'pill-err' }}"><span class="dot"></span>{{ w.code.value }}</span>
           {% if w.storno_of %}<span class="pill pill-err"><span class="dot"></span>Сторно</span>
           {% elif card.annulled_by %}<span class="pill pill-err"><span class="dot"></span>Аннулирована</span>{% endif %}
@@ -117,7 +117,8 @@
       </div>
     </div>
     <div class="record-foot">
-      {% if not w.storno_of %}<a href="/panel/journal/{{ w.id }}/card" target="_blank" class="btn-outline">Печать карточки</a>{% endif %}
+      {# у записи-сторно и перенесённого из АИС тарирования карточки нет #}
+      {% if not w.storno_of and w.source.value != 'imported' %}<a href="/panel/journal/{{ w.id }}/card" target="_blank" class="btn-outline">Печать карточки</a>{% endif %}
       {% if can_storno %}
       {# сторно (правило №2): исходная запись остаётся, рядом появляется запись-сторно; причина обязательна (решение Игоря 04.09.2026) #}
       <form method="post" action="/panel/journal/{{ w.id }}/storno" class="inline-form storno-form"

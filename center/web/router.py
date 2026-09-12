@@ -127,6 +127,21 @@ def _fmt_kg(value: float | None) -> str:
     return f"{value:,.0f}".replace(",", " ")
 
 
+# подписи и пилюли источника записи (журнал, страница записи, выгрузка CSV);
+# «перенос из АИС» — тарирования, перенесённые из выгрузки АИС при
+# переключении объекта (решение 12.09.2026)
+SOURCE_LABELS: dict[WeighingSource, str] = {
+    WeighingSource.AIS: "АИС",
+    WeighingSource.LOCAL_OFFLINE: "Вручную (офлайн)",
+    WeighingSource.IMPORTED: "Перенос из АИС",
+}
+SOURCE_PILLS: dict[WeighingSource, str] = {
+    WeighingSource.AIS: "pill-info",
+    WeighingSource.LOCAL_OFFLINE: "pill-warn",
+    WeighingSource.IMPORTED: "pill-info",
+}
+
+
 def _plural_ru(n: int, one: str, few: str, many: str) -> str:
     """Русское склонение при числительном: 1 запись, 2 записи, 5 записей."""
     if n % 10 == 1 and n % 100 != 11:
@@ -184,6 +199,8 @@ def create_panel_router(
     templates.env.filters["fmt_pct_change"] = report_view.fmt_pct_change
     templates.env.filters["plural_ru"] = _plural_ru
     templates.env.globals["expires"] = queries.tare_expires_at
+    templates.env.globals["source_label"] = lambda source: SOURCE_LABELS.get(source, source.value)
+    templates.env.globals["source_pill"] = lambda source: SOURCE_PILLS.get(source, "pill-warn")
     # метка старта процесса — сброс браузерного кэша статики при деплое
     templates.env.globals["static_v"] = str(int(datetime.now(UTC).timestamp()))
 
@@ -813,7 +830,7 @@ def create_panel_router(
             # офлайн-операции, по которым АИС ещё не сообщила номер документа
             parsed_source = WeighingSource.LOCAL_OFFLINE
             unlinked = True
-        elif source in (WeighingSource.AIS.value, WeighingSource.LOCAL_OFFLINE.value):
+        elif source in {member.value for member in WeighingSource}:
             parsed_source = WeighingSource(source)
         return queries.JournalFilters(
             site_id=site_id,
@@ -939,9 +956,7 @@ def create_panel_router(
                     (
                         f"Сторно записи №{weighing.storno_of}"
                         if weighing.storno_of
-                        else (
-                            "АИС" if weighing.source is WeighingSource.AIS else "Вручную (офлайн)"
-                        )
+                        else SOURCE_LABELS.get(weighing.source, weighing.source.value)
                         + (" — аннулирована" if weighing.id in annulled else "")
                     ),
                     _csv_text(weighing.operator),
@@ -975,7 +990,9 @@ def create_panel_router(
             request,
             user=user,
             card=card,
-            can_resend=is_admin and w.storno_of is None,
+            # перенесённое из АИС тарирование — документ самой АИС: событий по
+            # нему не публикуем (decisions 12.09.2026)
+            can_resend=is_admin and w.storno_of is None and w.source is not WeighingSource.IMPORTED,
             # сторнировать можно состоявшуюся операцию, ещё не аннулированную
             # и не являющуюся сторно (decisions 04.09.2026)
             can_storno=is_admin
@@ -1000,6 +1017,12 @@ def create_panel_router(
             if card.weighing.storno_of is not None:
                 # запись-сторно — не операция: в АИС не публикуется (04.09.2026)
                 return "запись-сторно в АИС не публикуется — событие не отправлено"
+            if card.weighing.source is WeighingSource.IMPORTED:
+                # перенесённое из АИС тарирование — документ самой АИС (12.09.2026)
+                return (
+                    "тарирование перенесено из АИС «СВХ» — это её же документ, "
+                    "в АИС не публикуется; событие не отправлено"
+                )
             scale = session.get(Scale, card.weighing.scale_id)
             if scale is None or not scale.ais_object:
                 # поток weighing.completed.* — только для привязанных весов
@@ -1138,6 +1161,9 @@ def create_panel_router(
             or card.weighing.weighed_at is None
             or card.weighing.massa is None
             or card.weighing.storno_of is not None  # у записи-сторно карточки нет
+            # перенесённое из АИС тарирование система не проводила — карточка
+            # с нашими весами и поверкой была бы подлогом (12.09.2026)
+            or card.weighing.source is WeighingSource.IMPORTED
         ):
             raise HTTPException(status_code=404)
         return render(

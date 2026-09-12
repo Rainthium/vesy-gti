@@ -26,6 +26,7 @@
   {% endif %}
 
   <div class="table-card">
+    <div class="journal-scroll">
     <table class="journal">
       <thead>
         <tr><th>Дата / время</th><th>Объект / весы</th><th>Тип</th><th>Событие</th></tr>
@@ -39,14 +40,19 @@
             {% set pill_cls = 'pill-ok' if event.severity.value == 'ok' else ('pill-err' if event.severity.value == 'danger' else 'pill-warn') %}
             <span class="pill {{ pill_cls }}"><span class="dot"></span>{{ event.kind | kind_label }}</span>
           </td>
-          <td>{{ event.message }}</td>
+          {# текст события длинный — переносим, а не обрезаем (замечание Игоря 12.09.2026) #}
+          <td class="cell-wrap">{{ event.message }}</td>
         </tr>
         {% else %}
         <tr><td colspan="4" class="empty">Событий пока нет — детекторы молчат, значит всё работает</td></tr>
         {% endfor %}
       </tbody>
     </table>
+    </div>
   </div>
-  {{ pagination(page, pages, '/panel/events?site_id=' ~ (filters.site_id or '')) }}
+  <div class="page-line">
+    <span class="page-meta">Показано {{ rows | length }} из {{ total }} {{ total | plural_ru('событие', 'события', 'событий') }}</span>
+    {{ pagination(page, pages, '/panel/events?site_id=' ~ (filters.site_id or '')) }}
+  </div>
 </main>
 {% endblock %}

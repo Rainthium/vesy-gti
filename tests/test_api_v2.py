@@ -1172,3 +1172,79 @@ class TestStornoInApi:
         tare = after["weighing"]["tare"]
         assert tare["status"] == "applied" and after["weighing"]["netto"] == 28010.0
         assert tare["storno"]["reason"] == "ошибочное"
+
+
+class TestImportedTaringsHidden:
+    """Тарирования, перенесённые из выгрузки АИС (12.09.2026), — документы самой
+    АИС: в выдаче v2 их нет, а взвешивание по такой таре несёт её номер TAR."""
+
+    @staticmethod
+    def _import(env: ApiEnv, ref: str = "TAR000099001") -> UUID:
+        from center.tare_import import AisTaring
+
+        taring = AisTaring(
+            tare_ref=ref,
+            entry_ref="SVH000099001",
+            vehicle_number="01KG777AAA",
+            trailer_number="01KG500AB",
+            massa=15620.0,
+            object_name="Кызыл-Кыя",
+            operator="Акимов Нурлан Боронбаевич",
+            tared_at=RECENT_TARED_AT,
+            completed=True,
+            ignored=False,
+        )
+        with env.factory() as session:
+            row = repo.save_imported_taring(
+                session, env.scale_id, taring, imported_at=datetime.now(UTC)
+            )
+            assert row is not None
+            session.commit()
+            return row.uuid
+
+    def test_not_listed_and_not_found(self, api_env: ApiEnv) -> None:
+        record_uuid = self._import(api_env)
+        listed = api_env.client.get("/api/v2/weighings", headers=_auth()).json()
+        assert listed["total"] == 0 and listed["weighings"] == []
+        by_ref = api_env.client.get(
+            "/api/v2/weighings", params={"ais_ref": "TAR000099001"}, headers=_auth()
+        ).json()
+        assert by_ref["total"] == 0
+        assert (
+            api_env.client.get(f"/api/v2/weighings/{record_uuid}", headers=_auth()).status_code
+            == 404
+        )
+        assert (
+            api_env.client.get("/api/v2/weighings/TAR000099001", headers=_auth()).status_code == 404
+        )
+
+    def test_weighing_on_imported_tare_carries_ais_ref(self, api_env: ApiEnv) -> None:
+        tare_uuid = self._import(api_env)
+        weighing = _make_record(
+            weighed_at=datetime.now(UTC).replace(microsecond=0),
+            tare_weighing_uuid=tare_uuid,
+            tare_value=15620.0,
+            netto=43310.0 - 15620.0,
+        )
+        with api_env.factory() as session:
+            repo.save_weighing_record(session, api_env.scale_id, weighing, ais_ref="WEI000099002")
+        response = api_env.client.get(f"/api/v2/weighings/{weighing.uuid}", headers=_auth())
+        assert response.status_code == 200, response.text
+        document = response.json()["weighing"]
+        assert document["source"] == "ais" and document["netto"] == pytest.approx(27690.0)
+        tare = document["tare"]
+        assert tare["status"] == "applied"
+        assert tare["ais_ref"] == "TAR000099001"
+        assert tare["id"] == str(tare_uuid)
+        assert tare["massa"] == pytest.approx(15620.0)
+
+    def test_ais_ref_callback_refused(self, api_env: ApiEnv) -> None:
+        """Обратный вызов 7.5 по uuid перенесённой записи (АИС знает его из
+        tare.id) — 404, как и GET: обхода скрытия через callback нет."""
+        tare_uuid = self._import(api_env)
+        response = api_env.client.post(
+            f"/api/v2/weighings/{tare_uuid}/ais_ref",
+            json={"ais_ref": "TAR000099001"},
+            headers=_auth(),
+        )
+        assert response.status_code == 404

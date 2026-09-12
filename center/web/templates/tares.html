@@ -38,7 +38,7 @@
             <td>{{ row.trailer_number or "—" }}</td>
             <td class="cell-photos">{{ photo_thumbs(photos.get(row.weighing.id), '%s · %s' | format(row.vehicle_number or "без номера", row.tared_at | fmt_dt)) }}</td>
             <td class="num cell-gross">{{ row.tare_value | fmt_kg }}</td>
-            <td class="cell-muted">{{ row.tared_at | fmt_dt }}</td>
+            <td class="cell-muted">{{ row.tared_at | fmt_dt }}{% if row.weighing.source.value == 'imported' %}<div class="cell-sub" title="Перенесено из выгрузки АИС «СВХ» при переключении объекта — проведено через UniServer">перенос из АИС</div>{% endif %}</td>
             {{ site_scale_cell(row.site, row.scale) }}
             {# у заменённой записи «действует до» бессмысленно: её вытеснило
                новое тарирование задолго до календарного срока #}
@@ -47,8 +47,9 @@
             {% else %}
             <td class="cell-muted">—</td>
             {% endif %}
-            {# stopPropagation: клик по печати не должен заодно открывать запись #}
-            <td class="cell-print"><a class="print-link" href="/panel/journal/{{ row.weighing.id }}/card" target="_blank" title="Печать тарной карточки" onclick="event.stopPropagation()">Печать</a></td>
+            {# stopPropagation: клик по печати не должен заодно открывать запись;
+               у перенесённого из АИС тарирования карточки нет #}
+            {% if row.weighing.source.value == 'imported' %}<td class="cell-print"></td>{% else %}<td class="cell-print"><a class="print-link" href="/panel/journal/{{ row.weighing.id }}/card" target="_blank" title="Печать тарной карточки" onclick="event.stopPropagation()">Печать</a></td>{% endif %}
             {% if row.status == 'active' %}
             <td><span class="pill pill-ok"><span class="dot"></span>Действует</span></td>
             {% elif row.status == 'expired' %}
@@ -67,6 +68,9 @@
         </tbody>
       </table>
     </div>
+  </div>
+  <div class="page-line">
+    <span class="page-meta">Показано {{ rows | length }} из {{ total }} {{ total | plural_ru('тарирование', 'тарирования', 'тарирований') }}</span>
     {% set base -%}
     /panel/tares?show={{ show }}&search={{ search | urlencode }}&site_id={{ filters.site_id or '' }}&scale_id={{ filters.scale_id or '' }}
     {%- endset %}

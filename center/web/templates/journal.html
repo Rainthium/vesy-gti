@@ -21,6 +21,7 @@
       <option value="ais" {{ 'selected' if filters.source == 'ais' else '' }}>АИС</option>
       <option value="local_offline" {{ 'selected' if filters.source == 'local_offline' else '' }}>Вручную (офлайн)</option>
       <option value="local_offline_unlinked" {{ 'selected' if filters.source == 'local_offline_unlinked' else '' }} title="Офлайн-операции, по которым АИС ещё не сообщила номер документа (контракт v2)">Офлайн без номера АИС</option>
+      <option value="imported" {{ 'selected' if filters.source == 'imported' else '' }} title="Тарирования, перенесённые из выгрузки АИС «СВХ» при переключении объекта на весовую систему">Перенос из АИС</option>
     </select>
     <button type="submit" class="btn-primary">Показать</button>
     <a class="btn-outline" title="Выгрузить в CSV (открывается в Excel)"
@@ -47,8 +48,9 @@
             <td class="num">{{ (weighing.tare_value if weighing.operation.value == 'weighing' else weighing.massa) | fmt_kg }}</td>
             <td class="num cell-netto">{{ weighing.netto | fmt_kg }}</td>
             {# stopPropagation: клик по печати не должен заодно открывать запись #}
-            {% if weighing.storno_of %}<td class="cell-print"></td>{% else %}<td class="cell-print"><a class="print-link" href="/panel/journal/{{ weighing.id }}/card" target="_blank" title="Печать весовой карточки" onclick="event.stopPropagation()">Печать</a></td>{% endif %}
-            <td>{% if weighing.storno_of %}<span class="pill pill-err" title="Запись-сторно: аннулирует запись №{{ weighing.storno_of }}"><span class="dot"></span>Сторно</span>{% elif weighing.id in annulled %}<span class="pill pill-err" title="Аннулирована сторно — для системы операции не было"><span class="dot"></span>Аннулирована</span>{% else %}<span class="pill {{ 'pill-info' if weighing.source.value == 'ais' else 'pill-warn' }}"><span class="dot"></span>{{ 'АИС' if weighing.source.value == 'ais' else 'Вручную (офлайн)' }}</span>{% endif %}</td>
+            {# у записи-сторно и перенесённого из АИС тарирования карточки нет #}
+            {% if weighing.storno_of or weighing.source.value == 'imported' %}<td class="cell-print"></td>{% else %}<td class="cell-print"><a class="print-link" href="/panel/journal/{{ weighing.id }}/card" target="_blank" title="Печать весовой карточки" onclick="event.stopPropagation()">Печать</a></td>{% endif %}
+            <td>{% if weighing.storno_of %}<span class="pill pill-err" title="Запись-сторно: аннулирует запись №{{ weighing.storno_of }}"><span class="dot"></span>Сторно</span>{% elif weighing.id in annulled %}<span class="pill pill-err" title="Аннулирована сторно — для системы операции не было"><span class="dot"></span>Аннулирована</span>{% else %}<span class="pill {{ source_pill(weighing.source) }}"{% if weighing.source.value == 'imported' %} title="Тарирование перенесено из выгрузки АИС «СВХ» при переключении объекта — проведено через UniServer"{% endif %}><span class="dot"></span>{{ source_label(weighing.source) }}</span>{% endif %}</td>
             <td class="cell-muted">{{ weighing.code.value }}</td>
           </tr>
           {% else %}

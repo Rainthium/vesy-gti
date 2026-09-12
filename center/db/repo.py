@@ -6,9 +6,10 @@
 
 import hashlib
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4, uuid5
 
 from sqlalchemy import Select, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -34,6 +35,7 @@ from center.db.models import (
     WeighingPhoto,
     weighing_checksum,
 )
+from center.tare_import import BISHKEK, AisTaring, OurTaring
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 from shared.messages import (
     AgentOperatorInfo,
@@ -201,7 +203,7 @@ def save_weighing_record(
     # успешное тарирование обновляет единый реестр активных тар
     # (сюда доходят только code == OK — отказы отсеяны выше)
     if record.operation is Operation.TARING and record.vehicle_number and record.massa is not None:
-        _upsert_tare(session, row, record)
+        _upsert_tare(session, row)
     # офлайн-операция выполнена без АИС — единственный путь доставить её в АИС
     # событие (контракт v2, раздел 7): outbox в той же транзакции, что и запись.
     # Событие ставится ТОЛЬКО весам с привязкой АИС (ais_object): поток
@@ -557,29 +559,160 @@ def latest_taring_as_of(
     return session.execute(query).scalar_one_or_none()
 
 
-def _upsert_tare(session: Session, row: Weighing, record: WeighingRecord) -> None:
-    """Обновить активную тару СЦЕПКИ (реестр — снимок, обновляем на месте).
+def _upsert_tare(session: Session, row: Weighing) -> None:
+    """Обновить активную тару СЦЕПКИ по записи тарирования (реестр — снимок,
+    обновляем на месте).
 
     Ключ — пара голова+прицеп (решение 09.08.2026). Более раннее тарирование
-    не затирает более позднее (досылка офлайн-пачек может идти не по порядку).
+    не затирает более позднее (досылка офлайн-пачек может идти не по порядку;
+    перенос из АИС кладёт историю сцепки любым порядком).
     """
-    tared_at = record.weighed_at or datetime.now(UTC)
+    assert row.vehicle_number and row.massa is not None  # проверено вызывающим
+    tared_at = row.weighed_at or datetime.now(UTC)
     statement = (
         pg_insert(TareRegistry)
         .values(
-            vehicle_number=record.vehicle_number,
-            trailer_number=record.trailer_number or "",
+            vehicle_number=row.vehicle_number,
+            trailer_number=row.trailer_number or "",
             weighing_id=row.id,
-            tare_value=record.massa,
+            tare_value=row.massa,
             tared_at=tared_at,
         )
         .on_conflict_do_update(
             index_elements=[TareRegistry.vehicle_number, TareRegistry.trailer_number],
-            set_={"weighing_id": row.id, "tare_value": record.massa, "tared_at": tared_at},
+            set_={"weighing_id": row.id, "tare_value": row.massa, "tared_at": tared_at},
             where=(TareRegistry.tared_at <= tared_at),
         )
     )
     session.execute(statement)
+
+
+# --- перенос тарирований из АИС «СВХ» (решение Игоря 12.09.2026) ---
+
+# пространство имён UUID перенесённых тарирований: uuid5(номер TAR) —
+# детерминирован, поэтому повтор переноса той же выгрузки идемпотентен
+IMPORTED_TARING_NAMESPACE = UUID("2f1c4a6e-9b3d-4e8f-a5c7-0d6b8e1f3a92")
+AIS_REF_ORIGIN_IMPORT = "import"
+
+
+def imported_taring_uuid(tare_ref: str) -> UUID:
+    """UUID записи перенесённого тарирования по номеру документа АИС."""
+    return uuid5(IMPORTED_TARING_NAMESPACE, tare_ref)
+
+
+def known_ais_refs(session: Session, refs: Iterable[str]) -> dict[str, WeighingSource]:
+    """Какие из номеров документов АИС уже закреплены за записями журнала.
+
+    Возвращает {номер: источник записи} — по нему перенос отличает «наша
+    операция» от «перенесено раньше».
+    """
+    wanted = sorted({ref for ref in refs if ref})
+    known: dict[str, WeighingSource] = {}
+    for start in range(0, len(wanted), 1000):
+        chunk = wanted[start : start + 1000]
+        rows = session.execute(
+            select(WeighingAisRef.ais_ref, Weighing.source)
+            .join(Weighing, Weighing.id == WeighingAisRef.weighing_id)
+            .where(WeighingAisRef.ais_ref.in_(chunk))
+        ).all()
+        known.update({ref: source for ref, source in rows})
+    return known
+
+
+def tarings_since(session: Session, since: datetime) -> list[OurTaring]:
+    """Состоявшиеся тарирования журнала с момента — для сопоставления строк
+    выгрузки АИС без номера TAR (объект, номер ТС, масса, время)."""
+    rows = session.execute(
+        select(Site.code, Weighing.vehicle_number, Weighing.massa, Weighing.weighed_at)
+        .join(Scale, Scale.id == Weighing.scale_id)
+        .join(Site, Site.id == Scale.site_id)
+        .where(
+            Weighing.operation == Operation.TARING,
+            Weighing.code == ErrorCode.OK,
+            Weighing.storno_of.is_(None),
+            Weighing.weighed_at >= since,
+            Weighing.massa.is_not(None),
+            Weighing.vehicle_number.is_not(None),
+        )
+    ).all()
+    return [
+        OurTaring(site_code=code, vehicle_number=vehicle, massa=massa, weighed_at=weighed_at)
+        for code, vehicle, massa, weighed_at in rows
+    ]
+
+
+def save_imported_taring(
+    session: Session, scale_id: int, taring: AisTaring, *, imported_at: datetime
+) -> Weighing | None:
+    """Положить перенесённое тарирование в журнал и реестр тар; None — уже есть.
+
+    Запись как у состоявшегося тарирования, но ``source = imported``: без
+    снимков и карточки, с ФИО оператора АИС, номером TAR (origin ``import``)
+    и следом переноса в ``request_payload``. Реестр обновляется по общему
+    правилу (более позднее тарирование сцепки не затирается). Без commit —
+    перенос идёт одной транзакцией вызывающего.
+    """
+    if not taring.vehicle_number:
+        raise ValueError("перенос тарирования без номера ТС невозможен")
+    row_uuid = imported_taring_uuid(taring.tare_ref)
+    exists = session.execute(
+        select(Weighing.id).where(Weighing.uuid == row_uuid)
+    ).scalar_one_or_none()
+    taken = session.execute(
+        select(WeighingAisRef.weighing_id).where(WeighingAisRef.ais_ref == taring.tare_ref)
+    ).scalar_one_or_none()
+    if exists is not None or taken is not None:
+        return None
+    message = (
+        f"Перенесено из АИС «СВХ» {imported_at.astimezone(BISHKEK):%d.%m.%Y}: тарирование "
+        f"проведено через UniServer до переключения объекта на весовую систему, "
+        f"документ {taring.tare_ref}"
+    )
+    if taring.entry_ref:
+        message += f", въезд {taring.entry_ref}"
+    row = Weighing(
+        uuid=row_uuid,
+        scale_id=scale_id,
+        operation=Operation.TARING,
+        code=ErrorCode.OK,
+        massa=taring.massa,
+        unit="kg",
+        stable=True,
+        weighed_at=taring.tared_at,
+        vehicle_number=taring.vehicle_number,
+        trailer_number=taring.trailer_number,
+        source=WeighingSource.IMPORTED,
+        operator=taring.operator,
+        message=message,
+        request_payload={
+            "ais_import": {
+                "tare_ref": taring.tare_ref,
+                "entry_ref": taring.entry_ref,
+                "object": taring.object_name,
+                "operator": taring.operator,
+                "tared_at": taring.tared_at.astimezone(BISHKEK).isoformat(),
+                "massa_kg": taring.massa,
+                "imported_at": imported_at.astimezone(BISHKEK).isoformat(),
+            }
+        },
+        checksum=weighing_checksum(
+            uuid=row_uuid,
+            operation=Operation.TARING.value,
+            code=ErrorCode.OK.value,
+            massa=taring.massa,
+            weighed_at=taring.tared_at,
+            vehicle_number=taring.vehicle_number,
+            source=WeighingSource.IMPORTED.value,
+            photo_sha256s=[],
+        ),
+    )
+    session.add(row)
+    session.flush()
+    session.add(
+        WeighingAisRef(weighing_id=row.id, ais_ref=taring.tare_ref, origin=AIS_REF_ORIGIN_IMPORT)
+    )
+    _upsert_tare(session, row)
+    return row
 
 
 class StornoError(ValueError):
@@ -949,12 +1082,16 @@ __all__ = [
     "authenticate_agent",
     "find_active_tare",
     "hash_agent_token",
+    "imported_taring_uuid",
+    "known_ais_refs",
     "load_tare_registry",
     "rebuild_tare_registry_entry",
     "record_config_status",
     "record_scale_alert",
+    "save_imported_taring",
     "save_weighing_record",
     "set_agent_status",
     "storno_by",
     "storno_weighing",
+    "tarings_since",
 ]

@@ -225,6 +225,12 @@ class TestDownloadTool:
 # ---------------------------------------------------------------------------
 
 
+def _has_ffmpeg(root: Path) -> bool:
+    """Файл ffmpeg.exe дописан целиком (загрузка идёт в потоке)."""
+    target = root / "ffmpeg.exe"
+    return target.exists() and target.read_bytes() == b"ffmpeg"
+
+
 async def _wait_until(predicate: Callable[[], bool], timeout_s: float = 5.0) -> None:
     deadline = time.monotonic() + timeout_s
     while not predicate():
@@ -271,9 +277,10 @@ class TestProvisionerLoop:
             assert calls == []
             assert provisioner.needed is False
             provisioner.set_cameras([SNAPSHOT_CAMERA, RTSP_CAMERA])
-            await _wait_until(lambda: len(calls) == 1)
+            # загрузка идёт в потоке: список вызовов пополняется в начале, а файл
+            # появляется позже — ждём сам файл (гонка под нагрузкой, 12.09.2026)
+            await _wait_until(lambda: _has_ffmpeg(tmp_path))
             assert calls == [("http://center/agents/tools/ffmpeg.exe", TOKEN)]
-            assert (tmp_path / "ffmpeg.exe").read_bytes() == b"ffmpeg"
             await asyncio.sleep(0.05)
             assert len(calls) == 1  # файл есть — цикл спит
             assert provisioner.missing() is False
@@ -296,8 +303,7 @@ class TestProvisionerLoop:
 
         async def scenario() -> None:
             task = asyncio.create_task(provisioner.run())
-            await _wait_until(lambda: len(calls) == 2)
-            assert (tmp_path / "ffmpeg.exe").exists()
+            await _wait_until(lambda: len(calls) == 2 and _has_ffmpeg(tmp_path))
             assert provisioner.attempts == 2
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

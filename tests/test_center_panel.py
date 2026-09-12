@@ -3272,3 +3272,130 @@ class TestImplausibleTareFlag:
         refusal = _make_record(code=ErrorCode.ERR_CAMERA, massa=None, weighed_at=None)
         assert repo.save_weighing_record(db_session, scale.id, refusal) is False
         assert self._events(db_session) == []
+
+
+class TestImportedTarings:
+    """Тарирования, перенесённые из выгрузки АИС «СВХ» (решение 12.09.2026):
+    видны в журнале и истории тар с подписью «Перенос из АИС», без карточки
+    печати; счётчик дашборда их не считает."""
+
+    @staticmethod
+    def _import(env: PanelEnv, ref: str = "TAR000099001", **overrides: Any) -> int:
+        from center.tare_import import AisTaring
+
+        fields: dict[str, Any] = {
+            "tare_ref": ref,
+            "entry_ref": "SVH000099001",
+            "vehicle_number": "07KG123ABC",
+            "trailer_number": "07KG456PD",
+            "massa": 15620.0,
+            "object_name": "Кант",
+            "operator": "Акимов Нурлан Боронбаевич",
+            "tared_at": datetime.now(UTC) - timedelta(hours=1),
+            "completed": True,
+            "ignored": False,
+        }
+        fields.update(overrides)
+        with env.factory() as session:
+            row = repo.save_imported_taring(
+                session, env.scale_id, AisTaring(**fields), imported_at=datetime.now(UTC)
+            )
+            assert row is not None
+            session.commit()
+            return row.id
+
+    def test_journal_pill_filter_and_no_print(self, panel_env: PanelEnv) -> None:
+        _login(panel_env)
+        imported_id = self._import(panel_env)
+        page = panel_env.client.get("/panel/journal").text
+        assert "Перенос из АИС" in page
+        assert "07KG123ABC" in page
+        assert f'href="/panel/journal/{imported_id}/card"' not in page
+        # обычная запись фикстуры печатается по-прежнему
+        assert f'href="/panel/journal/{panel_env.weighing_id}/card"' in page
+
+        only = panel_env.client.get("/panel/journal", params={"source": "imported"}).text
+        assert "07KG123ABC" in only and "01KG777AAA" not in only
+        assert '<option value="imported" selected' in only
+        others = panel_env.client.get("/panel/journal", params={"source": "ais"}).text
+        assert "07KG123ABC" not in others and "01KG777AAA" in others
+
+    def test_export_labels_import(self, panel_env: PanelEnv) -> None:
+        _login(panel_env)
+        self._import(panel_env)
+        csv_text = panel_env.client.get(
+            "/panel/journal/export.csv", params={"source": "imported"}
+        ).text
+        assert "Перенос из АИС" in csv_text and "07KG123ABC" in csv_text
+
+    def test_record_page_and_card(self, panel_env: PanelEnv) -> None:
+        _login(panel_env)
+        imported_id = self._import(panel_env)
+        page = panel_env.client.get(f"/panel/journal/{imported_id}").text
+        assert "Перенос из АИС" in page
+        assert "<code>TAR000099001</code>" in page
+        assert "Перенесено из АИС «СВХ»" in page  # примечание записи
+        assert f'href="/panel/journal/{imported_id}/card"' not in page  # кнопки печати нет
+        # карточки у перенесённого тарирования нет
+        assert panel_env.client.get(f"/panel/journal/{imported_id}/card").status_code == 404
+
+    def test_tares_page_marks_import_and_counts(self, panel_env: PanelEnv) -> None:
+        _login(panel_env)
+        imported_id = self._import(panel_env)
+        page = panel_env.client.get("/panel/tares").text
+        assert "перенос из АИС" in page
+        assert f'href="/panel/journal/{imported_id}/card"' not in page
+        assert f'href="/panel/journal/{panel_env.taring_id}/card"' in page
+        # строка «Показано … из …» — как на «Взвешиваниях»
+        assert re.search(r"Показано 2 из 2 тарирования", page), "нет строки с числом записей"
+        history = panel_env.client.get("/panel/tares", params={"show": "all"}).text
+        assert "перенос из АИС" in history and "Показано 2 из 2" in history
+
+    def test_dashboard_today_ignores_import(self, panel_env: PanelEnv) -> None:
+        with panel_env.factory() as session:
+            before = queries.weighings_today(session)
+        self._import(panel_env)
+        with panel_env.factory() as session:
+            after = queries.weighings_today(session)
+        assert after == before
+
+    def test_events_page_wraps_text_and_counts(self, panel_env: PanelEnv) -> None:
+        _login(panel_env)
+        with panel_env.factory() as session:
+            session.add(
+                MonitoringEvent(
+                    scale_id=panel_env.scale_id,
+                    kind="offline",
+                    severity=MonitoringSeverity.DANGER,
+                    message=(
+                        "агент не выходит на связь (последний раз 18:47:10) — "
+                        "взвешивания недоступны"
+                    ),
+                )
+            )
+            session.commit()
+        page = panel_env.client.get("/panel/events").text
+        assert 'class="cell-wrap"' in page
+        assert "Показано 1 из 1 событие" in page
+        assert 'class="journal-scroll"' in page
+
+
+class TestImportedTaringsAisEvent:
+    """Перенесённое тарирование — документ самой АИС: событие по нему не ставится
+    даже кнопкой администратора (замечание ревью 12.09.2026)."""
+
+    def test_resend_button_hidden_and_post_refused(self, panel_env: PanelEnv) -> None:
+        from center.db.models import WeighingEvent
+
+        _make_admin(panel_env)
+        _login(panel_env)
+        imported_id = TestImportedTarings._import(panel_env)
+        page = panel_env.client.get(f"/panel/journal/{imported_id}").text
+        assert "Отправить событие" not in page and "Переотправить событие" not in page
+        response = panel_env.client.post(
+            f"/panel/journal/{imported_id}/ais_event", follow_redirects=False
+        )
+        assert response.status_code == 303
+        assert "не публикуется" in unquote(response.headers["location"])
+        with panel_env.factory() as session:
+            assert session.execute(select(WeighingEvent.id)).scalars().all() == []

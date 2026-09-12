@@ -100,6 +100,8 @@ def weighings_today(session: Session, site_scope: int | None = None) -> tuple[in
         .where(Weighing.weighed_at >= day_start)
         # сторно-пара — «как не было» (04.09.2026)
         .where(Weighing.storno_of.is_(None), Weighing.id.not_in(repo.annulled_weighing_ids()))
+        # перенесённые из АИС тарирования система не проводила (12.09.2026)
+        .where(Weighing.source != WeighingSource.IMPORTED)
     )
     if site_scope is not None:
         query = query.join(Scale, Scale.id == Weighing.scale_id).where(Scale.site_id == site_scope)

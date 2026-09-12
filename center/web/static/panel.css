@@ -364,6 +364,8 @@ tr.clickable { cursor: pointer; }
 tr.clickable:hover td { background: var(--surface); }
 td.empty { text-align: center; color: var(--muted); padding: 24px; }
 .table-hint { font-size: 12.5px; color: var(--muted); }
+/* длинный текст (события мониторинга) переносится, а не обрезается краем карточки */
+table.journal td.cell-wrap { white-space: normal; min-width: 320px; line-height: 1.4; }
 
 /* Миниатюры фото в строках списков (нет в макетах: собраны из токенов ДС) */
 td.cell-photos { padding-top: 6px; padding-bottom: 6px; }

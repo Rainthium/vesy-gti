@@ -752,3 +752,25 @@ class TestRefusalHelpers:
         }
         assert reports.refusals_total(refusals) == 2
         assert reports.refusals_per_site(refusals, index) == {seed.site_a: 1, seed.site_b: 1}
+
+
+class TestImportedTaringsExcluded:
+    """Тарирования, перенесённые из АИС (12.09.2026), система не проводила —
+    аналитика их не видит ни в итогах, ни по объектам."""
+
+    def test_totals_and_by_site_skip_imported(self, db: sessionmaker[Session], seed: Seed) -> None:  # noqa: F811
+        with db() as session:
+            before = reports.totals(session, PERIOD)
+            _weighing(
+                session,
+                seed.scale_a,
+                _bishkek(2026, 8, 5),
+                massa=15600.0,
+                vehicle="07KG123ABC",
+                operation=Operation.TARING,
+                source=WeighingSource.IMPORTED,
+            )
+            after = reports.totals(session, PERIOD)
+            site_a = reports.totals(session, PERIOD, seed.site_a)
+        assert after == before
+        assert site_a.tarings == 0

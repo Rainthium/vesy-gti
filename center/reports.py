@@ -222,6 +222,9 @@ def _base_filter(period: Period, site_id: int | None) -> list[Any]:
         Weighing.code == ErrorCode.OK,
         Weighing.storno_of.is_(None),
         Weighing.id.not_in(cancelled),
+        # перенесённые из АИС тарирования (12.09.2026) система не проводила —
+        # в аналитике их нет, как и в API v2
+        Weighing.source != WeighingSource.IMPORTED,
         moment_col >= period.start,
         moment_col < period.end,
     ]

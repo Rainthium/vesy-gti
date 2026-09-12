@@ -128,6 +128,7 @@ def create_api_v2_router(
                 weighing is None
                 or weighing.code is not ErrorCode.OK
                 or weighing.storno_of is not None  # запись-сторно — не операция
+                or weighing.source is WeighingSource.IMPORTED  # перенос из АИС — не наша
             ):
                 return None
             return _document(session, weighing)
@@ -137,7 +138,11 @@ def create_api_v2_router(
     def _document_by_ais_ref(ais_ref: str) -> dict[str, Any] | None:
         def load(session: Session) -> dict[str, Any] | None:
             weighing = repo.weighing_by_ais_ref(session, ais_ref)
-            return _document(session, weighing) if weighing is not None else None
+            # тарирование, перенесённое из выгрузки АИС (12.09.2026), — документ
+            # самой АИС, а не наша операция: по его номеру ничего не отдаём
+            if weighing is None or weighing.source is WeighingSource.IMPORTED:
+                return None
+            return _document(session, weighing)
 
         return _db(load)
 
@@ -348,9 +353,12 @@ def create_api_v2_router(
         unlinked = params.get("unlinked") in {"1", "true", "yes"}
 
         def load(session: Session) -> dict[str, Any]:
-            # записи-сторно — не операции: сверка АИС приняла бы их за новые
+            # записи-сторно — не операции: сверка АИС приняла бы их за новые;
+            # перенесённые из АИС тарирования (12.09.2026) — её же документы
             query = select(Weighing).where(
-                Weighing.code == ErrorCode.OK, Weighing.storno_of.is_(None)
+                Weighing.code == ErrorCode.OK,
+                Weighing.storno_of.is_(None),
+                Weighing.source != WeighingSource.IMPORTED,
             )
             if ais_ref is not None:
                 query = query.join(WeighingAisRef, WeighingAisRef.weighing_id == Weighing.id).where(
@@ -420,6 +428,7 @@ def create_api_v2_router(
                 weighing is None
                 or weighing.code is not ErrorCode.OK
                 or weighing.storno_of is not None  # запись-сторно — не операция
+                or weighing.source is WeighingSource.IMPORTED  # перенос из АИС — не наша
             ):
                 return 404, {"code": "ERR_NOT_FOUND", "message": "нет операции с таким id"}
             error = check_ais_ref(link.ais_ref, weighing.operation)

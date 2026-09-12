@@ -18,7 +18,7 @@ from datetime import date, datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter, field_validator
 
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
 from shared.tare import DEFAULT_MAX_TARE_KG
@@ -137,6 +137,16 @@ class WeighingRecord(BaseModel):
     source: WeighingSource
     operator: str | None = None  # логин оператора при ручном режиме
     message: str | None = None  # детали при code != OK
+
+    @field_validator("source")
+    @classmethod
+    def _source_is_agents(cls, value: WeighingSource) -> WeighingSource:
+        # «imported» ставит только центр при переносе тарирований из АИС
+        # (12.09.2026): такая запись от агента скрылась бы из отчётов и API v2
+        if value is WeighingSource.IMPORTED:
+            raise ValueError("источник imported по каналу агента не передаётся")
+        return value
+
     # метаданные снимков: едут с записью и в weigh_result, и в offline_sync;
     # сами файлы агент загружает отдельно по HTTP (см. decisions 08.08.2026)
     photos: list[PhotoMeta] = Field(default_factory=list)
