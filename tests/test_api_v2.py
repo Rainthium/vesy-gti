@@ -62,6 +62,7 @@ from center.db.models import (
     WeighingAisRef,
 )
 from center.db.session import database_url, make_session_factory
+from shared.card import card_number
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 from shared.messages import (
     PhotoMeta,
@@ -79,6 +80,9 @@ KANT_OBJECT = "0002"
 
 WEIGHED_AT = datetime(2026, 8, 14, 9, 30, 12, tzinfo=UTC)  # 15:30:12 по Бишкеку
 TARED_AT = datetime(2026, 6, 12, 4, 21, 0, tzinfo=UTC)  # 10:21:00 по Бишкеку
+# тарирование, действующее «на сейчас»: срок тары 3 месяца (shared.tare), а тесты с
+# зашитой TARED_AT про действующую тару протухли ровно 12.09.2026 — урок CI 12.09
+RECENT_TARED_AT = (datetime.now(UTC) - timedelta(days=1)).replace(microsecond=0)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -532,7 +536,7 @@ class TestCommand:
         """Агенту уходят номер документа АИС и действующая тара по реестру центра
         (tare_resolved); без действующей тары — resolved с tare=None; тарированию
         подсказка не нужна."""
-        taring = _seed_taring(api_env)
+        taring = _seed_taring(api_env, weighed_at=RECENT_TARED_AT)
         link = _attach_agent(api_env, _make_record())
         _post(api_env)
         sent = link.requests[0]
@@ -599,13 +603,13 @@ class TestCommand:
         assert doc["tare"] is None
 
     def test_taring_command_document(self, api_env: ApiEnv) -> None:
-        link = _attach_agent(api_env, _make_taring())
+        link = _attach_agent(api_env, _make_taring(weighed_at=RECENT_TARED_AT))
         response = _post(api_env, ais_ref="TAR000012206", operation="taring")
         body = response.json()
         assert body["code"] == "OK"
         doc = body["weighing"]
         assert doc["operation"] == "taring"
-        assert doc["card_number"] == "ТАР-20260612-102100"
+        assert doc["card_number"] == card_number(Operation.TARING, RECENT_TARED_AT)
         assert doc["ais_ref"] == "TAR000012206"
         assert doc["massa"] == 15300.0
         assert doc["tare"] is None and doc["netto"] is None
