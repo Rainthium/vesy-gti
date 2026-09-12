@@ -108,14 +108,16 @@ def cleanup_orphan_photos(storage: AgentStorage, photos_dir: Path) -> int:
     return removed
 
 
-# срок жизни кадра превью: браузер оператора просит раз в 2 с; снапшот-
-# камеры (Кызыл-Кыя) успевают каждый раз, RTSP-камеры обновляются
-# с темпом собственной съёмки (2-5 с)
+# срок жизни кадра превью для разовой съёмки: браузер оператора просит раз
+# в 2 с; снапшот-камеры (Кызыл-Кыя) успевают каждый раз, разовая RTSP-съёмка
+# (поток оборвался) обновляется с темпом камеры (2-5 с)
 PREVIEW_TTL_S = 1.5
 # камера с preview_url (лёгкий кадр суб-потока, запрос Игоря 20.08.2026 для
 # Аламедина: полный кадр 6 МП камера отдаёт медленно) — превью раз в секунду
 PREVIEW_FAST_TTL_S = 0.75
 PREVIEW_INTERVAL_MS = 2000
+# раз в секунду — и для потоковых камер (только RTSP, 0.4.34, запрос Игоря по
+# таре Канта): кадр берётся из буфера потока (fps=1), камера не трогается
 PREVIEW_FAST_INTERVAL_MS = 1000
 # 0.4.31 (урок Канта 11.09.2026): при срыве съёмки превью отдаётся последний
 # удачный кадр не старше PREVIEW_STALE_MAX_S — единичная осечка камеры не
@@ -252,9 +254,9 @@ class AgentRuntime:
         self._log_path = log_path
         self._streams = streams
         # превью камер: последний готовый кадр по роли + замок «съёмка идёт».
-        # Браузер оператора просит кадр каждые 2 с; RTSP-камера отдаёт его
-        # 2–5 с (Джалал-Абад) — без кэша запросы наслаиваются каскадом
-        # ffmpeg-процессов и лишних RTSP-сессий к камере
+        # Браузер оператора просит кадр каждые 1–2 с; разовая RTSP-съёмка
+        # отдаёт его 2–5 с (Джалал-Абад) — без кэша запросы наслаивались бы
+        # каскадом ffmpeg-процессов и лишних RTSP-сессий к камере
         self._preview_cache: dict[CameraRole, tuple[CameraShot, float]] = {}
         self._preview_locks: dict[CameraRole, threading.Lock] = {
             camera.role: threading.Lock() for camera in config.cameras
@@ -359,12 +361,18 @@ class AgentRuntime:
     def preview_interval_ms(self) -> int:
         """Период опроса превью браузером оператора.
 
-        Хоть у одной камеры задан preview_url → раз в секунду (лёгкий кадр
-        камера отдаёт быстро), иначе прежние 2 с. Значение вшивается в
-        страницу при рендере: смена настройки из центра подхватится при
+        Хоть у одной камеры задан preview_url (лёгкий кадр камера отдаёт
+        быстро) или камера потоковая (только RTSP: кадр раз в секунду лежит
+        в буфере потока, камера не трогается — 0.4.34) → раз в секунду,
+        иначе прежние 2 с: разовая HTTP-съёмка полного кадра чаще не тянет.
+        Ограничение 12.08.2026 «не чаще 2 с для RTSP» относилось к разовым
+        подключениям ffmpeg, постоянный поток его снял. Значение вшивается
+        в страницу при рендере: смена настройки из центра подхватится при
         следующей загрузке страницы оператора.
         """
-        fast = any(camera.preview_url for camera in self._preview_cameras.values())
+        fast = any(
+            camera.preview_url or camera.rtsp_only for camera in self._preview_cameras.values()
+        )
         return PREVIEW_FAST_INTERVAL_MS if fast else PREVIEW_INTERVAL_MS
 
     def camera_snapshot(self, role: CameraRole) -> CameraShot:
@@ -391,7 +399,13 @@ class AgentRuntime:
             # живое, ffmpeg на каждый запрос браузера не запускается
             streamed = self._streams.shot(role)
             if streamed is not None:
-                return self._shrunk(streamed)
+                shot = self._shrunk(streamed)
+                # кадр потока — тоже «последний удачный»: при переподключении
+                # потока буфер протухает на 1–3 с, разовая съёмка занимает
+                # секунды — оператору в это окно отдаётся этот кадр, а не
+                # «Нет сигнала» (замечание ревью 12.09.2026, опрос раз в секунду)
+                self._preview_last_ok[role] = (shot, time.monotonic())
+                return shot
         cached = self._preview_cache.get(role)
         now = time.monotonic()
         if cached is not None and now - cached[1] < ttl:
@@ -401,9 +415,10 @@ class AgentRuntime:
             # съёмка уже идёт в соседнем запросе — не плодим вторую
             if cached is not None:
                 return self._preview_result(role, cached[0], now)
-            return CameraShot(
+            busy = CameraShot(
                 role=role, jpeg=None, captured_at=datetime.now(UTC), error="съёмка уже идёт"
             )
+            return self._preview_result(role, busy, now)
         try:
             generation = self._preview_generation
             started = time.monotonic()

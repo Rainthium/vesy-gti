@@ -815,3 +815,112 @@ class TestPreviewStamp:
             assert "превью камеры front" in slow[0].getMessage()
         finally:
             storage.close()
+
+
+class TestPreviewIntervalStreamed:
+    """0.4.34 (запрос Игоря по таре Канта): потоковая камера (только RTSP) даёт
+    опрос раз в секунду — кадр лежит в буфере потока, камера не трогается."""
+
+    @staticmethod
+    def _runtime(tmp_path: Path) -> tuple[AgentRuntime, AgentStorage]:
+        config = AgentConfig.model_validate(
+            config_data(
+                storage={
+                    "db_path": str(tmp_path / "agent.sqlite3"),
+                    "photos_dir": str(tmp_path / "photos"),
+                }
+            )
+        )
+        runtime, _, storage, _, _, _, _, _, streams = build_runtime(config)
+        streams.stop_all()
+        return runtime, storage
+
+    def test_rtsp_only_camera_makes_polling_fast(self, tmp_path: Path) -> None:
+        runtime, storage = self._runtime(tmp_path)
+        try:
+            assert runtime.preview_interval_ms() == 2000  # снапшот без preview_url
+            runtime.set_cameras(
+                [
+                    CameraConfig(role=CameraRole.FRONT, snapshot_url="http://u:p@10.9.9.9/ch101"),
+                    CameraConfig(role=CameraRole.REAR, rtsp_url="rtsp://u:p@10.9.9.8:554/1"),
+                ]
+            )
+            assert runtime.preview_interval_ms() == 1000
+        finally:
+            storage.close()
+
+    def test_snapshot_with_rtsp_fallback_stays_slow(self, tmp_path: Path) -> None:
+        """snapshot_url + rtsp_url — камера не потоковая (снимок главнее): 2 с."""
+        runtime, storage = self._runtime(tmp_path)
+        try:
+            runtime.set_cameras(
+                [
+                    CameraConfig(
+                        role=CameraRole.FRONT,
+                        snapshot_url="http://u:p@10.9.9.9/ch101",
+                        rtsp_url="rtsp://u:p@10.9.9.9:554/1",
+                    )
+                ]
+            )
+            assert runtime.preview_interval_ms() == 2000
+        finally:
+            storage.close()
+
+
+class TestStreamedPreviewLastGood:
+    """0.4.34 (замечание ревью): кадр потока считается «последним удачным» —
+    при переподключении потока и разовой съёмке под замком оператор видит
+    недавний кадр, а не «Нет сигнала»."""
+
+    def test_stale_stream_and_failed_capture_return_last_streamed_frame(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runtime, storage, _ = _runtime_with_cameras(tmp_path)
+        try:
+            frame = CameraShot(
+                role=CameraRole.FRONT, jpeg=_big_jpeg(), captured_at=datetime.now(UTC)
+            )
+            buffer: list[CameraShot | None] = [frame]
+            streams = runtime._streams
+            assert streams is not None
+            monkeypatch.setattr(streams, "shot", lambda role, *, max_age_s=3.0: buffer[0])
+            first = runtime.camera_snapshot(CameraRole.FRONT)
+            assert first.ok and first.jpeg is not None
+            # поток переподключается: буфер протух, разовая съёмка сорвалась
+            buffer[0] = None
+            monkeypatch.setattr(
+                "agent.main.capture",
+                lambda camera, *, ffmpeg_path: CameraShot(
+                    role=camera.role, jpeg=None, captured_at=datetime.now(UTC), error="timed out"
+                ),
+            )
+            second = runtime.camera_snapshot(CameraRole.FRONT)
+            assert second.ok
+            assert second.jpeg == first.jpeg
+        finally:
+            storage.close()
+
+    def test_busy_lock_without_cache_returns_last_good(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runtime, storage, _ = _runtime_with_cameras(tmp_path)
+        try:
+            frame = CameraShot(
+                role=CameraRole.FRONT, jpeg=_big_jpeg(), captured_at=datetime.now(UTC)
+            )
+            streams = runtime._streams
+            assert streams is not None
+            monkeypatch.setattr(streams, "shot", lambda role, *, max_age_s=3.0: frame)
+            first = runtime.camera_snapshot(CameraRole.FRONT)
+            assert first.ok
+            monkeypatch.setattr(streams, "shot", lambda role, *, max_age_s=3.0: None)
+            lock = runtime.preview_lock(CameraRole.FRONT)
+            assert lock.acquire(blocking=False)  # «съёмка уже идёт» в соседнем запросе
+            try:
+                busy = runtime.camera_snapshot(CameraRole.FRONT)
+            finally:
+                lock.release()
+            assert busy.ok
+            assert busy.jpeg == first.jpeg
+        finally:
+            storage.close()

@@ -69,7 +69,8 @@ class AgentServices(Protocol):
         ...
 
     def preview_interval_ms(self) -> int:
-        """Период опроса превью браузером: 1000 при лёгком preview_url, иначе 2000."""
+        """Период опроса превью браузером: 1000 при лёгком preview_url или потоковой
+        камере (только RTSP, 0.4.34), иначе 2000."""
         ...
 
     def photo_roles(self, weighing_uuid: UUID) -> list[CameraRole]:
