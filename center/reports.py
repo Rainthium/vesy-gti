@@ -60,6 +60,7 @@ from center.db.models import (
     Weighing,
     WeighingAisRef,
 )
+from center.db.repo import known_taring_at
 from shared.enums import ErrorCode, Operation, WeighingSource
 from shared.tare import three_months_before
 
@@ -404,6 +405,9 @@ def _reason_rows_query(period: Period, site_id: int | None) -> Any:
             tare.vehicle_number == Weighing.vehicle_number,
             func.coalesce(tare.trailer_number, "") == func.coalesce(Weighing.trailer_number, ""),
             tare.weighed_at <= moment_col,
+            # перенесённое из АИС тарирование (12.09.2026) система знала только с
+            # момента переноса
+            known_taring_at(moment_col, tare),
         )
         .correlate(Weighing)
         .scalar_subquery()

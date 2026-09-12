@@ -9,9 +9,10 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4, uuid5
 
-from sqlalchemy import Select, delete, func, or_, select
+from sqlalchemy import ColumnElement, Select, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -539,6 +540,21 @@ def _valid_tarings(vehicle_number: str, trailer_number: str | None) -> Select[tu
     return query
 
 
+def known_taring_at(
+    moment: datetime | ColumnElement[datetime], taring: type[Weighing] | Any = Weighing
+) -> ColumnElement[bool]:
+    """Условие «система знала об этом тарировании к моменту ``moment``».
+
+    Тарирование, перенесённое из АИС (12.09.2026), физически прошло раньше
+    переноса, но системе стало известно только в момент переноса
+    (``created_at``): взвешивания до переноса тары не имели честно, а не
+    «не подставили». Обычные тарирования известны с момента операции.
+    ``moment`` — datetime либо SQL-выражение, ``taring`` — сущность или её
+    алиас (коррелированные подзапросы отчёта).
+    """
+    return or_(taring.source != WeighingSource.IMPORTED, taring.created_at <= moment)
+
+
 def latest_taring_as_of(
     session: Session, vehicle_number: str, trailer_number: str | None, moment: datetime
 ) -> Weighing | None:
@@ -548,11 +564,12 @@ def latest_taring_as_of(
     знала о таре сцепки на момент взвешивания. Ищется по журналу, а не по
     реестру (реестр хранит только последнее тарирование вообще — после
     перетарирования он уже не скажет, какая тара действовала тогда).
-    Аннулированные сторно тарирования не учитываются.
+    Аннулированные сторно тарирования не учитываются; перенесённые из АИС —
+    только с момента переноса (``known_taring_at``).
     """
     query = (
         _valid_tarings(vehicle_number, trailer_number)
-        .where(Weighing.weighed_at <= moment)
+        .where(Weighing.weighed_at <= moment, known_taring_at(moment))
         .order_by(Weighing.weighed_at.desc(), Weighing.id.desc())
         .limit(1)
     )
@@ -1084,6 +1101,7 @@ __all__ = [
     "hash_agent_token",
     "imported_taring_uuid",
     "known_ais_refs",
+    "known_taring_at",
     "load_tare_registry",
     "rebuild_tare_registry_entry",
     "record_config_status",

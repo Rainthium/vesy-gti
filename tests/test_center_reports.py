@@ -79,6 +79,7 @@ def _weighing(
     netto: float | None = None,
     operator: str | None = None,
     storno_of: int | None = None,
+    created_at: datetime | None = None,
 ) -> Weighing:
     from uuid import uuid4
 
@@ -90,7 +91,8 @@ def _weighing(
         massa=massa,
         stable=True,
         weighed_at=at,
-        created_at=at,
+        # записи неизменяемы (триггер): момент появления в центре задаётся сразу
+        created_at=created_at or at,
         vehicle_number=vehicle,
         trailer_number=trailer,
         tare_value=tare_value,
@@ -774,3 +776,41 @@ class TestImportedTaringsExcluded:
             site_a = reports.totals(session, PERIOD, seed.site_a)
         assert after == before
         assert site_a.tarings == 0
+
+
+class TestImportedTaringKnownSinceImport:
+    """Перенесённое из АИС тарирование (12.09.2026) система знала только с момента
+    переноса: взвешивания ДО переноса — «тарирования не было», а не «тара была,
+    но не подставилась» (67 ложных записей в отчёте после переноса)."""
+
+    def test_reason_depends_on_import_moment(self, db: sessionmaker[Session], seed: Seed) -> None:  # noqa: F811
+        with db() as session:
+            base = reports.mass_report(session, PERIOD).reasons
+            # сцепка 07KG1: взвешивание без нетто 05.08; тарирование физически
+            # 20.07, но перенесено из АИС 09.08 — позже взвешивания
+            _weighing(session, seed.scale_a, _bishkek(2026, 8, 5), massa=30000.0, vehicle="07KG1")
+            _weighing(
+                session,
+                seed.scale_a,
+                _bishkek(2026, 7, 20),
+                massa=15000.0,
+                vehicle="07KG1",
+                operation=Operation.TARING,
+                source=WeighingSource.IMPORTED,
+                created_at=_bishkek(2026, 8, 9),
+            )
+            # сцепка 07KG2: то же, но перенос 01.08 — раньше взвешивания
+            _weighing(session, seed.scale_a, _bishkek(2026, 8, 5), massa=30000.0, vehicle="07KG2")
+            _weighing(
+                session,
+                seed.scale_a,
+                _bishkek(2026, 7, 20),
+                massa=15000.0,
+                vehicle="07KG2",
+                operation=Operation.TARING,
+                source=WeighingSource.IMPORTED,
+                created_at=_bishkek(2026, 8, 1),
+            )
+            report = reports.mass_report(session, PERIOD).reasons
+            assert report["none"] == base["none"] + 1  # 07KG1: тары не было
+            assert report["not_applied"] == base["not_applied"] + 1  # 07KG2: была, не подставлена

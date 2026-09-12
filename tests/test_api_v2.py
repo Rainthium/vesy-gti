@@ -1248,3 +1248,40 @@ class TestImportedTaringsHidden:
             headers=_auth(),
         )
         assert response.status_code == 404
+
+    def test_tare_block_ignores_tare_imported_after_weighing(self, api_env: ApiEnv) -> None:
+        """Взвешивание без нетто ДО переноса: система тары не знала — `tare: null`;
+        взвешивание ПОСЛЕ переноса — обычный `not_applied`."""
+        with api_env.factory() as session:
+            from center.tare_import import AisTaring
+
+            taring = AisTaring(
+                tare_ref="TAR000099005",
+                entry_ref=None,
+                vehicle_number="01KG777AAA",
+                trailer_number="01KG500AB",
+                massa=15620.0,
+                object_name="Кызыл-Кыя",
+                operator=None,
+                tared_at=datetime.now(UTC) - timedelta(days=10),
+                completed=True,
+                ignored=False,
+            )
+            row = repo.save_imported_taring(
+                session, api_env.scale_id, taring, imported_at=datetime.now(UTC)
+            )
+            assert row is not None
+            session.commit()
+            before = _make_record(weighed_at=datetime.now(UTC) - timedelta(days=2))
+            after = _make_record(weighed_at=datetime.now(UTC) + timedelta(seconds=5))
+            repo.save_weighing_record(session, api_env.scale_id, before, ais_ref="WEI000099006")
+            repo.save_weighing_record(session, api_env.scale_id, after, ais_ref="WEI000099007")
+        doc_before = api_env.client.get(f"/api/v2/weighings/{before.uuid}", headers=_auth()).json()[
+            "weighing"
+        ]
+        assert doc_before["tare"] is None and doc_before["netto"] is None
+        doc_after = api_env.client.get(f"/api/v2/weighings/{after.uuid}", headers=_auth()).json()[
+            "weighing"
+        ]
+        assert doc_after["tare"]["status"] == "not_applied"
+        assert doc_after["tare"]["ais_ref"] == "TAR000099005"

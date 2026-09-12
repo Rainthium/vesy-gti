@@ -3399,3 +3399,55 @@ class TestImportedTaringsAisEvent:
         assert "не публикуется" in unquote(response.headers["location"])
         with panel_env.factory() as session:
             assert session.execute(select(WeighingEvent.id)).scalars().all() == []
+
+
+class TestRecordPageImportKnownSinceImport:
+    def test_no_stale_note_for_tare_imported_later(self, panel_env: PanelEnv) -> None:
+        """Взвешивание без нетто до переноса: перенесённое позже тарирование, пусть и
+        просроченное к моменту взвешивания, не даёт примечания «устарело»."""
+        from center.tare_import import AisTaring
+
+        _login(panel_env)
+        with panel_env.factory() as session:
+            weighing = _make_record(
+                vehicle_number="07KG555ABC",
+                trailer_number="07KG556PD",
+                weighed_at=datetime.now(UTC) - timedelta(days=2),
+            )
+            repo.save_weighing_record(session, panel_env.scale_id, weighing)
+            stale = AisTaring(
+                tare_ref="TAR000099010",
+                entry_ref=None,
+                vehicle_number="07KG555ABC",
+                trailer_number="07KG556PD",
+                massa=15000.0,
+                object_name="Кант",
+                operator=None,
+                tared_at=datetime.now(UTC) - timedelta(days=200),
+                completed=True,
+                ignored=False,
+            )
+            assert (
+                repo.save_imported_taring(
+                    session, panel_env.scale_id, stale, imported_at=datetime.now(UTC)
+                )
+                is not None
+            )
+            session.commit()
+            weighing_id = session.execute(
+                select(Weighing.id).where(Weighing.uuid == weighing.uuid)
+            ).scalar_one()
+        page = panel_env.client.get(f"/panel/journal/{weighing_id}").text
+        assert "устарело" not in page
+        # контроль: взвешивание ПОСЛЕ переноса той же сцепки — примечание есть
+        with panel_env.factory() as session:
+            later = _make_record(
+                vehicle_number="07KG555ABC",
+                trailer_number="07KG556PD",
+                weighed_at=datetime.now(UTC) + timedelta(seconds=5),
+            )
+            repo.save_weighing_record(session, panel_env.scale_id, later)
+            later_id = session.execute(
+                select(Weighing.id).where(Weighing.uuid == later.uuid)
+            ).scalar_one()
+        assert "устарело" in panel_env.client.get(f"/panel/journal/{later_id}").text

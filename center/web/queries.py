@@ -301,11 +301,23 @@ def weighing_card(
         registry = session.get(
             TareRegistry, (weighing.vehicle_number, weighing.trailer_number or "")
         )
+        registry_taring = (
+            session.get(Weighing, registry.weighing_id) if registry is not None else None
+        )
+        if (
+            registry is not None
+            and registry_taring is not None
+            and registry_taring.source is WeighingSource.IMPORTED
+            and registry_taring.created_at > weighing.weighed_at
+        ):
+            # тарирование, перенесённое из АИС после этого взвешивания, система
+            # тогда не знала — примечания «устарело»/«отвергнуто» по нему нет
+            registry = None
         # «устарело» — только истёкшее К МОМЕНТУ ВЗВЕШИВАНИЯ (граница правила
         # №4, как в shared.card.netto_note): не истёкшее сюда не попадает,
         # а тарирование ПОЗЖЕ записи не меняет старую карту задним числом
         if registry is not None and registry.tared_at < three_months_before(weighing.weighed_at):
-            expired_tare = session.get(Weighing, registry.weighing_id)
+            expired_tare = registry_taring
         elif (
             registry is not None
             and registry.tared_at <= weighing.weighed_at
@@ -314,7 +326,7 @@ def weighing_card(
         ):
             # тара не меньше брутто — агент 0.4.29 её не подставил (04.09.2026):
             # показываем, какое тарирование ошибочно (его надо сторнировать)
-            rejected_tare = session.get(Weighing, registry.weighing_id)
+            rejected_tare = registry_taring
     ais_link = session.get(WeighingAisRef, weighing.id)
     ais_event = repo.latest_weighing_event(session, weighing.id)
     return WeighingCard(

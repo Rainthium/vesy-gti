@@ -479,3 +479,26 @@ class TestRobustness:
                 massa=15600.0,
                 source=WeighingSource.IMPORTED,
             )
+
+
+class TestKnownSinceImport:
+    def test_latest_taring_as_of_respects_import_moment(self, db_session: Session) -> None:
+        """До переноса система о тарировании не знала: как-бы-на-момент его нет."""
+        scale_id = _scale(db_session)
+        imported_at = datetime.now(UTC)
+        row = repo.save_imported_taring(
+            db_session,
+            scale_id,
+            _taring(tared_at=imported_at - timedelta(days=10)),
+            imported_at=imported_at,
+        )
+        db_session.commit()
+        assert row is not None  # created_at — момент вставки (записи неизменяемы)
+        earlier = imported_at - timedelta(days=1)
+        assert repo.latest_taring_as_of(db_session, "01KG111AAA", "01KG222PA", earlier) is None
+        later = datetime.now(UTC) + timedelta(seconds=1)
+        found = repo.latest_taring_as_of(db_session, "01KG111AAA", "01KG222PA", later)
+        assert found is not None and found.id == row.id
+        # реестр и подстановка «сейчас» перенесённую тару видят как обычную
+        active = repo.find_active_tare(db_session, "01KG111AAA", "01KG222PA", now=later)
+        assert active is not None and active.weighing_uuid == row.uuid
