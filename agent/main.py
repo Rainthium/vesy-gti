@@ -44,6 +44,7 @@ from agent.config import AgentConfig, load_config
 from agent.diagnostics import default_log_path, read_log_tail
 from agent.drivers import create_driver
 from agent.drivers.base import ScaleState, SerialScaleDriver
+from agent.ffmpeg_tool import FfmpegProvisioner
 from agent.photos import THUMB_SUFFIX, PhotoLibrary, shrink_preview
 from agent.selfcheck import UpdateSelfCheck
 from agent.settings import SettingsManager, merge_center_settings
@@ -281,6 +282,9 @@ class AgentRuntime:
         # уборка локальных фото (0.4.25): собирается в build_runtime, цикл
         # запускает run_agent; срок меняется из центра на лету
         self.retention: PhotoRetention | None = None
+        # доставка ffmpeg с центра по надобности (0.4.33): собирается в
+        # build_runtime, цикл запускает run_agent
+        self.ffmpeg_provisioner: FfmpegProvisioner | None = None
         self._info = AgentInfo(
             site_name=config.site_name,
             scale_name=config.scale_name,
@@ -602,6 +606,15 @@ def build_runtime(
     # соединение и кладёт свежий кадр в память — превью и снимок операции
     # берут его мгновенно; камерам со снапшотом поток не заводится
     streams = CameraStreams(config.camera_configs(), ffmpeg_path=config.ffmpeg_path)
+    # ffmpeg по надобности (0.4.33, урок Канта): камера только с RTSP есть, а
+    # ffmpeg на ПК нет — агент скачает его с центра сам, в корень установки
+    ffmpeg_provisioner = FfmpegProvisioner(
+        base_url=http_base_url(config.center.url),
+        token=config.center.token,
+        configured_path=config.ffmpeg_path,
+        install_dir=install_base(),
+        cameras=config.camera_configs(),
+    )
     camera_health = CameraHealth(
         config.camera_configs(),
         interval_s=config.camera_check_interval_s,
@@ -769,10 +782,12 @@ def build_runtime(
     manager_ref[-1].set_preview(runtime)
     manager_ref[-1].set_info_sink(runtime)
     manager_ref[-1].set_retention(retention)
+    manager_ref[-1].set_ffmpeg_provisioner(ffmpeg_provisioner)
     # проба камеры и съёмка превью — под одним замком на роль (0.4.31)
     camera_health.set_capture_lock(runtime.preview_lock)
     runtime.selfcheck = selfcheck
     runtime.retention = retention
+    runtime.ffmpeg_provisioner = ffmpeg_provisioner
     return runtime, driver, storage, client, uploader, camera_health, watcher, auto_config, streams
 
 
@@ -856,6 +871,11 @@ async def run_agent(
     tasks.append(asyncio.create_task(retention.run(), name="photo-retention"))
     if not retention.enabled:
         logger.info("ретеншн локальных фото выключен (photo_retention_days = 0)")
+    # доставка ffmpeg с центра по надобности (0.4.33): цикл спит, пока ffmpeg
+    # не нужен или уже есть; RTSP-камера из панели его будит
+    ffmpeg_provisioner = runtime.ffmpeg_provisioner
+    assert ffmpeg_provisioner is not None  # собран в build_runtime
+    tasks.append(asyncio.create_task(ffmpeg_provisioner.run(), name="ffmpeg-provisioner"))
     # самопроверка после автообновления и доклад об откате (0.4.19): задача
     # ЗАКАНЧИВАЕТСЯ за минуты, поэтому живёт вне списка выше — иначе её
     # штатный выход остановил бы агента; в dev-запуске (не frozen) молчит

@@ -25,7 +25,9 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from agent.updater import install_base
 from shared.enums import CameraRole
 
 JPEG_MAGIC = b"\xff\xd8"
@@ -37,6 +39,32 @@ DEFAULT_TIMEOUT_S = 15.0
 # меньше — лучше; 4 ≈ JPEG q85 из architecture «Хранение фото»).
 # Снятый JPEG далее неизменен (правило №2).
 FFMPEG_JPEG_QSCALE = "4"
+# ffmpeg.exe в корне установки (родитель app/): туда его кладёт доставка с центра
+# (agent/ffmpeg_tool.py) или человек руками; обновления корень не трогают
+FFMPEG_TOOL_FILENAME = "ffmpeg.exe"
+
+
+def resolve_ffmpeg_path(configured: str, root: Path | None = None) -> str:
+    """Путь к ffmpeg для запуска (0.4.33, урок Канта).
+
+    Голое имя из конфига (``ffmpeg``) заменяется на ``ffmpeg.exe`` из корня
+    установки, если файл там есть; явный путь (``D:/vesy-agent/ffmpeg.exe``)
+    и dev-запуск без корня установки — как есть (PATH). Разрешается при
+    каждом запуске ffmpeg: файл, доставленный с центра позже, подхватывается
+    без рестарта службы. ``root`` подставляют тесты; по умолчанию — каталог
+    установки замороженной сборки (agent.updater.install_base).
+    """
+    if root is None:
+        root = install_base()
+    if root is None or not is_bare_name(configured):
+        return configured
+    candidate = root / FFMPEG_TOOL_FILENAME
+    return str(candidate) if candidate.is_file() else configured
+
+
+def is_bare_name(path: str) -> bool:
+    """«ffmpeg» / «ffmpeg.exe» — без каталогов в любой из нотаций путей."""
+    return bool(path) and PurePosixPath(path).name == path and PureWindowsPath(path).name == path
 
 
 @dataclass(frozen=True)
@@ -61,6 +89,11 @@ class CameraConfig:
     def __post_init__(self) -> None:
         if not self.snapshot_url and not self.rtsp_url:
             raise ValueError(f"камера {self.role}: не задан ни snapshot_url, ни rtsp_url")
+
+    @property
+    def rtsp_only(self) -> bool:
+        """Кадр берётся только из RTSP: нужен ffmpeg и постоянный поток (cameras/stream.py)."""
+        return bool(self.rtsp_url) and not self.snapshot_url
 
 
 @dataclass(frozen=True)
@@ -110,6 +143,11 @@ def _http_snapshot(url: str, timeout_s: float) -> bytes:
     parts = urllib.parse.urlsplit(url)
     headers = {}
     handlers: list[urllib.request.BaseHandler] = []
+    # камеры — устройства локальной сети: системный прокси Windows (реестр
+    # Internet Settings, который urllib читает сам) к ним не применяется —
+    # иначе снимки уходили бы на прокси-сервер, а RTSP штатного ПО шёл бы
+    # мимо него (гипотеза разбора Канта 12.09.2026, агент 0.4.33)
+    handlers.append(urllib.request.ProxyHandler({}))
     if parts.username is not None:
         # urllib не использует учётные данные из URL сам — переносим в заголовок;
         # percent-encoding раскрываем: пароль с @/: задаётся в конфиге закодированным
@@ -136,8 +174,9 @@ def _http_snapshot(url: str, timeout_s: float) -> bytes:
 
 def _rtsp_frame(url: str, timeout_s: float, ffmpeg_path: str) -> bytes:
     """Взять один кадр из RTSP-потока через ffmpeg (родное разрешение)."""
+    ffmpeg = resolve_ffmpeg_path(ffmpeg_path)  # ffmpeg.exe из корня установки, если есть
     command = [
-        ffmpeg_path,
+        ffmpeg,
         "-hide_banner",
         "-loglevel",
         "error",
@@ -163,7 +202,7 @@ def _rtsp_frame(url: str, timeout_s: float, ffmpeg_path: str) -> bytes:
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError(f"ffmpeg не уложился в {timeout_s} с") from exc
     except FileNotFoundError as exc:
-        raise RuntimeError(f"ffmpeg не найден: {ffmpeg_path}") from exc
+        raise RuntimeError(f"ffmpeg не найден: {ffmpeg}") from exc
 
     if completed.returncode != 0 or not completed.stdout:
         stderr = completed.stderr.decode("utf-8", "replace").strip()

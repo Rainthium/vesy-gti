@@ -29,6 +29,7 @@ from center.monitoring import MonitoringService, TelegramNotifier
 from center.photos.router import PhotosConfig, create_photos_router
 from center.releases_router import create_releases_router
 from center.rollout import RolloutService
+from center.tools_router import create_tools_router
 from center.web.router import create_panel_router
 
 logger = logging.getLogger(__name__)
@@ -143,6 +144,9 @@ def create_app() -> FastAPI:
     # задача (architecture §7а): команду получают агенты на связи, чья
     # версия ниже релиза их канала
     releases_dir = Path(os.environ.get("AGENT_RELEASES_DIR", "./releases_data"))
+    # каталог инструментов для агентов (0.4.33): ffmpeg.exe, который агент
+    # докачивает сам, если камера отдаёт кадр только по RTSP (урок Канта)
+    tools_dir = Path(os.environ.get("AGENT_TOOLS_DIR", "./tools_data"))
     rollout = RolloutService(session_factory, hub, releases_dir)
 
     @contextlib.asynccontextmanager
@@ -205,6 +209,7 @@ def create_app() -> FastAPI:
     app.include_router(create_api_v2_router(hub, session_factory, api_v2_config))
     app.include_router(create_photos_router(session_factory, photos_config))
     app.include_router(create_releases_router(session_factory, releases_dir))
+    app.include_router(create_tools_router(session_factory, tools_dir))
     app.include_router(
         create_panel_router(
             session_factory,

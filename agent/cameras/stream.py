@@ -27,6 +27,11 @@ HTTP-снапшота отдают кадр только через подклю
 поток не нужен — их разовый снимок и так мгновенный. Протухший буфер
 (поток оборвался) — не отказ: вызывающий код падает обратно на разовую
 съёмку (shot_or_capture / shots_or_capture_all).
+
+Путь к ffmpeg разрешается при каждом запуске процесса
+(capture.resolve_ffmpeg_path): ffmpeg.exe, доставленный с центра в корень
+установки уже после старта службы (agent/ffmpeg_tool.py, 0.4.33),
+подхватывается на ближайшем переподключении потока.
 """
 
 import contextlib
@@ -45,6 +50,7 @@ from agent.cameras.capture import (
     CameraShot,
     capture,
     capture_all,
+    resolve_ffmpeg_path,
     sanitize_url,
 )
 from shared.enums import CameraRole
@@ -175,7 +181,9 @@ class CameraStream:
 
     def _command(self) -> list[str]:
         return [
-            self._ffmpeg_path,
+            # путь разрешается при каждом запуске: ffmpeg.exe, доставленный
+            # с центра в корень установки позже, подхватится на переподключении
+            resolve_ffmpeg_path(self._ffmpeg_path),
             "-hide_banner",
             "-loglevel",
             "error",
@@ -283,7 +291,7 @@ class CameraStreams:
     @staticmethod
     def is_streamable(camera: CameraConfig) -> bool:
         """Поток нужен камерам, у которых кадр берётся ТОЛЬКО из RTSP."""
-        return bool(camera.rtsp_url) and not camera.snapshot_url
+        return camera.rtsp_only
 
     def set_cameras(self, cameras: list[CameraConfig]) -> None:
         """Синхронизировать потоки со списком камер (настройки центра).

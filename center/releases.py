@@ -61,9 +61,10 @@ def release_filename(version: str) -> str:
     return f"ves-agent-{version}-win64.zip"
 
 
-def _file_sha256(path: Path) -> str:
+def file_sha256(path: Path) -> str:
+    """sha256 файла с кэшем по (путь, размер, mtime); общий с каталогом инструментов."""
     stat = path.stat()
-    key = (path.name, stat.st_size, stat.st_mtime_ns)
+    key = (str(path), stat.st_size, stat.st_mtime_ns)
     cached = _sha_cache.get(key)
     if cached is not None:
         return cached
@@ -84,7 +85,7 @@ def _release_from_path(path: Path) -> AgentRelease | None:
         version=f"{int(match.group(1))}.{int(match.group(2))}.{int(match.group(3))}",
         filename=path.name,
         path=path,
-        sha256=_file_sha256(path),
+        sha256=file_sha256(path),
         size_bytes=path.stat().st_size,
     )
 

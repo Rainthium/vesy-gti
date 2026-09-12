@@ -90,12 +90,16 @@ services:
       RABBITMQ_URL: amqp://vesy-center:${RABBITMQ_PASSWORD}@rabbitmq:5672/vesy
       PHOTOS_DIR: /data/photos
       AGENT_RELEASES_DIR: /data/releases
+      AGENT_TOOLS_DIR: /data/tools
     volumes:
       - photos:/data/photos
       # релизы агента для автообновления: загружаются через панель
       # («Релизы агентов») или кладутся с рабочей машины scp — README §9;
       # запись нужна панели, поэтому том не :ro (с 18.08.2026)
       - ./releases:/data/releases
+      # инструменты для агентов (0.4.33): ffmpeg.exe, который агент докачивает
+      # сам, если камера отдаёт кадр только по RTSP — README §9а; только чтение
+      - ./tools:/data/tools:ro
     depends_on:
       postgres:
         condition: service_healthy

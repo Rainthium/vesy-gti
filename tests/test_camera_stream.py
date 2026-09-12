@@ -7,6 +7,7 @@
 import io
 import threading
 import time
+from pathlib import Path
 from typing import IO
 
 import pytest
@@ -274,3 +275,27 @@ class TestShotOrCapture:
         )
         shots = shots_or_capture_all([rtsp_camera()], None, ffmpeg_path="ffmpeg")
         assert shots == [captured]
+
+
+# --- 0.4.33: путь к ffmpeg разрешается при каждом запуске ---
+
+
+class TestFfmpegPathResolution:
+    def test_command_takes_ffmpeg_from_install_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ffmpeg.exe, появившийся в корне установки после старта потока,
+        подхватывается следующим запуском процесса без пересоздания потока."""
+        monkeypatch.setattr("agent.cameras.capture.install_base", lambda: tmp_path)
+        stream = CameraStream(CameraRole.FRONT, "rtsp://cam/1", ffmpeg_path="ffmpeg")
+        assert stream._command()[0] == "ffmpeg"
+        (tmp_path / "ffmpeg.exe").write_bytes(b"x")
+        assert stream._command()[0] == str(tmp_path / "ffmpeg.exe")
+
+    def test_explicit_path_kept(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("agent.cameras.capture.install_base", lambda: tmp_path)
+        (tmp_path / "ffmpeg.exe").write_bytes(b"x")
+        stream = CameraStream(
+            CameraRole.FRONT, "rtsp://cam/1", ffmpeg_path="D:/vesy-agent/ffmpeg.exe"
+        )
+        assert stream._command()[0] == "D:/vesy-agent/ffmpeg.exe"

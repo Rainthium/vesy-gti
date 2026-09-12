@@ -977,3 +977,35 @@ class TestManagerCycleWithPort:
             assert stored.cycle.max_tare_kg == 5_000.0
         finally:
             environment.close()
+
+
+# --- 0.4.33: доставка ffmpeg подписана на смену камер из центра ---
+
+
+class FakeFfmpegProvisioner:
+    """Доставка ffmpeg с центра: получает каждый новый список камер."""
+
+    def __init__(self) -> None:
+        self.cameras: list[list[CameraConfig]] = []
+
+    def set_cameras(self, cameras: list[CameraConfig]) -> None:
+        self.cameras.append(list(cameras))
+
+
+class TestFfmpegProvisionerSubscription:
+    def test_cameras_reach_provisioner(self, env: ManagerEnv) -> None:
+        """RTSP-камера из панели доезжает до доставки ffmpeg — та решит, качать ли."""
+        provisioner = FakeFfmpegProvisioner()
+        env.manager.set_ffmpeg_provisioner(provisioner)
+        payload = ScaleSettingsPayload(
+            cameras=[CameraSettings(role=CameraRole.REAR, rtsp_url="rtsp://u:p@10.0.0.6/r")]
+        )
+        assert env.handle(payload).ok is True
+        assert len(provisioner.cameras) == 1
+        assert [c.rtsp_only for c in provisioner.cameras[0]] == [True]
+
+    def test_without_subscription_nothing_breaks(self, env: ManagerEnv) -> None:
+        payload = ScaleSettingsPayload(
+            cameras=[CameraSettings(role=CameraRole.FRONT, snapshot_url="http://u:p@10.0.0.5/f")]
+        )
+        assert env.handle(payload).ok is True

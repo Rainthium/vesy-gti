@@ -28,6 +28,7 @@ dist/
 *.db
 /photos_data/
 /releases_data/
+/tools_data/
 logs/
 *.log
 

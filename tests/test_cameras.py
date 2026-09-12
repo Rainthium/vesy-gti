@@ -518,3 +518,55 @@ class TestSanitizeUrlNeverRaises:
         assert not shot.ok
         assert shot.error
         assert "secret" not in shot.error
+
+
+# --- 0.4.33: системный прокси и ffmpeg из корня установки ---
+
+
+class TestNoSystemProxy:
+    def test_system_proxy_is_ignored_for_cameras(
+        self, http_camera: tuple[str, list[RecordedRequest]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Прокси из окружения (на Windows — реестр Internet Settings) к камерам
+        не применяется: снимок идёт напрямую (гипотеза разбора Канта 12.09.2026)."""
+        base, requests = http_camera
+        dead_proxy = f"http://127.0.0.1:{free_port()}"
+        monkeypatch.setenv("http_proxy", dead_proxy)
+        monkeypatch.setenv("HTTP_PROXY", dead_proxy)
+        monkeypatch.delenv("no_proxy", raising=False)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        shot = capture(CameraConfig(role=CameraRole.FRONT, snapshot_url=f"{base}/ok.jpg"))
+        assert shot.ok, shot.error
+        assert shot.jpeg == JPEG_BODY
+        assert [path for path, _ in requests] == ["/ok.jpg"]
+
+
+class TestFfmpegFromInstallRoot:
+    def test_rtsp_frame_uses_ffmpeg_from_install_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Голое имя в конфиге, а в корне установки лежит ffmpeg.exe — запускается он."""
+        root = tmp_path / "vesy-agent"
+        root.mkdir()
+        fake = root / "ffmpeg.exe"
+        fake.write_text("#!/bin/sh\nprintf '\\377\\330\\377\\340root-frame'\n")
+        fake.chmod(0o755)
+        monkeypatch.setattr("agent.cameras.capture.install_base", lambda: root)
+        shot = capture(
+            CameraConfig(role=CameraRole.REAR, rtsp_url="rtsp://10.0.0.5:554/1"),
+            ffmpeg_path="ffmpeg",
+        )
+        assert shot.ok, shot.error
+        assert shot.jpeg == b"\xff\xd8\xff\xe0root-frame"
+
+    def test_missing_ffmpeg_error_names_resolved_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("agent.cameras.capture.install_base", lambda: tmp_path)
+        shot = capture(
+            CameraConfig(role=CameraRole.REAR, rtsp_url="rtsp://10.0.0.5:554/1"),
+            ffmpeg_path="surely-missing-ffmpeg-binary",
+        )
+        assert not shot.ok
+        assert shot.error is not None
+        assert "ffmpeg не найден: surely-missing-ffmpeg-binary" in shot.error

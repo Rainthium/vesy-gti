@@ -49,6 +49,13 @@ class CameraStreamsLike(Protocol):
     def set_cameras(self, cameras: list[CameraConfig]) -> None: ...
 
 
+class FfmpegProvisionerLike(Protocol):
+    """Минимум от доставки ffmpeg с центра (реализация — ffmpeg_tool.FfmpegProvisioner):
+    камера только с RTSP появилась из панели, а ffmpeg на ПК нет — качается сам (0.4.33)."""
+
+    def set_cameras(self, cameras: list[CameraConfig]) -> None: ...
+
+
 class CameraPreviewLike(Protocol):
     """Минимум от превью веб-интерфейса (реализация — main.AgentRuntime).
 
@@ -159,6 +166,7 @@ class SettingsManager:
         self._preview: CameraPreviewLike | None = None
         self._info_sink: AgentInfoLike | None = None
         self._retention: RetentionLike | None = None
+        self._ffmpeg: FfmpegProvisionerLike | None = None
         self._storage = storage
         # таймауты съёмки локального конфига по ролям: камеры из центра
         # наследуют их (см. merge_center_settings — та же логика при старте)
@@ -176,6 +184,10 @@ class SettingsManager:
     def set_retention(self, retention: RetentionLike) -> None:
         """Подписать уборку локальных фото на срок хранения из центра."""
         self._retention = retention
+
+    def set_ffmpeg_provisioner(self, provisioner: FfmpegProvisionerLike) -> None:
+        """Подписать доставку ffmpeg на смену камер из центра (0.4.33)."""
+        self._ffmpeg = provisioner
 
     async def handle(self, update: ScaleConfigUpdate) -> ConfigStatus:
         """Обработчик для CenterClient: применить и сохранить снимок."""
@@ -213,6 +225,9 @@ class SettingsManager:
                 self._camera_streams.set_cameras(cameras)
             if self._preview is not None:
                 self._preview.set_cameras(cameras)
+            if self._ffmpeg is not None:
+                # RTSP-камера без ffmpeg на ПК — доставка с центра проснётся сама
+                self._ffmpeg.set_cameras(cameras)
             logger.info("настройки центра: камеры применены (%d)", len(cameras))
 
         if settings.indicator_model and self._info_sink is not None:
