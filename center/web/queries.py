@@ -72,6 +72,9 @@ def dashboard_scales(session: Session, site_scope: int | None = None) -> list[Da
         last = session.execute(
             select(Weighing)
             .where(Weighing.scale_id == scale.id)
+            # перенесённые из АИС тарирования (12.09.2026) агент не проводил —
+            # «последняя операция» весов только из своих записей
+            .where(Weighing.source != WeighingSource.IMPORTED)
             .order_by(desc(Weighing.created_at))
             .limit(1)
         ).scalar_one_or_none()

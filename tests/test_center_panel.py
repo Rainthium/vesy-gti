@@ -310,6 +310,40 @@ class TestDashboardScales:
         assert by_site["a-site"].agent is not None
         assert by_site["b-site"].agent is None
 
+    def test_last_weighing_ignores_imported(self, db_session: Session) -> None:
+        """Перенесённое из АИС тарирование не становится «последней операцией» весов:
+        на Канте карточка весов №2 показала тарирование от 13.06.2026 (последняя
+        вставленная строка переноса), хотя агент операций не проводил (13.09.2026)."""
+        from center.tare_import import AisTaring
+
+        _add_user(db_session)
+        _, scale = _add_site_scale(db_session, "kant", "СВХ «Кант»", "Весы №2 (тарирование)")
+        db_session.commit()
+        imported = AisTaring(
+            tare_ref="TAR000099020",
+            entry_ref=None,
+            vehicle_number="07KG777ABC",
+            trailer_number=None,
+            massa=14200.0,
+            object_name="Кант",
+            operator=None,
+            tared_at=datetime.now(UTC) - timedelta(days=90),
+            completed=True,
+            ignored=False,
+        )
+        assert (
+            repo.save_imported_taring(db_session, scale.id, imported, imported_at=datetime.now(UTC))
+            is not None
+        )
+        db_session.commit()
+        cards = {card.scale.id: card for card in queries.dashboard_scales(db_session)}
+        assert cards[scale.id].last_weighing is None
+        # своя операция — показывается
+        repo.save_weighing_record(db_session, scale.id, _make_taring(vehicle_number="07KG777ABC"))
+        cards = {card.scale.id: card for card in queries.dashboard_scales(db_session)}
+        last = cards[scale.id].last_weighing
+        assert last is not None and last.source is WeighingSource.AIS
+
     def test_last_weighing_is_freshest(self, db_session: Session) -> None:
         """last_weighing — самая свежая запись весов; на пустых весах None."""
         _, scale1 = _add_site_scale(db_session, "a-site", "СВХ «А»", "Весы 1")
