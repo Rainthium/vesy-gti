@@ -337,6 +337,37 @@ def create_app(
             },
         )
 
+    @app.get("/cameras/{role}/full.jpg")
+    def camera_full_frame(role: str, operator: Operator) -> Response:
+        """Полный кадр для окна «Увеличить» (0.4.35): без ужатия, не сохраняется."""
+        try:
+            camera_role = CameraRole(role)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="нет такой камеры") from exc
+        if camera_role not in services.camera_roles():
+            raise HTTPException(status_code=404, detail="камера не настроена")
+        try:
+            frame = services.camera_full_frame(camera_role)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="камера не настроена") from exc
+        shot = frame.shot
+        if not shot.ok or shot.jpeg is None:
+            raise HTTPException(status_code=502, detail=shot.error or "камера недоступна")
+        captured_at = shot.captured_at
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=UTC)
+        return Response(
+            content=shot.jpeg,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Captured-At": captured_at.isoformat(timespec="milliseconds"),
+                # stream — кадр из буфера потока, окно обновляет его само;
+                # capture — разовая съёмка, обновление только по кнопке
+                "X-Frame-Source": "stream" if frame.from_stream else "capture",
+            },
+        )
+
     # --- снимки записей журнала ---
 
     @app.get("/photos/{weighing_uuid}/{role}.jpg")

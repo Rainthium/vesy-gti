@@ -29,6 +29,20 @@ class AgentInfo:
     center_url: str  # wss://vesy.gti.kg (для экрана «Оборудование»)
 
 
+@dataclass(frozen=True)
+class FullFrame:
+    """Полный кадр для окна «Увеличить» (0.4.35).
+
+    ``from_stream`` — кадр взят из буфера RTSP-потока: камеру не трогали,
+    окно может обновлять его часто; иначе кадр снят разовым запросом к
+    камере, и обновлять его стоит только по кнопке — иначе автообновление
+    наложится на съёмку операции (замечание ревью 13.09.2026, урок 0.4.31).
+    """
+
+    shot: CameraShot
+    from_stream: bool
+
+
 class AgentServices(Protocol):
     """Что веб-интерфейсу нужно от агента."""
 
@@ -103,6 +117,11 @@ class AgentServices(Protocol):
 
     def camera_snapshot(self, role: CameraRole) -> CameraShot:
         """Свежий кадр камеры (может занимать до пары секунд)."""
+        ...
+
+    def camera_full_frame(self, role: CameraRole) -> FullFrame:
+        """Полный кадр камеры без ужатия — окно «Увеличить» (0.4.35);
+        не кэшируется и никуда не сохраняется."""
         ...
 
     def verify_operator(self, login: str, password: str) -> str | None:

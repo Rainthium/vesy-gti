@@ -38,7 +38,7 @@ from agent.cameras.capture import CameraShot
 from agent.drivers.base import ScaleState
 from agent.sync.storage import AgentStorage
 from agent.web.app import create_app
-from agent.web.services import AgentInfo
+from agent.web.services import AgentInfo, FullFrame
 from agent.weighing.manual import ManualFlowError, ManualPreview
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
 from shared.messages import TareRecord, VerificationInfo, WeighingRecord
@@ -50,6 +50,7 @@ NNBSP = " "
 # минимальный валидный заголовок JPEG — достаточно для проверки отдачи байтов
 FAKE_JPEG = b"\xff\xd8\xff\xe0" + b"fake-camera-frame" + b"\xff\xd9"
 THUMB_JPEG = b"\xff\xd8\xff\xe0" + b"fake-thumbnail" + b"\xff\xd9"
+FULL_JPEG = b"\xff\xd8\xff\xe0" + b"fake-full-frame-2560x1440" + b"\xff\xd9"
 
 OPERATOR_LOGIN = "osmonov"
 OPERATOR_PASSWORD = "secret"
@@ -100,6 +101,9 @@ class FakeServices:
         self.stamps: dict[str, str | None] = {OPERATOR_LOGIN: "stamp-1"}
         self.scale = ScaleState(status=ScaleStatus.OK, weight_kg=1460.0, stable=True)
         self.snapshot_ok = True
+        self.full_frame_ok = True
+        self.full_frame_live = False  # True — кадр из буфера потока
+        self.full_frame_requests: list[CameraRole] = []
         self.pending = 0
         self.registry_size = 1812
         self.roles = [CameraRole.FRONT, CameraRole.REAR]
@@ -180,6 +184,16 @@ class FakeServices:
                 role=role, jpeg=None, captured_at=datetime.now(UTC), error="таймаут камеры"
             )
         return CameraShot(role=role, jpeg=FAKE_JPEG, captured_at=datetime.now(UTC))
+
+    def camera_full_frame(self, role: CameraRole) -> FullFrame:
+        self.full_frame_requests.append(role)
+        if not self.full_frame_ok:
+            shot = CameraShot(
+                role=role, jpeg=None, captured_at=datetime.now(UTC), error="камера занята"
+            )
+            return FullFrame(shot=shot, from_stream=False)
+        shot = CameraShot(role=role, jpeg=FULL_JPEG, captured_at=datetime.now(UTC))
+        return FullFrame(shot=shot, from_stream=self.full_frame_live)
 
     def record_by_uuid(self, weighing_uuid: UUID) -> WeighingRecord | None:
         return next((r for r in self.journal if r.uuid == weighing_uuid), None)
@@ -597,6 +611,46 @@ class TestCameras:
         """Валидная роль, не настроенная на объекте, — тоже 404."""
         services.roles = [CameraRole.FRONT]
         assert operator_client.get("/cameras/rear.jpg").status_code == 404
+
+
+class TestCameraFullFrame:
+    """Окно «Увеличить» (0.4.35): полный кадр по запросу, не превью."""
+
+    def test_full_frame_ok(self, services: FakeServices, operator_client: TestClient) -> None:
+        response = operator_client.get("/cameras/rear/full.jpg")
+        assert response.status_code == 200
+        assert response.headers["Content-Type"] == "image/jpeg"
+        assert response.content == FULL_JPEG and response.content != FAKE_JPEG
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["X-Captured-At"].endswith("+00:00")
+        assert response.headers["X-Frame-Source"] == "capture"
+        assert services.full_frame_requests == [CameraRole.REAR]
+        services.full_frame_live = True
+        assert operator_client.get("/cameras/rear/full.jpg").headers["X-Frame-Source"] == "stream"
+
+    def test_full_frame_error_502(
+        self, services: FakeServices, operator_client: TestClient
+    ) -> None:
+        services.full_frame_ok = False
+        response = operator_client.get("/cameras/front/full.jpg")
+        assert response.status_code == 502
+        assert "занята" in response.json()["detail"]
+
+    def test_full_frame_404s(self, services: FakeServices, operator_client: TestClient) -> None:
+        assert operator_client.get("/cameras/xxx/full.jpg").status_code == 404
+        services.roles = [CameraRole.FRONT]
+        assert operator_client.get("/cameras/rear/full.jpg").status_code == 404
+
+    def test_full_frame_requires_login(self, client: TestClient) -> None:
+        response = client.get("/cameras/front/full.jpg", follow_redirects=False)
+        assert response.status_code in (303, 401)
+
+    def test_main_page_has_zoom_buttons(self, operator_client: TestClient) -> None:
+        page = operator_client.get("/").text
+        assert page.count('class="btn-zoom js-cam-zoom"') == 2
+        assert 'data-role="front"' in page and 'data-role="rear"' in page
+        assert "/cameras/' + role + '/full.jpg" in page
+        assert "X-Frame-Source" in page and "Обновить кадр" in page
 
 
 class TestJournalPhotos:

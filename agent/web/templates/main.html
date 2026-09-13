@@ -45,8 +45,14 @@
       </div>
       <figcaption class="camera-caption">
         <span>Камера · {{ 'ПЕРЕД' if role == 'front' else 'ЗАД' }}</span>
-        <span class="pill pill-ok cam-ok"><span class="dot"></span>Ок</span>
-        <span class="pill pill-err cam-fail"><span class="dot"></span>Нет сигнала</span>
+        <span class="camera-caption-right">
+          <span class="pill pill-ok cam-ok"><span class="dot"></span>Ок</span>
+          <span class="pill pill-err cam-fail"><span class="dot"></span>Нет сигнала</span>
+          {# 0.4.35: полный кадр во весь экран — номер на превью не прочитать #}
+          <button type="button" class="btn-zoom js-cam-zoom" data-role="{{ role }}"
+                  data-title="Камера · {{ 'ПЕРЕД' if role == 'front' else 'ЗАД' }}"
+                  title="Полный кадр камеры во весь экран">⤢ Увеличить</button>
+        </span>
       </figcaption>
     </figure>
     {% endfor %}
@@ -115,6 +121,98 @@
         img.src = img.src.split('?')[0] + '?t=' + now;
       });
     }, {{ preview_interval_ms | default(2000) }});
+  })();
+  // окно «Увеличить» (0.4.35): полный кадр камеры во весь экран. Кадр берётся
+  // fetch'ем — так видны заголовки: X-Frame-Source (stream — кадр из буфера
+  // потока, камеру не трогаем, обновляем раз в ZOOM_REFRESH_MS; capture —
+  // разовая съёмка, обновление только по кнопке «Обновить»: автообновление
+  // наложилось бы на съёмку операции — урок 0.4.31) и X-Captured-At (время
+  // кадра в подписи). Кадр никуда не сохраняется.
+  (function () {
+    var ZOOM_REFRESH_MS = 2000;
+    var overlay = null, img = null, caption = null, refreshBtn = null;
+    var role = null, title = '', session = 0, objectUrl = null;
+    function build() {
+      overlay = document.createElement('div');
+      overlay.className = 'lightbox cam-zoom';
+      overlay.hidden = true;
+      overlay.innerHTML =
+        '<button type="button" class="lightbox-close" aria-label="Закрыть">✕</button>' +
+        '<figure class="lightbox-body"><img class="lightbox-img" alt="">' +
+        '<figcaption class="lightbox-caption"></figcaption>' +
+        '<button type="button" class="btn-zoom zoom-refresh" hidden>Обновить кадр</button></figure>';
+      img = overlay.querySelector('.lightbox-img');
+      caption = overlay.querySelector('.lightbox-caption');
+      refreshBtn = overlay.querySelector('.zoom-refresh');
+      refreshBtn.addEventListener('click', function (event) { event.stopPropagation(); load(); });
+      overlay.addEventListener('click', function (event) {
+        if (event.target === overlay || event.target.closest('.lightbox-close')) { close(); }
+      });
+      document.body.appendChild(overlay);
+    }
+    function timeOf(iso) {
+      var at = iso ? new Date(iso) : null;
+      return at && !isNaN(at.getTime()) ? at.toLocaleTimeString('ru-RU') : '';
+    }
+    function show(blob) {
+      if (objectUrl) { URL.revokeObjectURL(objectUrl); }
+      objectUrl = URL.createObjectURL(blob);
+      img.src = objectUrl;
+    }
+    function load() {
+      if (!role) { return; }
+      var my = session;
+      caption.textContent = title + ' · загрузка полного кадра…';
+      fetch('/cameras/' + role + '/full.jpg?t=' + Date.now(), { cache: 'no-store' })
+        .then(function (response) {
+          if (!response.ok) { throw new Error('HTTP ' + response.status); }
+          var live = response.headers.get('X-Frame-Source') === 'stream';
+          var at = timeOf(response.headers.get('X-Captured-At'));
+          return response.blob().then(function (blob) { return { blob: blob, live: live, at: at }; });
+        })
+        .then(function (result) {
+          if (my !== session) { return; }
+          show(result.blob);
+          caption.textContent = title + ' · кадр ' + result.at +
+            (result.live ? ' · обновляется раз в 2 с' : ' · камера снимает по запросу') +
+            ' · Esc — закрыть';
+          refreshBtn.hidden = result.live;
+          if (result.live) { setTimeout(function () { if (my === session) { load(); } }, ZOOM_REFRESH_MS); }
+        })
+        .catch(function () {
+          if (my !== session) { return; }
+          caption.textContent = title + ' · кадр не получен — нажмите «Обновить кадр»';
+          refreshBtn.hidden = false;
+        });
+    }
+    function open(button) {
+      if (overlay && !overlay.hidden) { return; }
+      if (!overlay) { build(); }
+      session += 1;
+      role = button.dataset.role;
+      title = button.dataset.title || '';
+      refreshBtn.hidden = true;
+      img.removeAttribute('src');
+      overlay.hidden = false;
+      document.body.classList.add('lightbox-open');
+      load();
+    }
+    function close() {
+      if (!overlay || overlay.hidden) { return; }
+      session += 1;
+      role = null;
+      overlay.hidden = true;
+      img.removeAttribute('src');
+      if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
+      document.body.classList.remove('lightbox-open');
+    }
+    document.addEventListener('click', function (event) {
+      var button = event.target.closest && event.target.closest('.js-cam-zoom');
+      if (button) { event.preventDefault(); open(button); }
+    });
+    document.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') { close(); }
+    });
   })();
 </script>
 {% endblock %}

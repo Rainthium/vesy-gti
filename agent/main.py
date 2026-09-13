@@ -54,7 +54,7 @@ from agent.sync.storage import AgentStorage
 from agent.sync.ws_client import CenterClient, ClientConfig, run_forever
 from agent.updater import AgentUpdater, install_base
 from agent.web.app import create_app
-from agent.web.services import AgentInfo
+from agent.web.services import AgentInfo, FullFrame
 from agent.weighing.auto import AutoConfig, AutoOperationRunner
 from agent.weighing.manual import ManualOperationFlow, ManualPreview
 from agent.weighing.watcher import ScaleWatcher
@@ -130,6 +130,9 @@ PREVIEW_WARN_EVERY_S = 30.0
 # до экрана редко, а по журналу всё было «200 OK»: без длительности съёмки
 # не отличить медленную камеру от залипшего кэша
 PREVIEW_SLOW_S = 1.5
+# 0.4.35: окно «Увеличить» — полный кадр по запросу; съёмка ждёт замок роли
+# (превью/проба CameraHealth) не дольше этого, иначе честная ошибка
+FULL_FRAME_LOCK_WAIT_S = 5.0
 
 
 class CameraHealth:
@@ -441,6 +444,43 @@ class AgentRuntime:
             return self._preview_result(role, shot, taken)
         finally:
             lock.release()
+
+    def camera_full_frame(self, role: CameraRole) -> FullFrame:
+        """Полный кадр камеры для окна «Увеличить» (просьба операторов Канта,
+        13.09.2026): номер на превью не прочитать.
+
+        Не превью: без ужатия, без кэша и без preview_url — тот же кадр, что
+        идёт в фото операции. У потоковой камеры — из буфера потока (камеру
+        не трогает, окно обновляет его само), у камеры со снимком — разовая
+        съёмка по snapshot_url под замком роли (не пересекается с превью и
+        пробой CameraHealth; съёмка операции замок не берёт — поэтому окно
+        такой кадр само не обновляет, только по кнопке). Кадр никуда не
+        сохраняется.
+        """
+        camera = self._preview_cameras.get(role)
+        if camera is None:
+            raise ValueError(f"камера {role} не настроена")
+        if self._streams is not None:
+            # кадр буфера до PREVIEW_STALE_MAX_S — лучше, чем разовый ffmpeg ради
+            # окна просмотра в окно переподключения потока (время кадра честно
+            # уходит в X-Captured-At)
+            streamed = self._streams.shot(role, max_age_s=PREVIEW_STALE_MAX_S)
+            if streamed is not None:
+                return FullFrame(shot=streamed, from_stream=True)
+        lock = self.preview_lock(role)
+        if not lock.acquire(timeout=FULL_FRAME_LOCK_WAIT_S):
+            busy = CameraShot(
+                role=role,
+                jpeg=None,
+                captured_at=datetime.now(UTC),
+                error="камера занята съёмкой — повторите",
+            )
+            return FullFrame(shot=busy, from_stream=False)
+        try:
+            shot = capture(camera, ffmpeg_path=self._config.ffmpeg_path)
+        finally:
+            lock.release()
+        return FullFrame(shot=shot, from_stream=False)
 
     def _preview_result(self, role: CameraRole, shot: CameraShot, now: float) -> CameraShot:
         """Кадр как есть; при срыве — последний удачный, пока он не старше

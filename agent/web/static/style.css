@@ -260,6 +260,23 @@ body.app {
   font-size: 14px;
   font-weight: 700;
 }
+.camera-caption-right { display: flex; align-items: center; gap: 10px; }
+/* окно «Увеличить» (0.4.35): полный кадр камеры во весь экран */
+.btn-zoom {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-zoom:hover { border-color: var(--green-border); color: var(--primary); }
+.cam-zoom .zoom-refresh { margin-top: 10px; }
+.cam-zoom .zoom-refresh[hidden] { display: none; }
 .cam-fail { display: none; }
 .camera:has(img.failed) .no-signal { display: block; }
 .camera:has(img.failed) .cam-ok { display: none; }

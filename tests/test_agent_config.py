@@ -924,3 +924,92 @@ class TestStreamedPreviewLastGood:
             assert busy.jpeg == first.jpeg
         finally:
             storage.close()
+
+
+class TestCameraFullFrame:
+    """0.4.35: окно «Увеличить» — полный кадр без ужатия и кэша."""
+
+    def test_streamed_camera_returns_buffer_frame_unshrunk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runtime, storage, _ = _runtime_with_cameras(tmp_path)
+        try:
+            big = _big_jpeg()
+            frame = CameraShot(role=CameraRole.FRONT, jpeg=big, captured_at=datetime.now(UTC))
+            streams = runtime._streams
+            assert streams is not None
+            asked: list[float] = []
+
+            def fake_shot(role: CameraRole, *, max_age_s: float = 3.0) -> CameraShot:
+                asked.append(max_age_s)
+                return frame
+
+            monkeypatch.setattr(streams, "shot", fake_shot)
+            frame_full = runtime.camera_full_frame(CameraRole.FRONT)
+            assert frame_full.from_stream
+            shot = frame_full.shot
+            assert shot.ok and shot.jpeg == big  # не ужат, в отличие от превью
+            # кадр буфера годится до PREVIEW_STALE_MAX_S — без разового ffmpeg
+            assert asked == [10.0]
+            preview = runtime.camera_snapshot(CameraRole.FRONT)
+            assert preview.ok and preview.jpeg is not None and len(preview.jpeg) < len(big)
+        finally:
+            storage.close()
+
+    def test_snapshot_camera_captures_main_url_not_preview(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """У камеры с preview_url полный кадр снимается по основному snapshot_url."""
+        runtime, storage, _ = _runtime_with_cameras(tmp_path)
+        try:
+            runtime.set_cameras(
+                [
+                    CameraConfig(
+                        role=CameraRole.FRONT,
+                        snapshot_url="http://u:p@10.9.9.9/ISAPI/Streaming/channels/101/picture",
+                        preview_url="http://u:p@10.9.9.9/ISAPI/Streaming/channels/102/picture",
+                    )
+                ]
+            )
+            captured: list[CameraConfig] = []
+
+            def fake_capture(camera: CameraConfig, *, ffmpeg_path: str) -> CameraShot:
+                captured.append(camera)
+                return CameraShot(role=camera.role, jpeg=b"full", captured_at=datetime.now(UTC))
+
+            monkeypatch.setattr("agent.main.capture", fake_capture)
+            frame = runtime.camera_full_frame(CameraRole.FRONT)
+            assert not frame.from_stream
+            shot = frame.shot
+            assert shot.ok and shot.jpeg == b"full"
+            assert len(captured) == 1
+            assert captured[0].snapshot_url is not None and "/101/" in captured[0].snapshot_url
+            # кадр не кэшируется: второй запрос — новая съёмка
+            runtime.camera_full_frame(CameraRole.FRONT)
+            assert len(captured) == 2
+        finally:
+            storage.close()
+
+    def test_busy_lock_gives_error_not_queue(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runtime, storage, _ = _runtime_with_cameras(tmp_path)
+        try:
+            monkeypatch.setattr("agent.main.FULL_FRAME_LOCK_WAIT_S", 0.05)
+            lock = runtime.preview_lock(CameraRole.FRONT)
+            assert lock.acquire(blocking=False)
+            try:
+                shot = runtime.camera_full_frame(CameraRole.FRONT).shot
+            finally:
+                lock.release()
+            assert not shot.ok and shot.error is not None and "занята" in shot.error
+        finally:
+            storage.close()
+
+    def test_unknown_role_raises(self, tmp_path: Path) -> None:
+        runtime, storage, _ = _runtime_with_cameras(tmp_path)
+        try:
+            with pytest.raises(ValueError, match="не настроена"):
+                runtime.camera_full_frame(CameraRole.REAR)
+        finally:
+            storage.close()

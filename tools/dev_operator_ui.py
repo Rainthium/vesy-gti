@@ -24,7 +24,7 @@ from agent.cameras.capture import CameraShot
 from agent.drivers.base import ScaleState
 from agent.sync.storage import AgentStorage
 from agent.web.app import create_app
-from agent.web.services import AgentInfo
+from agent.web.services import AgentInfo, FullFrame
 from agent.weighing.manual import ManualOperationFlow, ManualPreview
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
 from shared.messages import TareRecord, VerificationInfo, WeighingRecord
@@ -256,6 +256,13 @@ class DemoServices:
 
     def camera_snapshot(self, role: CameraRole) -> CameraShot:
         return CameraShot(role=role, jpeg=_GRAY_JPEG, captured_at=datetime.now(UTC))
+
+    def camera_full_frame(self, role: CameraRole) -> FullFrame:
+        # окно «Увеличить» (0.4.35): в демо тот же серый кадр, «снимок по запросу»
+        return FullFrame(
+            shot=CameraShot(role=role, jpeg=_GRAY_JPEG, captured_at=datetime.now(UTC)),
+            from_stream=False,
+        )
 
     def verify_operator(self, login: str, password: str) -> str | None:
         return "А. Осмонов" if (login, password) == ("operator", "operator") else None
