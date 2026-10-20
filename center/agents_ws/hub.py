@@ -15,6 +15,7 @@ from collections.abc import Callable
 from typing import Protocol
 from uuid import UUID, uuid4
 
+from center.tare_snapshot import TareSnapshot
 from shared.enums import ErrorCode
 from shared.messages import (
     EquipmentStatus,
@@ -70,6 +71,9 @@ class AgentHub:
         # последняя самодиагностика из hello/heartbeat (для дашборда панели:
         # состояние индикатора и камер на одном экране, запрос Игоря 09.08.2026)
         self._equipment: dict[int, EquipmentStatus] = {}
+        # версия агента из hello: снимок реестра тар режется под предел
+        # сообщения старых агентов (center/tare_snapshot.py, инцидент 20.10.2026)
+        self._versions: dict[int, str | None] = {}
         # request_id → (номер документа АИС, момент регистрации): команда v2
         # несёт ais_ref, который WS-сервер пишет в одной транзакции с записью
         # (идемпотентность контракта v2). Живёт до прихода результата либо
@@ -100,6 +104,7 @@ class AgentHub:
             # оборудование офлайн-агента неизвестно — стухшие статусы
             # индикатора/камер на дашборде вводили бы в заблуждение
             self._equipment.pop(scale_id, None)
+            self._versions.pop(scale_id, None)
             return True
         return False
 
@@ -113,6 +118,13 @@ class AgentHub:
 
     def update_equipment(self, scale_id: int, equipment: EquipmentStatus) -> None:
         self._equipment[scale_id] = equipment
+
+    def update_version(self, scale_id: int, version: str | None) -> None:
+        """Запомнить версию агента (hello) — от неё зависит предел снимка реестра."""
+        self._versions[scale_id] = version
+
+    def agent_version(self, scale_id: int) -> str | None:
+        return self._versions.get(scale_id)
 
     # --- номера документов АИС у команд v2 ---
 
@@ -336,12 +348,16 @@ class AgentHub:
             return False
 
     async def broadcast_tare_registry(self, update: TareRegistryUpdate) -> int:
-        """Разослать снимок реестра всем подключённым агентам; вернуть число."""
-        payload = update.model_dump_json()
+        """Разослать снимок реестра всем подключённым агентам; вернуть число.
+
+        Каждому — под предел сообщения ЕГО версии (старым агентам урезанный
+        снимок, см. center/tare_snapshot.py).
+        """
+        snapshot = TareSnapshot(update.records)
         sent = 0
         for scale_id, link in list(self._links.items()):
             try:
-                await link.send_text(payload)
+                await link.send_text(snapshot.payload_for(self._versions.get(scale_id)))
                 sent += 1
             except Exception:
                 logger.warning("не удалось отправить реестр агенту весов %d", scale_id)

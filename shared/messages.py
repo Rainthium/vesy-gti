@@ -47,6 +47,16 @@ PHOTO_CLEANUP_MIN_VERSION = (0, 4, 25)
 # событиями по hello и ждёт подтверждения самопроверкой, а не hello.
 UPDATE_STAGES_MIN_VERSION = (0, 4, 19)
 
+# Предел входящего WS-сообщения у агента. До 0.4.36 ws_client агента звал
+# ``websockets.connect`` без ``max_size`` — действовал предел библиотеки
+# по умолчанию, 1 МиБ по РАСПАКОВАННОМУ тексту. Инцидент 20.10.2026: снимок
+# реестра тар (6 054 записи) перерос 1 МиБ, все агенты рвали соединение
+# сразу после hello и переподключались каждые 5 с. Центр режет снимок под
+# предел агента (center/tare_snapshot.py), новые агенты принимают до 16 МиБ.
+AGENT_WS_LEGACY_MAX_MESSAGE_BYTES = 1 << 20
+AGENT_WS_MAX_MESSAGE_BYTES = 16 << 20
+LARGE_REGISTRY_MIN_VERSION = (0, 4, 36)
+
 
 def _version_tuple(version: str | None) -> tuple[int, ...] | None:
     if not version:
@@ -73,6 +83,13 @@ def supports_log_tail(version: str | None) -> bool:
     """Умеет ли агент этой версии отдавать хвост журнала по запросу."""
     parts = _version_tuple(version)
     return parts is not None and parts >= LOG_TAIL_MIN_VERSION
+
+
+def supports_large_registry(version: str | None) -> bool:
+    """Принимает ли агент этой версии WS-сообщения больше 1 МиБ
+    (``max_size`` в ws_client с 0.4.36). Старым — снимок реестра под предел."""
+    parts = _version_tuple(version)
+    return parts is not None and parts >= LARGE_REGISTRY_MIN_VERSION
 
 
 def supports_photo_cleanup(version: str | None) -> bool:

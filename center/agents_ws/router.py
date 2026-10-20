@@ -31,6 +31,7 @@ from center.agents_ws.hub import AgentHub, AgentLink
 from center.api_v2.schemas import AIS_REF_RE
 from center.db import repo
 from center.db.models import AgentStatus
+from center.tare_snapshot import TareSnapshot
 from shared.messages import (
     ConfigStatus,
     Heartbeat,
@@ -91,9 +92,10 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
         with session_factory() as session:
             return fn(session)
 
-    async def send_tare_registry(link: AgentLink) -> None:
+    async def send_tare_registry(link: AgentLink, agent_version: str | None) -> None:
+        # снимок под предел сообщения агента этой версии (инцидент 20.10.2026)
         records = await asyncio.to_thread(_db, repo.load_tare_registry)
-        await link.send_text(TareRegistryUpdate(records=records).model_dump_json())
+        await link.send_text(TareSnapshot(records).payload_for(agent_version))
 
     async def broadcast_tare_registry() -> None:
         records = await asyncio.to_thread(_db, repo.load_tare_registry)
@@ -145,6 +147,7 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
 
                 if isinstance(message, Hello):
                     agent_version = message.version
+                    hub.update_version(scale_id, agent_version)
                     hub.update_equipment(scale_id, message.equipment)
                     await asyncio.to_thread(
                         _db,
@@ -175,7 +178,7 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                         await link.send_text(
                             HeartbeatAck(server_time=datetime.now(UTC)).model_dump_json()
                         )
-                    await send_tare_registry(link)
+                    await send_tare_registry(link, agent_version)
                     if supports_secure_sync(message.version):
                         await send_operators(link, scale_id)
                         await send_scale_config(link, scale_id)

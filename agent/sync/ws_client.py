@@ -42,6 +42,7 @@ from agent.sync.retention import CleanupResult
 from agent.sync.storage import AgentStorage
 from shared.enums import ErrorCode, WeighingSource
 from shared.messages import (
+    AGENT_WS_MAX_MESSAGE_BYTES,
     ConfigStatus,
     EquipmentStatus,
     Heartbeat,
@@ -88,6 +89,10 @@ class ClientConfig:
     reconnect_min_s: float = 1.0  # первая пауза реконнекта
     reconnect_max_s: float = 30.0  # потолок экспоненциального backoff
     sync_batch_size: int = 100  # размер порции досылки офлайн-записей
+    # предел входящего сообщения (снимок реестра тар растёт с парком машин;
+    # 20.10.2026 он перерос 1 МиБ — предел websockets по умолчанию — и агенты
+    # рвали соединение сразу после hello). None — без предела
+    max_message_bytes: int | None = AGENT_WS_MAX_MESSAGE_BYTES
 
 
 class CenterClient:
@@ -168,7 +173,11 @@ class CenterClient:
     async def _session(self) -> None:
         """Одно живое соединение: hello, затем heartbeat и приём сообщений."""
         headers = {"Authorization": f"Bearer {self._config.token}"}
-        async with websockets.connect(self._config.url, additional_headers=headers) as connection:
+        async with websockets.connect(
+            self._config.url,
+            additional_headers=headers,
+            max_size=self._config.max_message_bytes,
+        ) as connection:
             logger.info("соединение с центром установлено: %s", self._config.url)
             await connection.send(self._hello().model_dump_json())
             # состояние учёток на момент подключения — центр видит и те,
