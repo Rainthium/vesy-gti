@@ -5,10 +5,11 @@
 у агентов до 0.4.36 — и все девять агентов рвали соединение сразу после
 hello, переподключаясь каждые 5 с. Здесь снимок сериализуется компактно
 и, если агент старый, режется под его предел: самые НОВЫЕ тарирования
-остаются, самые старые отбрасываются (правило №4 всё равно считает тару
-старше 3 месяцев недействительной; теряются лишь даты для примечаний
-«почему нет нетто» по самым старым сцепкам). Любое урезание — предупреждение
-в лог: это сигнал обновить агентов.
+остаются, самые старые отбрасываются. Режется по байтам, а не по сроку:
+среди отброшенных могут быть и тары моложе 3 месяцев — старый агент не
+подставит их только в РУЧНОМ режиме (при связи тару присылает центр в
+команде). Переходное состояние до обновления агентов; каждое урезание —
+предупреждение в лог с датой самой свежей отброшенной записи.
 """
 
 from __future__ import annotations
@@ -31,8 +32,6 @@ logger = logging.getLogger(__name__)
 # в байтах UTF-8, а номера машин могут содержать не-ASCII — считаем байты,
 # но оставляем 10 % на всякий случай
 SAFETY_RATIO = 0.9
-# Доля предела, после которой центр предупреждает заранее
-WARN_RATIO = 0.8
 
 
 def _payload(records: Sequence[TareRecord]) -> str:
@@ -54,18 +53,7 @@ class TareSnapshot:
 
     @cached_property
     def full_payload(self) -> str:
-        payload = _payload(self._records)
-        size = len(payload.encode("utf-8"))
-        if size > AGENT_WS_LEGACY_MAX_MESSAGE_BYTES * WARN_RATIO:
-            logger.warning(
-                "реестр тар: снимок %d байт (%d записей) — больше %d %% предела старых "
-                "агентов (%d байт); агентам до 0.4.36 снимок режется",
-                size,
-                self.total,
-                int(WARN_RATIO * 100),
-                AGENT_WS_LEGACY_MAX_MESSAGE_BYTES,
-            )
-        return payload
+        return _payload(self._records)
 
     @cached_property
     def legacy_payload(self) -> str:
@@ -94,11 +82,13 @@ class TareSnapshot:
             kept = min(kept - 1, max(target, 0))
             payload = _payload(records[:kept])
             size = len(payload.encode("utf-8"))
+        newest_dropped = records[kept].tared_at if kept < len(records) else None
         logger.warning(
-            "реестр тар: снимок урезан под предел %d байт — отправлено %d из %d записей "
-            "(отброшены самые старые); обновите агентов до 0.4.36",
+            "реестр тар: снимок урезан под предел %d байт — отправлено %d из %d записей, "
+            "отброшены тарирования до %s включительно; обновите агентов до 0.4.36",
             max_bytes,
             kept,
             self.total,
+            newest_dropped.isoformat(timespec="minutes") if newest_dropped else "—",
         )
         return payload

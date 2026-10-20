@@ -134,3 +134,14 @@ class TestHubBroadcastPerVersion:
         assert hub.agent_version(1) == "0.4.36"
         hub.detach(1, link)
         assert hub.agent_version(1) is None
+
+    def test_attach_resets_version_until_new_hello(self) -> None:
+        """Новое соединение (рестарт/откат агента) до своего hello считается
+        старым: иначе после отката 0.4.36 → 0.4.35 широковещание между attach
+        и hello отдало бы полный снимок и порвало бы соединение."""
+        hub = AgentHub()
+        first, second = _FakeLink(), _FakeLink()
+        hub.attach(1, first)
+        hub.update_version(1, "0.4.36")
+        hub.attach(1, second)
+        assert hub.agent_version(1) is None

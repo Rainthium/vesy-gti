@@ -91,6 +91,10 @@ class AgentHub:
         """
         old = self._links.get(scale_id)
         self._links[scale_id] = link
+        # версия известна только из hello НОВОГО соединения: до него считаем
+        # агента старым (безопасный предел снимка) — иначе после отката
+        # 0.4.36 → 0.4.35 широковещание между attach и hello отдало бы полный снимок
+        self._versions.pop(scale_id, None)
         return old
 
     def detach(self, scale_id: int, link: AgentLink) -> bool:
