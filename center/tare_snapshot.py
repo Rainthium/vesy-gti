@@ -28,6 +28,10 @@ from shared.messages import (
 
 logger = logging.getLogger(__name__)
 
+# размер части снимка для агентов ≥0.4.37: ~170 байт на запись → ~260 КБ,
+# с большим запасом до любого предела
+SNAPSHOT_CHUNK_RECORDS = 1500
+
 # Запас от предела: websockets сравнивает длину РАСПАКОВАННОГО сообщения
 # в байтах UTF-8, а номера машин могут содержать не-ASCII — считаем байты,
 # но оставляем 10 % на всякий случай
@@ -58,6 +62,23 @@ class TareSnapshot:
     @cached_property
     def legacy_payload(self) -> str:
         return self._fit(int(AGENT_WS_LEGACY_MAX_MESSAGE_BYTES * SAFETY_RATIO))
+
+    def chunk_payloads(self, seq: int) -> list[str]:
+        """Снимок частями для агентов с дельтами (≥0.4.37): первая часть
+        ``reset``, последняя ``final`` с номером ``seq``, которому он отвечает.
+        Пустой реестр — одна часть без записей."""
+        records = self._records
+        chunks = [
+            records[i : i + SNAPSHOT_CHUNK_RECORDS]
+            for i in range(0, len(records), SNAPSHOT_CHUNK_RECORDS)
+        ] or [[]]
+        last = len(chunks) - 1
+        return [
+            TareRegistryUpdate(
+                records=list(chunk), seq=seq, reset=(i == 0), final=(i == last)
+            ).model_dump_json(exclude_none=True)
+            for i, chunk in enumerate(chunks)
+        ]
 
     def payload_for(self, agent_version: str | None) -> str:
         """Текст сообщения ``tare_registry`` под предел агента этой версии."""

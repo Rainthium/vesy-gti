@@ -54,6 +54,7 @@ from center.releases import (
     store_release,
     version_key,
 )
+from center.tare_publish import publish_tare_registry
 from center.web import queries, refs_admin, report_export, report_view, users_admin
 from shared import card as weight_card
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
@@ -62,7 +63,6 @@ from shared.messages import (
     EquipmentStatus,
     OperatorsRegistryUpdate,
     ScaleConfigUpdate,
-    TareRegistryUpdate,
     UpdateCommand,
     VerificationInfo,
     supports_log_tail,
@@ -1077,9 +1077,9 @@ def create_panel_router(
 
         note, taring = await asyncio.to_thread(_db, apply)
         if taring:
-            # реестр тары сцепки пересобран — разослать снимок всем агентам
-            records = await asyncio.to_thread(_db, repo.load_tare_registry)
-            sent = await hub.broadcast_tare_registry(TareRegistryUpdate(records=records))
+            # реестр тары сцепки пересобран — разослать агентам (старым снимок,
+            # новым дельту, center/tare_publish.py)
+            sent = await publish_tare_registry(hub, _db)
             note += f"; реестр тары разослан агентам ({sent})"
         logger.info("панель (%s): сторно записи id=%d — %s", admin, weighing_id, note)
         return RedirectResponse(f"/panel/journal/{weighing_id}?note={quote(note)}", status_code=303)

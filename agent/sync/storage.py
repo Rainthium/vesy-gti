@@ -30,6 +30,7 @@ from shared.messages import (
     AgentOperatorInfo,
     OperatorRecord,
     PhotoMeta,
+    TareChange,
     TareRecord,
     WeighingRecord,
 )
@@ -90,6 +91,17 @@ CREATE INDEX IF NOT EXISTS idx_photos_local_retention
 -- Тара по ПАРЕ голова+прицеп (решение 09.08.2026); '' = без прицепа
 -- (NULL в первичном ключе SQLite невозможен)
 CREATE TABLE IF NOT EXISTS tare_registry_replica (
+    vehicle_number TEXT NOT NULL,
+    trailer_number TEXT NOT NULL DEFAULT '',
+    tare_value REAL NOT NULL,
+    tared_at TEXT NOT NULL,
+    weighing_uuid TEXT NOT NULL,
+    PRIMARY KEY (vehicle_number, trailer_number)
+);
+
+-- Буфер снимка реестра, приходящего частями (0.4.37): подменяет реплику
+-- целиком по последней части; номер снимка/дельты — agent_settings.tare_registry_seq
+CREATE TABLE IF NOT EXISTS tare_registry_staging (
     vehicle_number TEXT NOT NULL,
     trailer_number TEXT NOT NULL DEFAULT '',
     tare_value REAL NOT NULL,
@@ -606,12 +618,9 @@ class AgentStorage:
 
     # --- реплика реестра тарирований ---
 
-    def replace_tare_registry(self, records: Iterable[TareRecord]) -> int:
-        """Заменить реплику целиком (реестр реплицируется полным снимком).
-
-        Возвращает размер новой реплики.
-        """
-        rows = [
+    @staticmethod
+    def _tare_rows(records: Iterable[TareRecord]) -> list[tuple[str, str, float, str, str]]:
+        return [
             (
                 r.vehicle_number,
                 r.trailer_number or "",
@@ -621,6 +630,40 @@ class AgentStorage:
             )
             for r in records
         ]
+
+    def _set_tare_registry_seq(self, seq: int | None) -> None:
+        """Внутри открытой транзакции: запомнить номер применённого изменения."""
+        if seq is None:
+            self._conn.execute("DELETE FROM agent_settings WHERE key = 'tare_registry_seq'")
+        else:
+            self._conn.execute(
+                "INSERT INTO agent_settings (key, value) VALUES ('tare_registry_seq', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(seq),),
+            )
+
+    def tare_registry_seq(self) -> int | None:
+        """Номер последнего применённого изменения реестра (hello/heartbeat центру);
+        None — реплика пуста, получена старым способом или снимок не дошёл до
+        конца: центр пришлёт полный снимок."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM agent_settings WHERE key = 'tare_registry_seq'"
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return int(row["value"])
+        except (TypeError, ValueError):
+            return None
+
+    def replace_tare_registry(self, records: Iterable[TareRecord], seq: int | None = None) -> int:
+        """Заменить реплику целиком одним снимком (старый способ репликации;
+        с 0.4.37 снимок обычно приходит частями — begin/append/finish).
+
+        Возвращает размер новой реплики.
+        """
+        rows = self._tare_rows(records)
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM tare_registry_replica")
             self._conn.executemany(
@@ -629,7 +672,70 @@ class AgentStorage:
                 " VALUES (?, ?, ?, ?, ?)",
                 rows,
             )
+            self._set_tare_registry_seq(seq)
         return len(rows)
+
+    # --- снимок частями и дельты (инкрементальная репликация, 20.10.2026) ---
+
+    def begin_tare_snapshot(self) -> None:
+        """Начать приём снимка частями: части копятся в буфере, рабочая реплика
+        не трогается — ручной режим посреди приёма видит прежние тары."""
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM tare_registry_staging")
+
+    def append_tare_snapshot(self, records: Iterable[TareRecord]) -> int:
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO tare_registry_staging"
+                " (vehicle_number, trailer_number, tare_value, tared_at, weighing_uuid)"
+                " VALUES (?, ?, ?, ?, ?)",
+                self._tare_rows(records),
+            )
+            row = self._conn.execute("SELECT count(*) AS n FROM tare_registry_staging").fetchone()
+        return int(row["n"])
+
+    def finish_tare_snapshot(self, seq: int | None) -> int:
+        """Подменить реплику накопленным снимком одной транзакцией и запомнить
+        его номер. Возвращает размер новой реплики."""
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM tare_registry_replica")
+            self._conn.execute(
+                "INSERT INTO tare_registry_replica"
+                " (vehicle_number, trailer_number, tare_value, tared_at, weighing_uuid)"
+                " SELECT vehicle_number, trailer_number, tare_value, tared_at, weighing_uuid"
+                " FROM tare_registry_staging"
+            )
+            self._conn.execute("DELETE FROM tare_registry_staging")
+            self._set_tare_registry_seq(seq)
+            row = self._conn.execute("SELECT count(*) AS n FROM tare_registry_replica").fetchone()
+        return int(row["n"])
+
+    def apply_tare_changes(self, changes: Iterable[TareChange]) -> int | None:
+        """Применить дельты по порядку: новое состояние сцепки — вставить/заменить
+        строку или удалить (record=None). Возвращает номер последнего
+        применённого изменения (None — список пуст)."""
+        last: int | None = None
+        with self._lock, self._conn:
+            for change in changes:
+                key = (change.vehicle_number, change.trailer_number or "")
+                if change.record is None:
+                    self._conn.execute(
+                        "DELETE FROM tare_registry_replica"
+                        " WHERE vehicle_number = ? AND trailer_number = ?",
+                        key,
+                    )
+                else:
+                    (row,) = self._tare_rows([change.record])
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO tare_registry_replica"
+                        " (vehicle_number, trailer_number, tare_value, tared_at, weighing_uuid)"
+                        " VALUES (?, ?, ?, ?, ?)",
+                        row,
+                    )
+                last = change.seq
+            if last is not None:
+                self._set_tare_registry_seq(last)
+        return last
 
     def latest_tare(
         self, vehicle_number: str, trailer_number: str | None = None

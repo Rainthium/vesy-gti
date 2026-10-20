@@ -8,7 +8,7 @@ import hashlib
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4, uuid5
 
@@ -28,6 +28,7 @@ from center.db.models import (
     Scale,
     Site,
     TareRegistry,
+    TareRegistryChange,
     User,
     UserRole,
     Weighing,
@@ -46,6 +47,7 @@ from shared.messages import (
     OperatorRecord,
     PhotoMeta,
     ScaleSettingsPayload,
+    TareChange,
     TareRecord,
     VerificationInfo,
     WeighingRecord,
@@ -602,6 +604,7 @@ def _upsert_tare(session: Session, row: Weighing) -> None:
         )
     )
     session.execute(statement)
+    _record_tare_change(session, row.vehicle_number, row.trailer_number)
 
 
 # --- перенос тарирований из АИС «СВХ» (решение Игоря 12.09.2026) ---
@@ -872,6 +875,105 @@ def rebuild_tare_registry_entry(
             )
         )
     session.flush()
+    _record_tare_change(session, vehicle_number, trailer_number)
+
+
+# --- журнал изменений реестра тар (инкрементальная репликация, 20.10.2026) ---
+
+# один ключ advisory-lock на весь реестр: номера изменений выдаются в порядке
+# фиксации транзакций, иначе агент мог бы получить №11 раньше №10 и,
+# догнав до 11, навсегда пропустить 10
+_TARE_CHANGES_LOCK_KEY = 20261020
+# срок хранения журнала: отставший сильнее агент получает полный снимок
+TARE_CHANGES_RETENTION = timedelta(days=180)
+# длиннее этого списка дельту не шлём — полный снимок дешевле
+TARE_CHANGES_MAX_DELTA = 2000
+
+
+def _record_tare_change(session: Session, vehicle_number: str, trailer_number: str | None) -> None:
+    """Записать в журнал текущее состояние СЦЕПКИ после изменения реестра.
+
+    Зовётся из обоих мест, меняющих ``tare_registry`` (_upsert_tare и
+    rebuild_tare_registry_entry) — включая перенос из АИС. Состояние читается
+    из реестра ПОСЛЕ изменения: если более раннее тарирование не затёрло
+    более позднее, в журнал всё равно ложится актуальная строка (безвредно).
+    """
+    key = trailer_number or ""
+    session.execute(select(func.pg_advisory_xact_lock(_TARE_CHANGES_LOCK_KEY)))
+    current = session.execute(
+        select(TareRegistry).where(
+            TareRegistry.vehicle_number == vehicle_number, TareRegistry.trailer_number == key
+        )
+    ).scalar_one_or_none()
+    session.add(
+        TareRegistryChange(
+            vehicle_number=vehicle_number,
+            trailer_number=key,
+            weighing_id=current.weighing_id if current is not None else None,
+            tare_value=current.tare_value if current is not None else None,
+            tared_at=current.tared_at if current is not None else None,
+        )
+    )
+    session.execute(
+        delete(TareRegistryChange).where(
+            TareRegistryChange.changed_at < datetime.now(UTC) - TARE_CHANGES_RETENTION
+        )
+    )
+    session.flush()
+
+
+def tare_registry_seq(session: Session) -> int:
+    """Номер последнего изменения реестра (0 — журнал пуст)."""
+    value = session.execute(select(func.max(TareRegistryChange.seq))).scalar_one()
+    return int(value or 0)
+
+
+def tare_changes_since(session: Session, since_seq: int) -> list[TareChange] | None:
+    """Изменения реестра после ``since_seq`` по порядку; None — дельтой не
+    догнать (журнал подчищен, номер агента впереди центра — БД восстановлена
+    из бэкапа, — или изменений слишком много): нужен полный снимок."""
+    current = tare_registry_seq(session)
+    if since_seq > current:
+        return None
+    if since_seq == current:
+        return []
+    oldest = session.execute(select(func.min(TareRegistryChange.seq))).scalar_one()
+    if oldest is not None and since_seq < int(oldest) - 1:
+        return None
+    rows = session.execute(
+        select(TareRegistryChange, Weighing.uuid)
+        .join(Weighing, Weighing.id == TareRegistryChange.weighing_id, isouter=True)
+        .where(TareRegistryChange.seq > since_seq)
+        .order_by(TareRegistryChange.seq)
+        .limit(TARE_CHANGES_MAX_DELTA + 1)
+    ).all()
+    if len(rows) > TARE_CHANGES_MAX_DELTA:
+        return None
+    changes: list[TareChange] = []
+    for change, weighing_uuid in rows:
+        record = None
+        if (
+            change.weighing_id is not None
+            and change.tare_value is not None
+            and change.tared_at is not None
+            and weighing_uuid is not None
+        ):
+            record = TareRecord(
+                vehicle_number=change.vehicle_number,
+                trailer_number=change.trailer_number or None,
+                tare_value=change.tare_value,
+                tared_at=change.tared_at,
+                weighing_uuid=weighing_uuid,
+            )
+        changes.append(
+            TareChange(
+                seq=change.seq,
+                vehicle_number=change.vehicle_number,
+                trailer_number=change.trailer_number or None,
+                record=record,
+            )
+        )
+    return changes
 
 
 def load_tare_registry(session: Session) -> list[TareRecord]:
@@ -1111,5 +1213,7 @@ __all__ = [
     "set_agent_status",
     "storno_by",
     "storno_weighing",
+    "tare_changes_since",
+    "tare_registry_seq",
     "tarings_since",
 ]

@@ -23,6 +23,7 @@ ves_test_panel_<pid> + миграции alembic + TRUNCATE между теста
 """
 
 import importlib
+import json
 import os
 import re
 import subprocess
@@ -2957,15 +2958,25 @@ class TestStornoRoutes:
 
         link = Link()
         panel_env.hub.attach(panel_env.scale_id, link)
+        panel_env.hub.update_version(panel_env.scale_id, "0.4.36")  # старый агент — снимок
+        new_link = Link()
+        panel_env.hub.attach(999, new_link)
+        panel_env.hub.update_version(999, "0.4.37")  # новый агент — дельта
+        panel_env.hub.last_tare_seq = 1  # посев тарирования = изменение №1
         response = panel_env.client.post(
             f"/panel/journal/{panel_env.taring_id}/storno",
             data={"reason": self._reason()},
             follow_redirects=False,
         )
-        assert "разослан агентам (1)" in unquote(response.headers["location"])
+        assert "разослан агентам (2)" in unquote(response.headers["location"])
         registry_updates = [m for m in link.messages if '"tare_registry"' in m]
         assert len(registry_updates) == 1
         assert "01KG555TTT" not in registry_updates[0]
+        deltas = [json.loads(m) for m in new_link.messages]
+        assert [d["type"] for d in deltas] == ["tare_registry_delta"]
+        assert deltas[0]["since_seq"] == 1
+        assert [c["seq"] for c in deltas[0]["changes"]] == [2]
+        assert "record" not in deltas[0]["changes"][0]  # тары у сцепки больше нет
 
 
 class TestStornoRegistryRebuild:

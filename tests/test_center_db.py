@@ -78,12 +78,13 @@ ALL_TABLES = (
     "cameras",
     "weighings",
     "tare_registry",
+    "tare_registry_changes",
     "weighing_photos",
     "weighing_ais_refs",
     "weighing_events",
 )
 
-HEAD_REVISION = "c5d6e7f8a9b0"  # одно сторно на запись — уникальный индекс storno_of (04.09.2026)
+HEAD_REVISION = "d6e7f8a9b0c1"  # одно сторно на запись — уникальный индекс storno_of (04.09.2026)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64

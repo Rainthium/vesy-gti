@@ -56,6 +56,11 @@ UPDATE_STAGES_MIN_VERSION = (0, 4, 19)
 AGENT_WS_LEGACY_MAX_MESSAGE_BYTES = 1 << 20
 AGENT_WS_MAX_MESSAGE_BYTES = 16 << 20
 LARGE_REGISTRY_MIN_VERSION = (0, 4, 36)
+# Инкрементальная репликация реестра тар (решение 20.10.2026): агент этой
+# версии присылает в hello/heartbeat номер применённого изменения
+# (tare_registry_seq), центр досылает только изменения (tare_registry_delta),
+# полный снимок — частями и лишь когда журнал изменений не покрывает отставание.
+REGISTRY_DELTAS_MIN_VERSION = (0, 4, 37)
 
 
 def _version_tuple(version: str | None) -> tuple[int, ...] | None:
@@ -90,6 +95,14 @@ def supports_large_registry(version: str | None) -> bool:
     (``max_size`` в ws_client с 0.4.36). Старым — снимок реестра под предел."""
     parts = _version_tuple(version)
     return parts is not None and parts >= LARGE_REGISTRY_MIN_VERSION
+
+
+def supports_registry_deltas(version: str | None) -> bool:
+    """Понимает ли агент этой версии дельты реестра тар и снимок частями
+    (``tare_registry_seq`` в hello/heartbeat, ``tare_registry_delta``, запрос
+    ``tare_registry_sync``). Старым — полный снимок одним сообщением."""
+    parts = _version_tuple(version)
+    return parts is not None and parts >= REGISTRY_DELTAS_MIN_VERSION
 
 
 def supports_photo_cleanup(version: str | None) -> bool:
@@ -197,6 +210,9 @@ class Hello(BaseModel):
     protocol_version: int = PROTOCOL_VERSION
     driver: str  # имя драйвера индикатора (например, "cas22")
     equipment: EquipmentStatus
+    # номер последнего применённого изменения реестра тар в реплике агента
+    # (с 0.4.37); None — реплика пуста/неизвестна или агент старый
+    tare_registry_seq: int | None = None
 
 
 class Heartbeat(BaseModel):
@@ -206,6 +222,7 @@ class Heartbeat(BaseModel):
     agent_id: str
     sent_at: datetime
     equipment: EquipmentStatus
+    tare_registry_seq: int | None = None  # как в hello (с 0.4.37)
 
 
 class WeighResult(BaseModel):
@@ -326,10 +343,48 @@ class OfflineSyncAck(BaseModel):
 
 
 class TareRegistryUpdate(BaseModel):
-    """Полный снимок реестра тарирований (реплицируется целиком, architecture §3.3а)."""
+    """Снимок реестра тарирований (architecture §3.3а).
+
+    Старым агентам — целиком одним сообщением (поля по умолчанию). Агентам
+    ≥0.4.37 снимок идёт частями: первая часть ``reset=True`` (начать новую
+    реплику), последняя ``final=True`` несёт ``seq`` — номер изменения, которому
+    отвечает снимок; дальше агент живёт на дельтах.
+    """
 
     type: Literal["tare_registry"] = "tare_registry"
     records: list[TareRecord]
+    seq: int | None = None
+    reset: bool = True
+    final: bool = True
+
+
+class TareChange(BaseModel):
+    """Одно изменение реестра: новое состояние СЦЕПКИ. ``record=None`` —
+    действующей тары у сцепки больше нет (сторно единственного тарирования)."""
+
+    seq: int
+    vehicle_number: str
+    trailer_number: str | None = None
+    record: TareRecord | None = None
+
+
+class TareRegistryDelta(BaseModel):
+    """Изменения реестра после ``since_seq`` по порядку номеров (центр → агент,
+    с 0.4.37). Агент применяет, только если ``since_seq`` не больше его номера;
+    иначе он что-то пропустил и просит досылку (``tare_registry_sync``)."""
+
+    type: Literal["tare_registry_delta"] = "tare_registry_delta"
+    since_seq: int
+    changes: list[TareChange]
+
+
+class TareRegistrySyncRequest(BaseModel):
+    """Агент просит изменения реестра после своего номера (разрыв в номерах
+    дельт или дельта пришла во время приёма снимка). ``since_seq=None`` —
+    реплики нет, нужен полный снимок."""
+
+    type: Literal["tare_registry_sync"] = "tare_registry_sync"
+    since_seq: int | None = None
 
 
 class OperatorRecord(BaseModel):
@@ -526,13 +581,15 @@ AgentMessage = Annotated[
     | ConfigStatus
     | LogTailResponse
     | PhotoCleanupResponse
-    | OperatorsReport,
+    | OperatorsReport
+    | TareRegistrySyncRequest,
     Field(discriminator="type"),
 ]
 CenterMessage = Annotated[
     WeighRequest
     | OfflineSyncAck
     | TareRegistryUpdate
+    | TareRegistryDelta
     | OperatorsRegistryUpdate
     | ScaleConfigUpdate
     | HeartbeatAck

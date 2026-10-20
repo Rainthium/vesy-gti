@@ -29,6 +29,7 @@ from shared.messages import (
     UpdateCommand,
     WeighRequest,
     WeighResult,
+    supports_registry_deltas,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,9 @@ class AgentHub:
         # версия агента из hello: снимок реестра тар режется под предел
         # сообщения старых агентов (center/tare_snapshot.py, инцидент 20.10.2026)
         self._versions: dict[int, str | None] = {}
+        # номер изменения реестра тар, до которого дельты уже разосланы
+        # (инкрементальная репликация, 20.10.2026); None — ещё не известен
+        self.last_tare_seq: int | None = None
         # request_id → (номер документа АИС, момент регистрации): команда v2
         # несёт ais_ref, который WS-сервер пишет в одной транзакции с записью
         # (идемпотентность контракта v2). Живёт до прихода результата либо
@@ -129,6 +133,38 @@ class AgentHub:
 
     def agent_version(self, scale_id: int) -> str | None:
         return self._versions.get(scale_id)
+
+    def legacy_tare_scale_ids(self) -> list[int]:
+        """Весы, чьи агенты получают реестр тар полным снимком одним сообщением
+        (версия неизвестна или < 0.4.37)."""
+        return [
+            scale_id
+            for scale_id in self._links
+            # версия None — hello ещё не пришёл: такому агенту реестр отдаст
+            # сам hello (иначе агент 0.4.37 получил бы урезанный снимок без номера)
+            if self._versions.get(scale_id) is not None
+            and not supports_registry_deltas(self._versions.get(scale_id))
+        ]
+
+    def delta_tare_scale_ids(self) -> list[int]:
+        """Весы, чьи агенты понимают дельты реестра тар (≥0.4.37)."""
+        return [
+            scale_id
+            for scale_id in self._links
+            if supports_registry_deltas(self._versions.get(scale_id))
+        ]
+
+    async def send_text(self, scale_id: int, payload: str) -> bool:
+        """Отправить текст агенту весов; False — не подключён или ошибка отправки."""
+        link = self._links.get(scale_id)
+        if link is None:
+            return False
+        try:
+            await link.send_text(payload)
+        except Exception:
+            logger.warning("весы %d: не удалось отправить сообщение агенту", scale_id)
+            return False
+        return True
 
     # --- номера документов АИС у команд v2 ---
 
@@ -352,14 +388,17 @@ class AgentHub:
             return False
 
     async def broadcast_tare_registry(self, update: TareRegistryUpdate) -> int:
-        """Разослать снимок реестра всем подключённым агентам; вернуть число.
-
-        Каждому — под предел сообщения ЕГО версии (старым агентам урезанный
-        снимок, см. center/tare_snapshot.py).
-        """
+        """Разослать снимок реестра агентам БЕЗ поддержки дельт (< 0.4.37);
+        вернуть число. Каждому — под предел сообщения его версии
+        (center/tare_snapshot.py). Агентам с дельтами — center/tare_publish.py."""
         snapshot = TareSnapshot(update.records)
         sent = 0
         for scale_id, link in list(self._links.items()):
+            version = self._versions.get(scale_id)
+            if version is None or supports_registry_deltas(version):
+                # до hello версия неизвестна (реестр отдаст hello);
+                # агентам с дельтами — center/tare_publish.py
+                continue
             try:
                 await link.send_text(snapshot.payload_for(self._versions.get(scale_id)))
                 sent += 1

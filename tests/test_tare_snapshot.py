@@ -117,13 +117,13 @@ class TestHubBroadcastPerVersion:
         hub.update_version(1, "0.4.35")
         hub.attach(2, new_link)
         hub.update_version(2, "0.4.36")
-        hub.attach(3, unknown_link)  # hello ещё не было — считаем старым
+        hub.attach(3, unknown_link)  # hello ещё не было — рассылка мимо, реестр отдаст hello
         update = TareRegistryUpdate(records=_records(7000))
         sent = asyncio.run(hub.broadcast_tare_registry(update))
-        assert sent == 3
+        assert sent == 2
         assert len(_parse(new_link.sent[0])) == 7000
         assert len(_parse(old_link.sent[0])) < 7000
-        assert len(_parse(unknown_link.sent[0])) < 7000
+        assert unknown_link.sent == []
         assert len(old_link.sent[0].encode()) <= AGENT_WS_LEGACY_MAX_MESSAGE_BYTES * SAFETY_RATIO
 
     def test_detach_forgets_version(self) -> None:

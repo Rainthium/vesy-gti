@@ -28,6 +28,7 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     String,
@@ -374,6 +375,31 @@ class TareRegistry(Base):
     weighing_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("weighings.id"))
     tare_value: Mapped[float] = mapped_column(Float)
     tared_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TareRegistryChange(Base):
+    """Журнал изменений реестра тар для инкрементальной репликации агентам
+    (решение 20.10.2026). Каждая запись — новое состояние СЦЕПКИ после
+    изменения: ``weighing_id`` NULL означает «действующей тары нет».
+
+    Номера строго по порядку фиксации (advisory-lock в repo): агент хранит
+    последний применённый номер и получает только изменения после него.
+    Строки старше срока хранения подчищаются; отставший сильнее агент
+    получает полный снимок."""
+
+    __tablename__ = "tare_registry_changes"
+
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    vehicle_number: Mapped[str] = mapped_column(String(32))
+    trailer_number: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    weighing_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("weighings.id"), nullable=True
+    )
+    tare_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
 
 
 class AuditLog(Base):

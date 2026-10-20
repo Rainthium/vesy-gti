@@ -397,12 +397,17 @@ class TestAgentHubBroadcast:
             links = [FakeLink(), FakeLink(), FakeLink()]
             for scale_id, link in enumerate(links, start=1):
                 hub.attach(scale_id, link)
+                hub.update_version(scale_id, "0.4.36")  # версия известна по hello
+            # до hello версия неизвестна — реестр отдаст сам hello, рассылка мимо
+            silent = FakeLink()
+            hub.attach(4, silent)
             update = TareRegistryUpdate(records=[])
             sent = await hub.broadcast_tare_registry(update)
             assert sent == 3
             for link in links:
                 assert len(link.sent) == 1
                 assert json.loads(link.sent[0])["type"] == "tare_registry"
+            assert silent.sent == []
 
         asyncio.run(scenario())
 
@@ -412,9 +417,9 @@ class TestAgentHubBroadcast:
         async def scenario() -> None:
             hub = AgentHub()
             alive1, dead, alive2 = FakeLink(), DeadLink(), FakeLink()
-            hub.attach(1, alive1)
-            hub.attach(2, dead)
-            hub.attach(3, alive2)
+            for scale_id, link in ((1, alive1), (2, dead), (3, alive2)):
+                hub.attach(scale_id, link)
+                hub.update_version(scale_id, "0.4.36")
             sent = await hub.broadcast_tare_registry(TareRegistryUpdate(records=[]))
             assert sent == 2  # умерший в счётчик не попал
             assert len(alive1.sent) == 1
@@ -1045,9 +1050,15 @@ class TestAgentsWsWeighResult:
         assert _count_by_uuid(ws_env, record.uuid) == 1
 
     def test_taring_result_broadcasts_registry(self, ws_env: WsEnv) -> None:
-        """Успешное тарирование по команде → реестр обновлён и разослан агентам."""
+        """Успешное тарирование по команде → реестр обновлён и разослан агентам
+        (старому агенту — полным снимком; до hello версия неизвестна и рассылка
+        не идёт — реестр отдаст сам hello, 20.10.2026)."""
         taring = _make_taring(vehicle_number="01KG777CC")
         with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            ws.send_text(_hello_json("0.4.36"))
+            assert json.loads(ws.receive_text())["type"] == "heartbeat_ack"
+            assert json.loads(ws.receive_text())["type"] == "tare_registry"  # пустой при hello
+            assert json.loads(ws.receive_text())["type"] == "operators_registry"
             ws.send_text(WeighResult(request_id=uuid4(), record=taring).model_dump_json())
             broadcast = json.loads(ws.receive_text())
             assert broadcast["type"] == "tare_registry"
@@ -1158,6 +1169,10 @@ class TestAgentsWsOfflineSync:
         sync = OfflineSync(agent_id="agent-1", records=[new_weighing, new_taring, repeated])
 
         with ws_env.client.websocket_connect("/agents/ws", headers=AUTH_HEADERS) as ws:
+            # старый агент: hello нужен, иначе версия неизвестна и рассылка мимо
+            ws.send_text(_hello_json("0.4.36"))
+            for expected in ("heartbeat_ack", "tare_registry", "operators_registry"):
+                assert json.loads(ws.receive_text())["type"] == expected
             ws.send_text(sync.model_dump_json())
             ack = json.loads(ws.receive_text())
             assert ack["type"] == "offline_sync_ack"

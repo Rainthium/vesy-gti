@@ -31,6 +31,7 @@ from center.agents_ws.hub import AgentHub, AgentLink
 from center.api_v2.schemas import AIS_REF_RE
 from center.db import repo
 from center.db.models import AgentStatus
+from center.tare_publish import publish_tare_registry, sync_agent
 from center.tare_snapshot import TareSnapshot
 from shared.messages import (
     ConfigStatus,
@@ -44,10 +45,11 @@ from shared.messages import (
     OperatorsReport,
     PhotoCleanupResponse,
     ScaleConfigUpdate,
-    TareRegistryUpdate,
+    TareRegistrySyncRequest,
     UpdateStatus,
     WeighResult,
     parse_agent_message,
+    supports_registry_deltas,
     supports_secure_sync,
 )
 
@@ -98,8 +100,8 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
         await link.send_text(TareSnapshot(records).payload_for(agent_version))
 
     async def broadcast_tare_registry() -> None:
-        records = await asyncio.to_thread(_db, repo.load_tare_registry)
-        await hub.broadcast_tare_registry(TareRegistryUpdate(records=records))
+        # старым агентам — снимок, новым (≥0.4.37) — дельты (center/tare_publish.py)
+        await publish_tare_registry(hub, _db)
 
     async def send_operators(link: AgentLink, scale_id: int) -> None:
         records = await asyncio.to_thread(_db, lambda s: repo.load_operators_for_scale(s, scale_id))
@@ -178,7 +180,12 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                         await link.send_text(
                             HeartbeatAck(server_time=datetime.now(UTC)).model_dump_json()
                         )
-                    await send_tare_registry(link, agent_version)
+                    if supports_registry_deltas(agent_version):
+                        # инкрементальная репликация: агент назвал номер своей
+                        # реплики — досылаем только недостающее
+                        await sync_agent(hub, link, scale_id, message.tare_registry_seq, _db)
+                    else:
+                        await send_tare_registry(link, agent_version)
                     if supports_secure_sync(message.version):
                         await send_operators(link, scale_id)
                         await send_scale_config(link, scale_id)
@@ -195,6 +202,15 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                     await asyncio.to_thread(
                         _db, lambda s: repo.set_agent_status(s, agent_id, AgentStatus.ONLINE)
                     )
+                    if (
+                        supports_registry_deltas(agent_version)
+                        and message.tare_registry_seq is not None
+                        and hub.last_tare_seq is not None
+                        and message.tare_registry_seq != hub.last_tare_seq
+                    ):
+                        # реплика агента отстала от разосланного (пропущенная
+                        # дельта, перезапуск) — догоняем без переподключения
+                        await sync_agent(hub, link, scale_id, message.tare_registry_seq, _db)
                     if supports_secure_sync(agent_version):
                         # старый агент логировал бы незнакомый ack каждые 5 с
                         await link.send_text(
@@ -225,6 +241,11 @@ def create_agents_router(hub: AgentHub, session_factory: SessionFactory) -> APIR
                         _db,
                         lambda s, m=message: repo.record_config_status(s, agent_id, scale_id, m),
                     )
+
+                elif isinstance(message, TareRegistrySyncRequest):
+                    # агент заметил разрыв в номерах дельт (или дельту во время
+                    # приёма снимка) и просит изменения после своего номера
+                    await sync_agent(hub, link, scale_id, message.since_seq, _db)
 
                 elif isinstance(message, LogTailResponse):
                     if not hub.resolve_log_tail(message, scale_id=scale_id):

@@ -57,6 +57,8 @@ from shared.messages import (
     PhotoCleanupRequest,
     PhotoCleanupResponse,
     ScaleConfigUpdate,
+    TareRegistryDelta,
+    TareRegistrySyncRequest,
     TareRegistryUpdate,
     UpdateCommand,
     UpdateStatus,
@@ -133,6 +135,11 @@ class CenterClient:
         # порция досылки уже отправлена и ждёт ack — повторно не шлём
         self._sync_in_flight = False
         self._session_connected = False  # для сброса backoff в run()
+        # приём снимка реестра тар частями (0.4.37): идёт ли сейчас и какой
+        # максимальный номер дельты пришёл за это время — после последней части
+        # такую дельту нельзя применить, просим досылку с номера снимка
+        self._tare_snapshot_in_progress = False
+        self._tare_delta_seen: int | None = None
         self._operators_reported_at = 0.0  # monotonic последнего operators_report
         # незапрошенные сообщения центру (доклад сторожка автообновления и т.п.):
         # кладутся в любой момент, уходят с ближайшим heartbeat живого соединения
@@ -193,6 +200,10 @@ class CenterClient:
             finally:
                 self._connected.clear()
                 self._sync_in_flight = False  # неподтверждённая порция уйдёт заново
+                # недопринятый снимок частями обнуляется: новое соединение начнёт
+                # с hello и своего номера, отложенные дельты ему не нужны
+                self._tare_snapshot_in_progress = False
+                self._tare_delta_seen = None
                 # обработчики команд не должны переживать соединение:
                 # их результат отправить уже некуда
                 for task in self._request_tasks:
@@ -204,6 +215,7 @@ class CenterClient:
             version=self._config.version,
             driver=self._config.driver,
             equipment=self._equipment_status(),
+            tare_registry_seq=self._storage.tare_registry_seq(),
         )
 
     async def _heartbeat_loop(self, connection: websockets.ClientConnection) -> None:
@@ -213,6 +225,7 @@ class CenterClient:
                 agent_id=self._config.agent_id,
                 sent_at=datetime.now(UTC),
                 equipment=self._equipment_status(),
+                tare_registry_seq=self._storage.tare_registry_seq(),
             )
             await connection.send(heartbeat.model_dump_json())
             await self._flush_outbox(connection)
@@ -253,8 +266,9 @@ class CenterClient:
                 # порция подтверждена — если очередь не пуста, шлём следующую
                 await self._send_pending(connection)
             elif isinstance(message, TareRegistryUpdate):
-                count = self._storage.replace_tare_registry(message.records)
-                logger.info("реплика реестра тарирований обновлена: %d записей", count)
+                await self._apply_tare_snapshot(connection, message)
+            elif isinstance(message, TareRegistryDelta):
+                await self._apply_tare_delta(connection, message)
             elif isinstance(message, OperatorsRegistryUpdate):
                 count = self._storage.replace_center_operators(message.records)
                 logger.info("реплика операторов обновлена: %d учёток", count)
@@ -278,6 +292,66 @@ class CenterClient:
                 await self._send_log_tail(connection, message)
             elif isinstance(message, PhotoCleanupRequest):
                 self._spawn_cleanup_handler(connection, message)
+
+    async def _apply_tare_snapshot(
+        self, connection: websockets.ClientConnection, message: TareRegistryUpdate
+    ) -> None:
+        """Снимок реестра: одним сообщением (старый центр) или частями.
+        Части копятся в буфере, реплика подменяется по последней — ручной
+        режим не видит полупустой реестр."""
+        if message.reset or not self._tare_snapshot_in_progress:
+            self._storage.begin_tare_snapshot()
+            self._tare_snapshot_in_progress = True
+            self._tare_delta_seen = None
+        self._storage.append_tare_snapshot(message.records)
+        if not message.final:
+            return
+        count = self._storage.finish_tare_snapshot(message.seq)
+        self._tare_snapshot_in_progress = False
+        logger.info(
+            "реплика реестра тарирований обновлена: %d записей (снимок №%s)", count, message.seq
+        )
+        seen = self._tare_delta_seen
+        self._tare_delta_seen = None
+        if seen is not None and message.seq is not None and seen > message.seq:
+            # пока принимали снимок, реестр успел измениться — догоняем
+            await self._request_tare_sync(connection, message.seq)
+
+    async def _apply_tare_delta(
+        self, connection: websockets.ClientConnection, message: TareRegistryDelta
+    ) -> None:
+        """Дельта реестра: применить, если она продолжает нашу реплику; при
+        разрыве в номерах — попросить досылку с нашего номера."""
+        if not message.changes:
+            return
+        last_seq = message.changes[-1].seq
+        if self._tare_snapshot_in_progress:
+            self._tare_delta_seen = max(self._tare_delta_seen or 0, last_seq)
+            return
+        own = self._storage.tare_registry_seq()
+        if own is None or message.since_seq > own:
+            logger.warning(
+                "дельта реестра тар №%d..%d не продолжает реплику (у нас №%s) — прошу досылку",
+                message.changes[0].seq,
+                last_seq,
+                own,
+            )
+            await self._request_tare_sync(connection, own)
+            return
+        fresh = [change for change in message.changes if change.seq > own]
+        applied = self._storage.apply_tare_changes(fresh)
+        if applied is not None:
+            logger.info(
+                "реплика реестра тарирований: применено %d изменений (№%d → №%d)",
+                len(fresh),
+                own,
+                applied,
+            )
+
+    async def _request_tare_sync(
+        self, connection: websockets.ClientConnection, since_seq: int | None
+    ) -> None:
+        await connection.send(TareRegistrySyncRequest(since_seq=since_seq).model_dump_json())
 
     async def _send_log_tail(
         self, connection: websockets.ClientConnection, request: LogTailRequest
