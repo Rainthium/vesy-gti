@@ -70,6 +70,12 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
+    # ротация логов контейнера (21.10.2026): без неё json-лог растёт без предела
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     environment:
       CENTER_ENV: production  # отказ старта с dev-дефолтами (center/app.py)
       DATABASE_URL: postgresql+psycopg://ves:${POSTGRES_PASSWORD}@postgres:5432/ves
@@ -123,6 +129,12 @@ services:
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
+    # access-лог nginx — в stdout контейнера; ротация, как у app
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     ports:
       - "80:80"
       # - "443:443"  # включить после установки сертификата — deploy/README.md
