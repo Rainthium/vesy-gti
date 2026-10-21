@@ -18,6 +18,7 @@ import contextlib
 import csv
 import io
 import logging
+import math
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
@@ -56,6 +57,7 @@ from center.releases import (
 )
 from center.tare_publish import publish_tare_registry
 from center.web import queries, refs_admin, report_export, report_view, users_admin
+from center.web.login_throttle import LoginThrottle
 from shared import card as weight_card
 from shared.enums import CameraRole, ErrorCode, Operation, WeighingSource
 from shared.messages import (
@@ -176,13 +178,17 @@ def create_panel_router(
     photos_dir: Path,
     releases_dir: Path | None = None,
     monitor: MonitoringService | None = None,
+    login_throttle: LoginThrottle | None = None,
 ) -> APIRouter:
     """Маршруты панели; сессии — общий SessionMiddleware приложения центра.
 
     ``monitor`` — сервис мониторинга (активные алерты и счётчики дашборда);
     None допустим в тестах отдельных экранов — блок алертов тогда пуст.
+    ``login_throttle`` — пауза по учётке при неудачных входах; по умолчанию
+    правило 10 неудач за 10 минут → минута (тесты подставляют свои часы).
     """
     router = APIRouter(prefix="/panel")
+    throttle = login_throttle or LoginThrottle()
 
     # второй каталог — общая с агентом печатная форма весовой карточки
     templates = Jinja2Templates(directory=[str(TEMPLATES_DIR), str(weight_card.TEMPLATES_DIR)])
@@ -306,17 +312,43 @@ def create_panel_router(
         password: Annotated[str, Form()],
         next: Annotated[str, Form()] = "",
     ) -> Response:
-        user = await asyncio.to_thread(
-            _db, lambda s: queries.verify_user(s, login.strip(), password)
-        )
+        key = throttle.key(login)
+        wait = throttle.retry_after(key)
+        if wait > 0:
+            # пауза по учётке (decisions 21.10.2026): пароль не проверяем
+            # вовсе — PBKDF2 дорог, а перебор именно его и гоняет; 429 с
+            # Retry-After, чтобы срабатывания были видны в логе nginx
+            logger.warning("панель: вход %s отклонён — пауза ещё %.0f с", key, wait)
+            return templates.TemplateResponse(
+                request,
+                "login.html",
+                {
+                    "request": request,
+                    "error": "Слишком много попыток, подождите минуту",
+                    "next": _safe_next_path(next) or "",
+                },
+                status_code=429,
+                headers={"Retry-After": str(math.ceil(wait))},
+            )
+        user = await asyncio.to_thread(_db, lambda s: queries.verify_user(s, key, password))
         if user is None:
-            logger.warning("панель: неудачный вход %s", login.strip())
+            logger.warning("панель: неудачный вход %s", key)
+            pause = throttle.record_failure(key)
+            if pause:
+                logger.warning(
+                    "панель: %d неудач входа %s за %d мин — пауза %d с",
+                    throttle.rule.max_failures,
+                    key,
+                    throttle.rule.window_s // 60,
+                    pause,
+                )
             return render(
                 "login.html",
                 request,
                 error="Неверный логин или пароль",
                 next=_safe_next_path(next) or "",
             )
+        throttle.reset(key)
         request.session["panel_user"] = user.full_name or user.login
         request.session["panel_login"] = user.login
         request.session["panel_role"] = user.role.value

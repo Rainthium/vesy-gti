@@ -24,6 +24,7 @@ ves_test_panel_<pid> + миграции alembic + TRUNCATE между теста
 
 import importlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -69,6 +70,7 @@ from center.db.models import (
 from center.db.session import database_url, make_session_factory
 from center.monitoring import MonitoringService, MonitoringThresholds
 from center.web import queries
+from center.web.login_throttle import LoginThrottle
 from center.web.router import create_panel_router
 from shared.enums import CameraRole, ErrorCode, Operation, ScaleStatus, WeighingSource
 from shared.messages import (
@@ -904,7 +906,8 @@ class PanelEnv:
     taring_id: int
     hub: AgentHub
     monitor: MonitoringService
-    clock: FakeClock  # часы монитора (прокрутка порогов в тестах)
+    clock: FakeClock  # часы монитора и паузы входа (прокрутка в тестах)
+    throttle: LoginThrottle
 
 
 @pytest.fixture
@@ -949,9 +952,17 @@ def panel_env(db: sessionmaker[Session], tmp_path: Path) -> Iterator[PanelEnv]:
     hub = AgentHub()
     clock = FakeClock()
     monitor = MonitoringService(db, hub, now=clock.now)
-    app.include_router(create_panel_router(db, hub, photos_dir=photos_dir, monitor=monitor))
+    # пауза входа на тех же управляемых часах (секунды от эпохи)
+    throttle = LoginThrottle(now=lambda: clock.now().timestamp())
+    app.include_router(
+        create_panel_router(
+            db, hub, photos_dir=photos_dir, monitor=monitor, login_throttle=throttle
+        )
+    )
     client = TestClient(app)
-    yield PanelEnv(client, db, photos_dir, scale_id, weighing_id, taring_id, hub, monitor, clock)
+    yield PanelEnv(
+        client, db, photos_dir, scale_id, weighing_id, taring_id, hub, monitor, clock, throttle
+    )
     client.close()
 
 
@@ -963,6 +974,13 @@ def _login(env: PanelEnv) -> None:
     )
     assert response.status_code == 303
     assert response.headers["location"] == "/panel/"
+
+
+def _post_login(env: PanelEnv, password: str, login: str = PANEL_LOGIN) -> Any:
+    """Отправить форму входа без следования редиректу."""
+    return env.client.post(
+        "/panel/login", data={"login": login, "password": password}, follow_redirects=False
+    )
 
 
 PROTECTED_PATHS = [
@@ -1069,6 +1087,63 @@ class TestPanelLogin:
         assert "Неверный логин или пароль" in response.text
         after = panel_env.client.get("/panel/", follow_redirects=False)
         assert after.status_code == 303, "после неудачного входа экран остался доступен"
+
+    def test_login_paused_after_ten_failures(
+        self, panel_env: PanelEnv, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """10 неудач за 10 минут → минуту логин не принимается даже с верным
+        паролем: 429 + Retry-After, та же форма с понятным сообщением,
+        сессии нет; по истечении минуты вход проходит и счётчик сброшен.
+        Срабатывание — в логе, в audit_log — ничего."""
+        with panel_env.factory() as session:
+            audit_before = session.execute(select(func.count(AuditLog.id))).scalar_one()
+        with caplog.at_level(logging.WARNING, logger="center.web.router"):
+            for _ in range(10):
+                response = _post_login(panel_env, "wrong")
+                assert response.status_code == 200
+                assert "Неверный логин или пароль" in response.text
+            blocked = _post_login(panel_env, PANEL_PASSWORD)
+        assert blocked.status_code == 429
+        assert blocked.headers["retry-after"] == "60"
+        assert "Слишком много попыток, подождите минуту" in blocked.text
+        assert 'name="login"' in blocked.text, "в паузе показывается та же форма входа"
+        assert "Неверный логин или пароль" not in blocked.text
+        after = panel_env.client.get("/panel/", follow_redirects=False)
+        assert after.status_code == 303, "в паузе верный пароль не открыл сессию"
+        assert any("пауза 60 с" in r.message for r in caplog.records), caplog.messages
+        assert any("отклонён — пауза" in r.message for r in caplog.records), caplog.messages
+        with panel_env.factory() as session:
+            audit_after = session.execute(select(func.count(AuditLog.id))).scalar_one()
+        assert audit_after == audit_before, "пауза входа в audit_log не пишется"
+
+        panel_env.clock.advance(59)
+        assert _post_login(panel_env, PANEL_PASSWORD).status_code == 429
+        panel_env.clock.advance(1)
+        _login(panel_env)
+        assert panel_env.throttle.failures(PANEL_LOGIN) == 0, "удачный вход сбросил счётчик"
+
+    def test_login_pause_counts_unknown_login_alike(self, panel_env: PanelEnv) -> None:
+        """Несуществующий логин получает ту же паузу (по форме не узнать,
+        есть ли учётка); другие логины от неё не зависят."""
+        for _ in range(10):
+            assert _post_login(panel_env, "x", login="no-such-user").status_code == 200
+        blocked = _post_login(panel_env, "x", login="no-such-user")
+        assert blocked.status_code == 429
+        assert "Слишком много попыток, подождите минуту" in blocked.text
+        # настоящий логин не задет — обычный отказ по паролю
+        response = _post_login(panel_env, "wrong")
+        assert response.status_code == 200
+        assert "Неверный логин или пароль" in response.text
+        _login(panel_env)
+
+    def test_login_failures_expire_with_window(self, panel_env: PanelEnv) -> None:
+        """Девять неудач, десять минут тишины — счётчик пуст, паузы нет."""
+        for _ in range(9):
+            assert _post_login(panel_env, "wrong").status_code == 200
+        panel_env.clock.advance(600)
+        for _ in range(9):
+            assert _post_login(panel_env, "wrong").status_code == 200
+        _login(panel_env)
 
     def test_successful_login_opens_screens(self, panel_env: PanelEnv) -> None:
         """Верный пароль → 303 на дашборд; экраны 200 и содержат данные посева."""
