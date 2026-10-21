@@ -129,7 +129,7 @@ ffmpeg не нужен, превью-канал есть (как К-К/Алам�
 - [x] Учётка весовщика создана Игорем в панели (26.08.2026).
 - [ ] Пробное взвешивание имитатором АИС v2 — ПОДГОТОВЛЕНО, не выполнено (машина уехала
       до команды): запускать имитатор ИЗНУТРИ контейнера app на ВМ — токен уже в env,
-      allowlist не мешает (`docker compose exec -T app sh -c 'uv run --no-sync python -m
+      127.0.0.1 входит в `AIS_ALLOWED_IPS` (с 21.10.2026) (`docker compose exec -T app sh -c 'uv run --no-sync python -m
       tools.ais_client_v2 --base http://127.0.0.1:8080 --token "$AIS_PHOTO_TOKEN" --timeout 120
       weigh --ais-ref WEI000990001 --ais-object 0018 --scale-no 1 --vehicle <НОМЕР>
       --operator "<ФИО>"'`); тракт проверен GET-запросом list (200). Команду слать, пока
