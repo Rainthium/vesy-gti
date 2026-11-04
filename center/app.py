@@ -176,7 +176,16 @@ def create_app() -> FastAPI:
             with contextlib.suppress(Exception):
                 await broker.close()
 
-    app = FastAPI(title="Весовая система — центр", docs_url=None, redoc_url=None, lifespan=lifespan)
+    # ни Swagger, ни схема наружу: /openapi.json отдавал карту всех маршрутов
+    # панели и API любому в интернете (аудит 04.11.2026) — данных не раскрывал,
+    # но разведку злоумышленнику экономил
+    app = FastAPI(
+        title="Весовая система — центр",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

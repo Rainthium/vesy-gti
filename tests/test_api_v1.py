@@ -1070,3 +1070,14 @@ class TestTareLimitAndPlausibilityV1:
         assert data["tare"] is None
         assert data["netto"] is None
         assert data["no_valid_tare"] is True
+
+
+class TestSchemaHidden:
+    def test_openapi_and_docs_not_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Схема API и документация наружу не отдаются (аудит 04.11.2026:
+        /openapi.json был открыт из интернета и перечислял все маршруты)."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://ves:ves@localhost:5443/ves")
+        app = create_app()
+        client = TestClient(app)
+        for path in ("/openapi.json", "/docs", "/redoc"):
+            assert client.get(path).status_code == 404, path

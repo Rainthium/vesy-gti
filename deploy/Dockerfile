@@ -17,6 +17,15 @@ COPY center ./center
 COPY tools ./tools
 RUN uv sync --frozen --no-dev
 
+# процесс не от root (аудит 04.11.2026): uid 1000 совпадает с vesy на ВМ —
+# bind-mount ./releases пишется без chown; тому photos владелец выставляется
+# один раз при выкате (deploy/README §3). /app остаётся у root (0755): процесс
+# свой код переписать не может; кэш uv и HOME — в /tmp, туда же `uv run
+# --no-sync` пишет единственное, что ему нужно (байткод скомпилирован при сборке)
+RUN groupadd --gid 1000 app && useradd --system --uid 1000 --gid app --no-create-home app
+ENV HOME=/tmp UV_CACHE_DIR=/tmp/uv-cache
+USER app
+
 EXPOSE 8080
 # --proxy-headers: реальный IP клиента из X-Forwarded-For (nginx);
 # доверять можно любому прокси — порт приложения наружу не публикуется,

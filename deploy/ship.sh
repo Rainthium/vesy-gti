@@ -25,6 +25,16 @@ rsync -az --delete \
 echo "==> Передача образа (сжатый поток по SSH)…"
 docker save "$IMAGE" | gzip | ssh "$HOST" 'gunzip | docker load'
 
+echo "==> Каталог релизов должен принадлежать uid 1000 (пишет панель под app)…"
+ssh "$HOST" 'owner=$(stat -c %u ~/vesy-gti/deploy/releases); \
+    if [ "$owner" != "1000" ]; then echo "  владелец ~/vesy-gti/deploy/releases — uid $owner, нужен 1000 (chown vesy:vesy)"; exit 1; else echo "  ok"; fi'
+
+echo "==> Владелец тома фото — пользователь app (uid 1000) контейнера…"
+# процесс центра не от root (04.11.2026): том photos создан root'ом при первом
+# запуске — один раз переписываем владельца; повторные выкаты пропускают шаг
+ssh "$HOST" 'owner=$(docker run --rm -v ves-center_photos:/d alpine stat -c %u /d); \
+    if [ "$owner" != "1000" ]; then docker run --rm -v ves-center_photos:/d alpine chown -R 1000:1000 /d; echo "  переписан"; else echo "  уже 1000"; fi'
+
 echo "==> Запуск на ВМ (без сборки)…"
 ssh "$HOST" 'cd ~/vesy-gti/deploy && docker compose up -d --no-build'
 

@@ -70,6 +70,11 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
+    # ПОРТ 8080 НАРУЖУ НЕ ПУБЛИКОВАТЬ: uvicorn доверяет X-Forwarded-For от
+    # любого прокси (--forwarded-allow-ips "*" в Dockerfile), а по нему
+    # работают AIS_ALLOWED_IPS и лимиты; до 8080 должен дотягиваться только
+    # nginx внутри сети compose. Процесс в контейнере — пользователь app
+    # (uid 1000 = vesy на ВМ: каталог ./releases и том photos ему принадлежат)
     # ротация логов контейнера (21.10.2026): без неё json-лог растёт без предела
     logging:
       driver: json-file
@@ -127,7 +132,7 @@ services:
       start_period: 15s
 
   nginx:
-    image: nginx:1.27-alpine
+    image: nginx:1.29-alpine  # 1.27 закрыта, образ был от 04.2025 (аудит 04.11.2026)
     restart: unless-stopped
     # access-лог nginx — в stdout контейнера; ротация, как у app
     logging:
