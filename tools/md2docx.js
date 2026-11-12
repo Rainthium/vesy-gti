@@ -12,6 +12,10 @@
 // Примечание: pandoc не распознаёт заголовки docx-js как заголовки (особенность pandoc 3.10,
 // в Word всё в порядке — проверено 10.09.2026), так что pandoc для проверки не годится.
 // История: 09.09.2026 — черновик 0.1 контракта с таможней (customs-events-v1-draft-0.1.docx).
+// 10.11.2026 — заголовок документа и колонтитул задаются 3-м и 4-м аргументами
+// (раньше были зашиты под черновик 0.1): node md2docx.js in.md out.docx "Заголовок" "Колонтитул".
+const DOC_TITLE = process.argv[4] || "Контракт передачи операций в таможенную систему, версия 1";
+const DOC_HEADER = process.argv[5] || "Единая весовая система ОАО «ГТИ» · контракт с таможенной системой, v1";
 // Конвертер подмножества Markdown контракта в .docx (docx-js)
 const fs = require("fs");
 const {
@@ -155,7 +159,7 @@ for (const b of blocks) {
 
 const doc = new Document({
   creator: "ОАО «ГТИ» — весовая система",
-  title: "Контракт передачи операций в таможенную систему, версия 1 (черновик 0.1)",
+  title: DOC_TITLE,
   styles: {
     default: {
       document: { run: { font: FONT, size: 22 }, paragraph: { spacing: { line: 276 } } },
@@ -166,7 +170,7 @@ const doc = new Document({
   numbering,
   sections: [{
     properties: { page: { margin: { top: MARGIN, bottom: MARGIN, left: MARGIN, right: MARGIN } } },
-    headers: { default: new Header({ children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [new TextRun({ text: "Единая весовая система ОАО «ГТИ» · контракт с таможенной системой, v1 · черновик 0.1 от 09.09.2026", size: 16, color: "7F7F7F" })] })] }) },
+    headers: { default: new Header({ children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [new TextRun({ text: DOC_HEADER, size: 16, color: "7F7F7F" })] })] }) },
     footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [
       new TextRun({ text: "Стр. ", size: 16, color: "7F7F7F" }),
       new TextRun({ children: [PageNumber.CURRENT], size: 16, color: "7F7F7F" }),
