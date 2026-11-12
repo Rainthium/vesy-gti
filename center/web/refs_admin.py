@@ -88,17 +88,53 @@ def create_site(session: Session, *, code: str, name: str) -> str | None:
     return None
 
 
-def update_site(session: Session, site_id: int, *, name: str) -> str | None:
-    """Правится только название: код входит в канонические пути фото."""
+# код таможенного органа — как в справочнике подразделений таможенной системы
+# (цифры, пример 41714106); буквы и дефис допускаем на случай иной нумерации
+CUSTOMS_CODE_RE = re.compile(r"[0-9A-Za-z-]{1,32}")
+
+
+def update_site(
+    session: Session,
+    site_id: int,
+    *,
+    name: str,
+    customs_code: str | None = None,
+    actor: str | None = None,
+) -> str | None:
+    """Правятся название и код таможенного органа; код объекта — нет: он
+    входит в канонические пути фото.
+
+    ``customs_code`` None — поле не трогаем (старые формы), пустая строка —
+    очистить. Смена кода уходит таможенной системе в каждом документе
+    (контракт customs-events-v1), поэтому пишется в аудит.
+    """
     site = session.get(Site, site_id)
     if site is None:
         return "объект не найден"
     name = name.strip()
     if not name:
         return "название объекта пустое"
+    if customs_code is not None:
+        code = customs_code.strip() or None
+        if code is not None and not CUSTOMS_CODE_RE.fullmatch(code):
+            return "код таможенного органа: цифры, латиница или дефис, до 32 символов"
+        if code != site.customs_code:
+            session.add(
+                AuditLog(
+                    actor=actor or "panel",
+                    action="site_customs_code",
+                    details={
+                        "site_id": site.id,
+                        "site": site.code,
+                        "was": site.customs_code,
+                        "now": code,
+                    },
+                )
+            )
+            site.customs_code = code
     site.name = name
     session.commit()
-    logger.info("справочники: объект %s переименован в «%s»", site.code, name)
+    logger.info("справочники: объект %s сохранён («%s»)", site.code, name)
     return None
 
 

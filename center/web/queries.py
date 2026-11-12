@@ -16,6 +16,7 @@ from center.db.models import (
     Agent,
     AgentOperator,
     Camera,
+    CustomsEvent,
     MonitoringEvent,
     Scale,
     Site,
@@ -259,6 +260,8 @@ class WeighingCard:
     # outbox (офлайн-операции публикуются в RabbitMQ)
     ais_ref: str | None = None
     ais_event: WeighingEvent | None = None
+    # последнее событие операции таможенной системе (outbox customs_events)
+    customs_event: CustomsEvent | None = None
     # сторнирование (04.09.2026): запись-сторно, аннулирующая эту запись
     annulled_by: Weighing | None = None
     # тарирование, отвергнутое как неправдоподобное (тара не меньше брутто,
@@ -342,6 +345,7 @@ def weighing_card(
         expired_tare=expired_tare,
         ais_ref=ais_link.ais_ref if ais_link is not None else None,
         ais_event=ais_event,
+        customs_event=repo.latest_customs_event(session, weighing.id),
         annulled_by=repo.storno_by(session, weighing.id),
         rejected_tare=rejected_tare,
     )

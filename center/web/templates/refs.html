@@ -53,7 +53,7 @@
         {% endif %}
         <div class="journal-scroll">
           <table class="journal users">
-            <thead><tr><th>Код</th><th>Название</th><th>Часовой пояс</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
+            <thead><tr><th>Код</th><th>Название</th><th>Код таможенного органа</th><th>Часовой пояс</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
             <tbody>
               {% for site in refs.sites %}
               <tr>
@@ -63,10 +63,12 @@
                   <form id="site-{{ site.id }}" method="post" action="/panel/refs/sites/{{ site.id }}/edit"></form>
                   <input class="cell-input wide" form="site-{{ site.id }}" name="name" value="{{ site.name }}" maxlength="200" required>
                 </td>
+                <td><input class="cell-input" form="site-{{ site.id }}" name="customs_code" value="{{ site.customs_code or '' }}" maxlength="32" placeholder="не задан" title="Код таможенного органа по справочнику таможенной системы — уходит ей в каждом документе; менять с уведомлением Таргет-центра"></td>
                 <td class="cell-muted">{{ site.timezone }}</td>
                 <td class="cell-actions"><button type="submit" form="site-{{ site.id }}" class="btn-row btn-row-primary">Сохранить</button></td>
                 {% else %}
                 <td>{{ site.name }}</td>
+                <td class="cell-muted">{{ site.customs_code or '—' }}</td>
                 <td class="cell-muted">{{ site.timezone }}</td>
                 {% endif %}
               </tr>

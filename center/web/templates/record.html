@@ -110,6 +110,22 @@
         {% endif %}
         {% if ais_note %}<span class="ais-note">{{ ais_note }}</span>{% endif %}
       </div>
+      {% if card.customs_event or can_resend %}
+      {% set customs_pending = card.customs_event and not card.customs_event.published_at %}
+      <div class="ais-row{% if customs_pending %} ais-row-pending{% endif %}">
+        <b>Таможенная система:</b>
+        {% if card.customs_event %}
+        <span>событие {{ card.customs_event.event_type }}:
+        {% if card.customs_event.published_at and card.customs_event.last_error %}закрыто без отправки {{ card.customs_event.published_at | fmt_dt }}: {{ card.customs_event.last_error }}{% elif card.customs_event.published_at %}отправлено {{ card.customs_event.published_at | fmt_dt }}{% else %}в очереди на отправку{% if card.customs_event.attempts %} (попыток: {{ card.customs_event.attempts }}{% if card.customs_event.last_error and can_resend %}, последняя ошибка: {{ card.customs_event.last_error }}{% endif %}){% endif %}{% endif %}</span>
+        {% else %}
+        <span>событие ещё не ставилось в очередь</span>
+        {% endif %}
+        {% if can_resend %}
+        <form method="post" action="/panel/journal/{{ w.id }}/customs_event" class="inline-form"><button type="submit" class="btn-row" title="Опубликовать операцию таможенной системе {{ 'ещё раз' if card.customs_event else '' }} (повтор схлопнется по id события)">{{ 'Переотправить событие' if card.customs_event else 'Отправить событие' }}</button></form>
+        {% endif %}
+        {% if customs_note %}<span class="ais-note">{{ customs_note }}</span>{% endif %}
+      </div>
+      {% endif %}
       <div class="checksum-row">
         <b>Контрольная сумма записи:</b>
         <code>sha256 · {{ w.checksum }}</code>

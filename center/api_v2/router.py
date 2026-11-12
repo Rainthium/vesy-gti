@@ -42,8 +42,9 @@ from center.api_v2.schemas import (
     check_ais_ref,
     validation_details,
 )
+from center.customs.documents import build_customs_document, scale_block
 from center.db import repo
-from center.db.models import AuditLog, Scale, Weighing, WeighingAisRef
+from center.db.models import AuditLog, Scale, Site, Weighing, WeighingAisRef
 from shared.enums import ErrorCode, Operation, WeighingSource
 from shared.messages import WeighRequest
 
@@ -52,6 +53,9 @@ logger = logging.getLogger(__name__)
 SessionFactory = Callable[[], Session]
 
 DEFAULT_WEIGH_TIMEOUT_S = 120.0
+# интегратор «таможенная система» (Таргет-центр ГТС): только чтение, свой
+# вариант документа, все объекты — контракт customs-events-v1, раздел 8
+CUSTOMS_INTEGRATOR = "customs"
 MAX_PER_PAGE = 200
 
 
@@ -116,10 +120,18 @@ def create_api_v2_router(
 
         _db(write)
 
-    def _document(session: Session, weighing: Weighing) -> dict[str, Any]:
+    def _document(session: Session, weighing: Weighing, *, customs: bool = False) -> dict[str, Any]:
+        if customs:
+            return build_customs_document(session, weighing, photos_dir=config.photos_dir)
         return build_document(session, weighing, photos_dir=config.photos_dir)
 
-    def _document_by_uuid(record_uuid: UUID) -> dict[str, Any] | None:
+    def _read_only(integrator: str) -> JSONResponse | None:
+        """Таможенной системе команды и привязка номера АИС закрыты."""
+        if integrator != CUSTOMS_INTEGRATOR:
+            return None
+        return _error(403, "ERR_FORBIDDEN", "токен только для чтения")
+
+    def _document_by_uuid(record_uuid: UUID, *, customs: bool = False) -> dict[str, Any] | None:
         def load(session: Session) -> dict[str, Any] | None:
             weighing = session.execute(
                 select(Weighing).where(Weighing.uuid == record_uuid)
@@ -131,7 +143,7 @@ def create_api_v2_router(
                 or weighing.source is WeighingSource.IMPORTED  # перенос из АИС — не наша
             ):
                 return None
-            return _document(session, weighing)
+            return _document(session, weighing, customs=customs)
 
         return _db(load)
 
@@ -238,6 +250,8 @@ def create_api_v2_router(
         integrator = _authorize(request)
         if isinstance(integrator, JSONResponse):
             return integrator
+        if (denied := _read_only(integrator)) is not None:
+            return denied
         try:
             payload = await request.json()
         except Exception:
@@ -334,7 +348,8 @@ def create_api_v2_router(
             record_uuid = UUID(weighing_id)
         except ValueError:
             return _error(404, "ERR_NOT_FOUND", "нет операции с таким id")
-        document = await asyncio.to_thread(_document_by_uuid, record_uuid)
+        customs = integrator == CUSTOMS_INTEGRATOR
+        document = await asyncio.to_thread(lambda: _document_by_uuid(record_uuid, customs=customs))
         if document is None:
             return _error(404, "ERR_NOT_FOUND", "нет операции с таким id")
         return JSONResponse({"weighing": document})
@@ -363,6 +378,10 @@ def create_api_v2_router(
         ais_ref = (params.get("ais_ref") or "").strip() or None
         ais_object = (params.get("ais_object") or "").strip() or None
         unlinked = params.get("unlinked") in {"1", "true", "yes"}
+        customs = integrator == CUSTOMS_INTEGRATOR
+        # отбор по коду объекта весовой системы — только таможенной системе
+        # (АИС задаёт объект своим идентификатором ais_object)
+        site_code = ((params.get("site") or "").strip() or None) if customs else None
 
         def load(session: Session) -> dict[str, Any]:
             # записи-сторно — не операции: сверка АИС приняла бы их за новые;
@@ -386,6 +405,13 @@ def create_api_v2_router(
                     query = query.where(Scale.ais_object == ais_object)
                 if scale_no is not None:
                     query = query.where(Scale.ais_scale_no == scale_no)
+            if site_code is not None:
+                site_scales = (
+                    select(Scale.id)
+                    .join(Site, Site.id == Scale.site_id)
+                    .where(Site.code == site_code)
+                )
+                query = query.where(Weighing.scale_id.in_(site_scales))
             if operation is not None:
                 query = query.where(Weighing.operation == operation)
             if source is not None:
@@ -406,11 +432,40 @@ def create_api_v2_router(
                 .all()
             )
             return {
-                "weighings": [_document(session, w) for w in rows],
+                "weighings": [_document(session, w, customs=customs) for w in rows],
                 "page": page,
                 "per_page": per_page,
                 "total": total,
             }
+
+        return JSONResponse(await asyncio.to_thread(_db, load))
+
+    # --- справочник объектов и весов (контракт customs-events-v1, 8.3) ---
+
+    @router.get("/api/v2/sites")
+    async def list_sites(request: Request) -> JSONResponse:
+        integrator = _authorize(request)
+        if isinstance(integrator, JSONResponse):
+            return integrator
+
+        def load(session: Session) -> dict[str, Any]:
+            scales_by_site: dict[int, list[Scale]] = {}
+            for scale in session.execute(select(Scale).order_by(Scale.id)).scalars():
+                scales_by_site.setdefault(scale.site_id, []).append(scale)
+            sites = []
+            for site in session.execute(select(Site).order_by(Site.code)).scalars():
+                scales = scales_by_site.get(site.id, [])
+                sites.append(
+                    {
+                        "code": site.code,
+                        "name": site.name,
+                        "customs_code": site.customs_code,
+                        # идентификатор СВХ задан у весов и у всех весов объекта совпадает
+                        "ais_object": next((s.ais_object for s in scales if s.ais_object), None),
+                        "scales": [scale_block(s) for s in scales],
+                    }
+                )
+            return {"sites": sites}
 
         return JSONResponse(await asyncio.to_thread(_db, load))
 
@@ -421,6 +476,8 @@ def create_api_v2_router(
         integrator = _authorize(request)
         if isinstance(integrator, JSONResponse):
             return integrator
+        if (denied := _read_only(integrator)) is not None:
+            return denied
         try:
             record_uuid = UUID(weighing_id)
         except ValueError:

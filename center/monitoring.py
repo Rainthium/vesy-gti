@@ -71,6 +71,7 @@ class MonitoringThresholds:
     photo_backlog_min: int = 20  # снимков в очереди при живой связи
     disk_low_mb: int = 5120  # меньше 5 ГБ на диске с фото — алерт
     ais_events_after_s: float = 600.0  # события в АИС (RabbitMQ) не уходят 10 минут
+    customs_events_after_s: float = 600.0  # события в таможню не уходят 10 минут
 
 
 # подписи типов проблем — пилюли дашборда и экрана «События»
@@ -83,6 +84,7 @@ KIND_LABELS = {
     "photo_backlog": "Снимки",
     "disk_low": "Диск",
     "ais_events": "События АИС",
+    "customs_events": "События таможни",
     "update_failed": "Обновление",
     # операции (04.09.2026): гружёная машина как тарирование / тара не меньше брутто
     "tare_rejected": "Тарирование",
@@ -164,11 +166,18 @@ class MonitoringService:
         *,
         thresholds: MonitoringThresholds | None = None,
         now: Callable[[], datetime] | None = None,
+        customs_events: bool = False,
     ) -> None:
         self._session_factory = session_factory
         self._hub = hub
+        # следить за outbox таможни — только при включённом публикаторе
+        self._customs_events = customs_events
+        # ...и не сразу после старта: к включению публикатора в outbox лежит
+        # накопленный хвост (а после рестарта — недосланное), ему нужно время
         self._thresholds = thresholds or MonitoringThresholds()
         self._now = now or (lambda: datetime.now(UTC))
+        # момент старта — льгота детектора событий таможни (см. ниже)
+        self._started_at = self._now()
         self._states: dict[tuple[int, str], _DetectorState] = {}
         # site_id по весам — обновляется каждым тиком (scope-фильтр алертов)
         self._site_ids: dict[int, int] = {}
@@ -233,6 +242,7 @@ class MonitoringService:
             site_ids: dict[int, int] = {}
             # неотправленные события в АИС по весам (outbox RabbitMQ)
             pending_events = repo.pending_event_stats(session)
+            pending_customs = repo.pending_customs_stats(session) if self._customs_events else {}
             for scale, site, agent in rows:
                 seen_scale_ids.add(scale.id)
                 site_ids[scale.id] = site.id
@@ -243,6 +253,10 @@ class MonitoringService:
                 )
                 events.extend(self._check_scale(snapshot, agent, now))
                 events.extend(self._check_ais_events(snapshot, pending_events.get(scale.id), now))
+                if self._customs_events:
+                    events.extend(
+                        self._check_customs_events(snapshot, pending_customs.get(scale.id), now)
+                    )
             self._site_ids = site_ids
             # весы, удалённые из справочника (или лишившиеся агента),
             # не должны вечно висеть активным алертом
@@ -418,6 +432,54 @@ class MonitoringService:
                 "проверьте RabbitMQ и связь с ним"
             ),
             recovery=f"{snap.title}: события в АИС снова уходят",
+            now=now,
+        )
+
+    @property
+    def customs_events_enabled(self) -> bool:
+        """Публикатор событий таможни включён (очередь должна рассасываться)."""
+        return self._customs_events
+
+    def _check_customs_events(
+        self,
+        snap: _ScaleSnapshot,
+        pending: tuple[int, datetime] | None,
+        now: datetime,
+    ) -> list[MonitoringEvent]:
+        """События таможенной системе не уходят из outbox — её брокер или сеть.
+
+        Как у событий АИС: порог — от постановки самого старого события.
+        Детектор включён только при работающем публикаторе и молчит первые
+        ``customs_events_after_s`` после старта центра — иначе накопленный
+        хвост дал бы залп ложных алертов до того, как публикатор его разошлёт.
+        """
+        count, oldest = pending if pending is not None else (0, None)
+        if oldest is not None and oldest.tzinfo is None:
+            oldest = oldest.replace(tzinfo=UTC)
+        threshold = self._thresholds.customs_events_after_s
+        stuck = (
+            oldest is not None
+            and (now - oldest).total_seconds() >= threshold
+            and (now - self._started_at).total_seconds() >= threshold
+        )
+        return self._transition(
+            snap,
+            "customs_events",
+            bad=stuck,
+            delay_s=0.0,  # порог уже учтён по времени постановки события
+            severity=MonitoringSeverity.DANGER,
+            problem=(
+                f"{snap.title}: {count} "
+                + _plural(
+                    count,
+                    "событие в таможню не уходит",
+                    "события в таможню не уходят",
+                    "событий в таможню не уходят",
+                )
+                + f" (самое старое с {_fmt_hm(oldest, now=now)}) — "
+                "проверьте связь с брокером Таргет-центра"
+            ),
+            recovery=f"{snap.title}: события в таможню снова уходят",
             now=now,
         )
 

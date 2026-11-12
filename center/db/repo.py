@@ -1280,6 +1280,85 @@ def find_active_tare(
     )
 
 
+# --- outbox таможенной системы (контракт customs-events-v1) ---
+
+
+def enqueue_customs_event(
+    session: Session, weighing: Weighing, event_type: str = CUSTOMS_WEIGHING_COMPLETED
+) -> CustomsEvent:
+    """Поставить событие операции таможне повторно (переотправка из панели).
+
+    Не коммитит: вызывающий добавляет запись аудита и коммитит одной
+    транзакцией. ``event_id`` у повтора тот же — потребитель схлопнет дубль.
+    """
+    event = CustomsEvent(weighing_id=weighing.id, event_type=event_type)
+    session.add(event)
+    session.flush()
+    return event
+
+
+def pending_customs_events(session: Session, limit: int = 50) -> list[CustomsEvent]:
+    """Неотправленные события таможне в порядке постановки (для публикатора)."""
+    return list(
+        session.execute(
+            select(CustomsEvent)
+            .where(CustomsEvent.published_at.is_(None))
+            .order_by(CustomsEvent.id)
+            .limit(limit)
+        ).scalars()
+    )
+
+
+def mark_customs_event_published(
+    session: Session, event_id: int, at: datetime, *, note: str | None = None
+) -> None:
+    """Отметить отправку; ``note`` — причина закрытия без отправки (остаётся в last_error)."""
+    event = session.get(CustomsEvent, event_id)
+    if event is None:
+        return
+    event.published_at = at
+    event.attempts += 1
+    event.last_error = note
+    session.commit()
+
+
+def mark_customs_event_failed(session: Session, event_id: int, error: str) -> None:
+    event = session.get(CustomsEvent, event_id)
+    if event is None:
+        return
+    event.attempts += 1
+    event.last_error = error[:500]
+    session.commit()
+
+
+def pending_customs_stats(session: Session) -> dict[int, tuple[int, datetime]]:
+    """Неотправленные события таможне по весам: {scale_id: (сколько, самое старое)}.
+
+    Весы берутся у операции либо у отказа — у строки outbox ровно один предмет.
+    Для счётчика дашборда и детектора «события в таможню не уходят».
+    """
+    scale_id = func.coalesce(Weighing.scale_id, TareRejection.scale_id)
+    rows = session.execute(
+        select(scale_id, func.count(CustomsEvent.id), func.min(CustomsEvent.created_at))
+        .select_from(CustomsEvent)
+        .outerjoin(Weighing, Weighing.id == CustomsEvent.weighing_id)
+        .outerjoin(TareRejection, TareRejection.id == CustomsEvent.rejection_id)
+        .where(CustomsEvent.published_at.is_(None))
+        .group_by(scale_id)
+    ).all()
+    return {int(sid): (int(count), oldest) for sid, count, oldest in rows if sid is not None}
+
+
+def latest_customs_event(session: Session, weighing_id: int) -> CustomsEvent | None:
+    """Последнее событие операции таможне (для страницы записи)."""
+    return session.execute(
+        select(CustomsEvent)
+        .where(CustomsEvent.weighing_id == weighing_id)
+        .order_by(CustomsEvent.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
 __all__ = [
     "CameraRole",
     "StornoError",

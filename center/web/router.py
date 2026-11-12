@@ -412,6 +412,7 @@ def create_panel_router(
         alerts: list[ActiveAlert],
         today: tuple[int, int],
         ais_pending: int = 0,
+        customs_pending: int = 0,
     ) -> list[dict[str, str]]:
         """Четыре счётчика дашборда (по макету center-dashboard).
 
@@ -430,7 +431,8 @@ def create_panel_router(
         danger_count = sum(1 for alert in alerts if alert.severity is MonitoringSeverity.DANGER)
         backlog_records = sum(eq.pending_sync_count for eq in equipment.values())
         backlog_photos = sum(eq.pending_photos_count or 0 for eq in equipment.values())
-        backlog = backlog_records + backlog_photos + ais_pending
+        # события таможенной системе (outbox customs_events) — в ту же очередь
+        backlog = backlog_records + backlog_photos + ais_pending + customs_pending
         return [
             {
                 "k": "Весов на связи",
@@ -466,6 +468,7 @@ def create_panel_router(
                 "sub": (
                     f"записей: {backlog_records} · снимков: {backlog_photos}"
                     + (f" · событий в АИС: {ais_pending}" if ais_pending else "")
+                    + (f" · событий в таможню: {customs_pending}" if customs_pending else "")
                     if backlog
                     else "всё синхронизировано"
                 ),
@@ -492,6 +495,18 @@ def create_panel_router(
             for scale_id, (count, _) in pending_events.items()
             if scale_id in visible_scale_ids
         )
+        # очередь таможни считаем, только когда публикатор включён: до
+        # подключения брокера она копится по замыслу и утопила бы в счётчике
+        # настоящую очередь досылки агентов
+        customs_on = monitor is not None and monitor.customs_events_enabled
+        pending_customs = (
+            await asyncio.to_thread(_db, repo.pending_customs_stats) if customs_on else {}
+        )
+        customs_pending = sum(
+            count
+            for scale_id, (count, _) in pending_customs.items()
+            if scale_id in visible_scale_ids
+        )
         # «на связи» — как у детектора офлайна: статус online И свежий
         # heartbeat; иначе счётчик показывал бы «все агенты онлайн» рядом
         # с danger-алертом о молчащем агенте (замечание ревью 13.08.2026)
@@ -514,7 +529,7 @@ def create_panel_router(
             "alerts": alerts,
             "online_map": online_map,
             "counters": _dashboard_counters(
-                scales, online_map, equipment, alerts, today, ais_pending
+                scales, online_map, equipment, alerts, today, ais_pending, customs_pending
             ),
             "all_good": not alerts
             and all(item.agent is None or online_map.get(item.scale.id) for item in scales),
@@ -1033,6 +1048,7 @@ def create_panel_router(
             and w.storno_of is None
             and card.annulled_by is None,
             ais_note=request.query_params.get("ais_note"),
+            customs_note=request.query_params.get("customs_note"),
             note=request.query_params.get("note"),
         )
 
@@ -1079,6 +1095,50 @@ def create_panel_router(
         logger.info("панель (%s): событие АИС по записи id=%d — %s", admin, weighing_id, note)
         return RedirectResponse(
             f"/panel/journal/{weighing_id}?ais_note={quote(note)}", status_code=303
+        )
+
+    @router.post("/journal/{weighing_id}/customs_event")
+    async def journal_resend_customs_event(
+        request: Request, admin: PanelAdmin, scope: PanelScope, weighing_id: int
+    ) -> RedirectResponse:
+        """Повторно опубликовать операцию таможенной системе (контракт
+        customs-events-v1, раздел 7): у аннулированной записи — оба события,
+        ``weighing.completed`` и ``weighing.reversed``; ``event_id`` те же."""
+
+        def enqueue(session: Session) -> str:
+            card = queries.weighing_card(session, weighing_id, site_scope=scope)
+            if card is None:
+                raise HTTPException(status_code=404)
+            if card.weighing.storno_of is not None:
+                return "запись-сторно в таможню не публикуется — событие не отправлено"
+            if card.weighing.source is WeighingSource.IMPORTED:
+                return (
+                    "тарирование перенесено из АИС «СВХ» — в таможню не публикуется; "
+                    "событие не отправлено"
+                )
+            event_types = [repo.CUSTOMS_WEIGHING_COMPLETED]
+            if card.annulled_by is not None:
+                event_types.append(repo.CUSTOMS_WEIGHING_REVERSED)
+            for event_type in event_types:
+                repo.enqueue_customs_event(session, card.weighing, event_type)
+            session.add(
+                AuditLog(
+                    actor=f"user:{admin}",
+                    action="customs_event_resend",
+                    details={
+                        "weighing_id": weighing_id,
+                        "record_uuid": str(card.weighing.uuid),
+                        "events": event_types,
+                    },
+                )
+            )
+            session.commit()
+            return "событие поставлено в очередь на отправку в таможню"
+
+        note = await asyncio.to_thread(_db, enqueue)
+        logger.info("панель (%s): событие таможни по записи id=%d — %s", admin, weighing_id, note)
+        return RedirectResponse(
+            f"/panel/journal/{weighing_id}?customs_note={quote(note)}", status_code=303
         )
 
     @router.post("/journal/{weighing_id}/storno")
@@ -1564,13 +1624,17 @@ def create_panel_router(
         admin: PanelAdmin,
         site_id: int,
         name: Annotated[str, Form()],
+        customs_code: Annotated[str | None, Form()] = None,
     ) -> RedirectResponse:
         error = await asyncio.to_thread(
-            _db, lambda s: refs_admin.update_site(s, site_id, name=name)
+            _db,
+            lambda s: refs_admin.update_site(
+                s, site_id, name=name, customs_code=customs_code, actor=f"user:{admin}"
+            ),
         )
         if error is None:
-            logger.info("панель (%s): объект id=%d переименован", admin, site_id)
-            return _refs_redirect("объект переименован")
+            logger.info("панель (%s): объект id=%d сохранён", admin, site_id)
+            return _refs_redirect("объект сохранён")
         return _refs_redirect(error)
 
     def _parse_scale_form(

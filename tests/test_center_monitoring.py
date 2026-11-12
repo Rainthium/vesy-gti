@@ -561,3 +561,82 @@ class TestAisEventsDetector:
         clock.advance(120)
         service.tick()
         assert service.active_alerts() == []
+
+
+class TestCustomsEventsDetector:
+    """События таможенной системе не уходят (outbox ``customs_events``)."""
+
+    @staticmethod
+    def _record_at(db: sessionmaker[Session], scale_id: int, created_at: datetime) -> int:
+        from uuid import uuid4
+
+        from center.db.models import CustomsEvent
+        from shared.enums import ErrorCode, Operation, WeighingSource
+        from shared.messages import WeighingRecord
+
+        record = WeighingRecord(
+            uuid=uuid4(),
+            operation=Operation.WEIGHING,
+            code=ErrorCode.OK,
+            massa=1000.0,
+            weighed_at=created_at,
+            vehicle_number="01KG777AAA",
+            source=WeighingSource.AIS,
+        )
+        with db() as session:
+            repo.save_weighing_record(session, scale_id, record)
+            event = session.execute(select(CustomsEvent)).scalars().all()[-1]
+            event.created_at = created_at
+            session.commit()
+            return event.id
+
+    def test_alert_and_recovery_when_publisher_enabled(self, db: sessionmaker[Session]) -> None:
+        _site_id, scale_id, agent_id = _seed_scale(db)
+        clock = FakeClock()
+        _set_agent(db, agent_id, status=AgentStatus.ONLINE, last_seen_at=clock.current)
+        service = MonitoringService(db, AgentHub(), now=clock.now, customs_events=True)
+        event_id = self._record_at(db, scale_id, clock.current)
+
+        service.tick()  # событие свежее — молчим
+        assert _events(db) == []
+        clock.advance(THRESHOLDS.customs_events_after_s + 1)
+        _set_agent(db, agent_id, status=AgentStatus.ONLINE, last_seen_at=clock.current)
+        service.tick()
+        events = _events(db)
+        assert [e.kind for e in events] == ["customs_events"]
+        assert events[0].severity is MonitoringSeverity.DANGER
+        assert "1 событие в таможню не уходит" in events[0].message
+        assert service.active_alerts()[0].kind_label == "События таможни"
+
+        with db() as session:
+            repo.mark_customs_event_published(session, event_id, clock.current)
+        service.tick()
+        assert "снова уходят" in _events(db)[-1].message
+        assert service.active_alerts() == []
+
+    def test_grace_after_start_for_accumulated_tail(self, db: sessionmaker[Session]) -> None:
+        """Хвост, накопленный до включения публикатора, не даёт залпа алертов
+        сразу после старта — публикатору нужно время его разослать."""
+        _site_id, scale_id, agent_id = _seed_scale(db)
+        clock = FakeClock()
+        old = clock.current - timedelta(hours=5)
+        self._record_at(db, scale_id, old)
+        _set_agent(db, agent_id, status=AgentStatus.ONLINE, last_seen_at=clock.current)
+        service = MonitoringService(db, AgentHub(), now=clock.now, customs_events=True)
+        service.tick()
+        assert _events(db) == []
+        clock.advance(THRESHOLDS.customs_events_after_s + 1)
+        _set_agent(db, agent_id, status=AgentStatus.ONLINE, last_seen_at=clock.current)
+        service.tick()  # хвост так и не ушёл — теперь это проблема
+        assert [e.kind for e in _events(db)] == ["customs_events"]
+
+    def test_silent_while_publisher_disabled(self, db: sessionmaker[Session]) -> None:
+        """Пока брокер таможни не подключён, очередь копится по замыслу — без алертов."""
+        _site_id, scale_id, agent_id = _seed_scale(db)
+        clock = FakeClock()
+        service = _make_service(db, AgentHub(), clock)
+        self._record_at(db, scale_id, clock.current)
+        clock.advance(THRESHOLDS.customs_events_after_s + 1)
+        _set_agent(db, agent_id, status=AgentStatus.ONLINE, last_seen_at=clock.current)
+        service.tick()
+        assert [e.kind for e in _events(db)] == []

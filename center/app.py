@@ -22,7 +22,8 @@ from starlette.middleware.sessions import SessionMiddleware
 from center.agents_ws.hub import AgentHub
 from center.agents_ws.router import create_agents_router
 from center.api_v1.router import ApiV1Config, create_api_v1_router
-from center.api_v2.router import ApiV2Config, create_api_v2_router
+from center.api_v2.router import CUSTOMS_INTEGRATOR, ApiV2Config, create_api_v2_router
+from center.customs.publisher import CUSTOMS_TEST_EXCHANGE, CustomsBroker, CustomsPublisher
 from center.db.session import make_engine, make_session_factory
 from center.events import EventBroker, EventPublisher, RabbitBroker
 from center.monitoring import MonitoringService, TelegramNotifier
@@ -110,6 +111,15 @@ def create_app() -> FastAPI:
     ais_token = os.environ.get("AIS_PHOTO_TOKEN", "dev-only-ais-token")
     allowed = os.environ.get("AIS_ALLOWED_IPS", "")
     service_tokens = {ais_token: "ais-svh"}
+    # таможенная система (Таргет-центр ГТС): отдельный токен только на чтение —
+    # документы, справочник объектов, фото (контракт customs-events-v1, раздел 3);
+    # пусто — доступа нет. Совпадение с токеном АИС игнорируем: иначе АИС
+    # лишилась бы права на команды
+    customs_token = os.environ.get("CUSTOMS_TOKEN", "").strip()
+    if customs_token and customs_token != ais_token:
+        service_tokens[customs_token] = CUSTOMS_INTEGRATOR
+    elif customs_token:
+        logger.error("CUSTOMS_TOKEN совпадает с токеном АИС — доступ таможни не включён")
     allowed_ips = frozenset(ip.strip() for ip in allowed.split(",") if ip.strip()) or None
     photos_config = PhotosConfig(
         photos_dir=Path(os.environ.get("PHOTOS_DIR", "./photos_data")),
@@ -126,7 +136,27 @@ def create_app() -> FastAPI:
     # мониторинг объектов (этап 2): детекторы — фоновая задача процесса
     # центра (uvicorn с одним воркером); Telegram-уведомления включаются
     # только при заданных секретах бота (правило №7 — значения из env)
-    monitor = MonitoringService(session_factory, hub)
+    # события таможенной системе: свой outbox → брокер Таргет-центра; без
+    # CUSTOMS_RABBITMQ_URL публикатор выключен, события копятся в outbox.
+    # Имя exchange — настройка (тест vesy.events.test → боевой vesy.events),
+    # CUSTOMS_TLS_CA — сертификат УЦ брокера для TLS (пусто — без TLS)
+    customs_url = os.environ.get("CUSTOMS_RABBITMQ_URL", "").strip()
+    customs_broker: CustomsBroker | None = (
+        CustomsBroker(
+            customs_url,
+            os.environ.get("CUSTOMS_EXCHANGE", "").strip() or CUSTOMS_TEST_EXCHANGE,
+            ca_file=os.environ.get("CUSTOMS_TLS_CA", "").strip() or None,
+        )
+        if customs_url
+        else None
+    )
+    customs_publisher = CustomsPublisher(
+        session_factory, customs_broker, photos_dir=photos_config.photos_dir
+    )
+
+    # детектор «события в таможню не уходят» работает, только когда публикатор
+    # включён: до подключения брокера очередь копится по замыслу
+    monitor = MonitoringService(session_factory, hub, customs_events=customs_publisher.enabled)
     notifier = TelegramNotifier(
         session_factory,
         token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
@@ -168,6 +198,14 @@ def create_app() -> FastAPI:
                 "публикатор событий АИС выключен: RABBITMQ_URL не задан — "
                 "офлайн-операции копятся в outbox"
             )
+        if customs_publisher.enabled and customs_broker is not None:
+            logger.info("публикатор событий таможни: exchange %s", customs_broker.exchange_name)
+            tasks.append(asyncio.create_task(customs_publisher.run(), name="customs-events"))
+        else:
+            logger.info(
+                "публикатор событий таможни выключен: CUSTOMS_RABBITMQ_URL не задан — "
+                "события копятся в outbox"
+            )
         yield
         for task in tasks:
             task.cancel()
@@ -175,6 +213,9 @@ def create_app() -> FastAPI:
         if broker is not None:
             with contextlib.suppress(Exception):
                 await broker.close()
+        if customs_broker is not None:
+            with contextlib.suppress(Exception):
+                await customs_broker.close()
 
     # ни Swagger, ни схема наружу: /openapi.json отдавал карту всех маршрутов
     # панели и API любому в интернете (аудит 04.11.2026) — данных не раскрывал,
@@ -233,5 +274,6 @@ def create_app() -> FastAPI:
     app.state.session_factory = session_factory
     app.state.monitor = monitor
     app.state.publisher = publisher
+    app.state.customs_publisher = customs_publisher
     app.state.rollout = rollout
     return app
