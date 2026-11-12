@@ -23,12 +23,14 @@ from center.db.models import (
     AgentStatus,
     AuditLog,
     Camera,
+    CustomsEvent,
     MonitoringEvent,
     MonitoringSeverity,
     Scale,
     Site,
     TareRegistry,
     TareRegistryChange,
+    TareRejection,
     User,
     UserRole,
     Weighing,
@@ -52,7 +54,12 @@ from shared.messages import (
     VerificationInfo,
     WeighingRecord,
 )
-from shared.tare import tare_below_gross, three_months_before
+from shared.tare import (
+    DEFAULT_MAX_TARE_KG,
+    parse_tare_too_heavy,
+    tare_below_gross,
+    three_months_before,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +67,10 @@ logger = logging.getLogger(__name__)
 PHOTO_INDEX_BY_ROLE = {CameraRole.FRONT: 1, CameraRole.REAR: 2}
 # событие контракта v2 (раздел 7): состоявшаяся операция → АИС
 EVENT_WEIGHING_COMPLETED = "weighing.completed"
+# события таможенной системе (контракт customs-events-v1, раздел 4)
+CUSTOMS_WEIGHING_COMPLETED = "weighing.completed"
+CUSTOMS_WEIGHING_REVERSED = "weighing.reversed"
+CUSTOMS_WEIGHING_REJECTED = "weighing.rejected"
 
 
 def _as_utc(moment: datetime) -> datetime:
@@ -223,9 +234,79 @@ def save_weighing_record(
                 record.uuid,
                 scale_id,
             )
+    # таможенной системе — КАЖДАЯ состоявшаяся операция любого источника и
+    # любых весов (контракт customs-events-v1); outbox свой, поток АИС выше
+    # не затронут. Перенесённые тарирования сюда не попадают — их пишет
+    # import_ais_tares, а не эта функция
+    session.add(CustomsEvent(weighing_id=row.id, event_type=CUSTOMS_WEIGHING_COMPLETED))
     # тара не меньше брутто → событие мониторинга (той же транзакцией)
     _flag_implausible_tare(session, scale_id, record)
     session.commit()
+    return True
+
+
+def scale_max_tare_kg(scale: Scale | None) -> float:
+    """Действующий лимит тары весов, кг: из «Настроек» весов, иначе умолчание."""
+    value = (scale.thresholds or {}).get("max_tare_kg") if scale is not None else None
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    return DEFAULT_MAX_TARE_KG
+
+
+def record_tare_rejection(
+    session: Session,
+    scale_id: int,
+    record: WeighingRecord,
+    *,
+    operator: str | None,
+    ais_ref: str | None,
+    now: datetime | None = None,
+    commit: bool = True,
+) -> bool:
+    """Записать отклонённое тарирование и событие ``weighing.rejected`` таможне.
+
+    Отказ по команде АИС «СВХ» (ERR_TARE_TOO_HEAVY): в журнал операций он не
+    попадает, а таможенной системе уходит отдельным событием (контракт
+    customs-events-v1, раздел 5.5). Идемпотентно по uuid отказа: повтор —
+    False, без второй строки и второго события. Масса и применённый агентом
+    лимит — из текста отказа (числами агент их не возвращает); текст не
+    разобрался — масса NULL, лимит из настроек весов в центре.
+    """
+    exists = session.execute(
+        select(TareRejection.id).where(TareRejection.uuid == record.uuid)
+    ).scalar_one_or_none()
+    if exists is not None:
+        return False
+    parsed = parse_tare_too_heavy(record.message)
+    rejection = TareRejection(
+        uuid=record.uuid,
+        scale_id=scale_id,
+        rejected_at=now or datetime.now(UTC),
+        vehicle_number=record.vehicle_number,
+        trailer_number=record.trailer_number,
+        operator=operator,
+        ais_ref=ais_ref,
+        code=record.code.value,
+        message=record.message or record.code.value,
+        tare_limit_kg=(
+            parsed[1] if parsed is not None else scale_max_tare_kg(session.get(Scale, scale_id))
+        ),
+        massa_kg=parsed[0] if parsed is not None else None,
+    )
+    try:
+        # savepoint: одновременный повтор того же отказа упирается в
+        # уникальный uuid — это тоже «уже записан», а не ошибка, и
+        # транзакция вызывающего остаётся живой
+        with session.begin_nested():
+            session.add(rejection)
+            session.flush()
+            session.add(
+                CustomsEvent(rejection_id=rejection.id, event_type=CUSTOMS_WEIGHING_REJECTED)
+            )
+    except IntegrityError:
+        return False
+    if commit:
+        session.commit()
     return True
 
 
@@ -823,6 +904,11 @@ def storno_weighing(
         raise StornoError("запись уже аннулирована") from exc
     if weighing.operation is Operation.TARING and weighing.vehicle_number:
         rebuild_tare_registry_entry(session, weighing.vehicle_number, weighing.trailer_number)
+    if weighing.source is not WeighingSource.IMPORTED:
+        # таможенной системе — аннулирование события по ИСХОДНОЙ записи
+        # (документ тот же, заполнено storno); перенесённые тарирования в
+        # таможню не публиковались — и их сторно тоже
+        session.add(CustomsEvent(weighing_id=weighing.id, event_type=CUSTOMS_WEIGHING_REVERSED))
     session.add(
         AuditLog(
             actor=actor,

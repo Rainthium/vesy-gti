@@ -147,7 +147,7 @@ docker compose logs app --tail 20
 отзывается у рабочей роли (правило №2):
 
 ```bash
-docker compose exec postgres psql -U ves -d ves -c 'REVOKE TRUNCATE ON TABLE weighings, weighing_photos FROM ves;'
+docker compose exec postgres psql -U ves -d ves -c 'REVOKE TRUNCATE ON TABLE weighings, weighing_photos, tare_rejections FROM ves;'
 ```
 
 ## 5. Справочники и учётки

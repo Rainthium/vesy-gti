@@ -23,6 +23,7 @@ from uuid import UUID
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Enum,
@@ -103,6 +104,10 @@ class Site(Base):
     code: Mapped[str] = mapped_column(String(32), unique=True)  # напр. "kyzyl-kyia"
     name: Mapped[str] = mapped_column(String(200))  # СВХ «Кызыл-Кыя»
     timezone: Mapped[str] = mapped_column(String(64), default="Asia/Bishkek")
+    # код таможенного органа, к которому относится объект, по справочнику
+    # таможенной системы (контракт customs-events-v1, раздел 2); NULL — код
+    # ещё не получен от Таргет-центра
+    customs_code: Mapped[str | None] = mapped_column(String(32), default=None)
 
 
 class Scale(Base):
@@ -356,6 +361,70 @@ class WeighingEvent(Base):
     __table_args__ = (
         Index("ix_weighing_events_pending", "id", postgresql_where=text("published_at IS NULL")),
         Index("ix_weighing_events_weighing", "weighing_id"),
+    )
+
+
+class TareRejection(Base):
+    """Отклонённое тарирование по команде АИС «СВХ» (масса выше лимита тары).
+
+    Не операция: в журнале ``weighings`` отказов нет (решение 10.08.2026).
+    Строка нужна таможенной системе — событие ``weighing.rejected`` контракта
+    customs-events-v1, раздел 5.5. ``uuid`` — идентификатор отказа, который
+    выдал агент (``WeighingRecord.uuid`` отказа); ``rejected_at`` — время
+    центра. Строка неизменяема (триггер в миграции).
+    """
+
+    __tablename__ = "tare_rejections"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    uuid: Mapped[UUID] = mapped_column(unique=True)
+    scale_id: Mapped[int] = mapped_column(ForeignKey("scales.id"))
+    rejected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    vehicle_number: Mapped[str | None] = mapped_column(String(32), default=None)
+    trailer_number: Mapped[str | None] = mapped_column(String(32), default=None)
+    operator: Mapped[str | None] = mapped_column(String(200), default=None)
+    ais_ref: Mapped[str | None] = mapped_column(String(32), default=None)
+    code: Mapped[str] = mapped_column(String(32))
+    message: Mapped[str] = mapped_column(Text)
+    # лимит тары весов на момент отказа и измеренная масса (из текста отказа;
+    # NULL — текст разобрать не удалось)
+    tare_limit_kg: Mapped[float] = mapped_column(Float)
+    massa_kg: Mapped[float | None] = mapped_column(Float, default=None)
+
+
+class CustomsEvent(Base):
+    """Outbox событий в таможенную систему (контракт customs-events-v1).
+
+    Отдельная таблица, а не строки ``weighing_events`` с другим адресатом:
+    поток АИС «СВХ» (запросы, публикатор, мониторинг) остаётся нетронутым.
+    Строка ссылается либо на операцию (``weighing.completed`` /
+    ``weighing.reversed``), либо на отказ (``weighing.rejected``) — ровно на
+    одно из двух. Появляется в одной транзакции с записью, сторно или
+    отказом; повторная публикация — новая строка с тем же ``event_id``.
+    """
+
+    __tablename__ = "customs_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(32))
+    weighing_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("weighings.id"), default=None
+    )
+    rejection_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("tare_rejections.id"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, default=None)
+
+    __table_args__ = (
+        CheckConstraint(
+            "(weighing_id IS NOT NULL) <> (rejection_id IS NOT NULL)",
+            name="ck_customs_events_subject",
+        ),
+        Index("ix_customs_events_pending", "id", postgresql_where=text("published_at IS NULL")),
+        Index("ix_customs_events_weighing", "weighing_id"),
     )
 
 

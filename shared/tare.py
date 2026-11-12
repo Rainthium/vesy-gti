@@ -5,6 +5,7 @@
 07.08.2026).
 """
 
+import re
 from datetime import UTC, datetime, timedelta, timezone
 
 TARE_VALIDITY_MONTHS = 3
@@ -65,6 +66,36 @@ def tare_too_heavy_message(weight_kg: float, max_tare_kg: float) -> str:
         f"Масса {_kg(weight_kg)} кг больше допустимой тары {_kg(max_tare_kg)} кг — "
         "это гружёная машина: проведите взвешивание, а не тарирование"
     )
+
+
+# разбор текста отказа обратно в число — пара к tare_too_heavy_message: менять
+# формулировку можно только вместе с этим шаблоном (тест «туда-обратно»)
+_TOO_HEAVY_MASS_RE = re.compile(r"Масса (\d[\d ]*) кг больше допустимой тары (\d[\d ]*) кг")
+
+
+def parse_tare_too_heavy_mass(message: str | None) -> float | None:
+    """Измеренная масса из текста отказа ERR_TARE_TOO_HEAVY, кг (целые).
+
+    Агент при отказе вес числом не возвращает — только в тексте; центр
+    достаёт его для события ``weighing.rejected`` таможенной системе
+    (решение Игоря 11.11.2026). Текст не распознан — None.
+    """
+    parsed = parse_tare_too_heavy(message)
+    return parsed[0] if parsed is not None else None
+
+
+def parse_tare_too_heavy(message: str | None) -> tuple[float, float] | None:
+    """(измеренная масса, применённый лимит тары) из текста отказа, кг.
+
+    Лимит в тексте — тот, по которому отказал агент; он может отличаться от
+    настройки центра (локальный конфиг весового ПК, ещё не применённый
+    снимок настроек). Текст не распознан — None.
+    """
+    match = _TOO_HEAVY_MASS_RE.search(message or "")
+    if match is None:
+        return None
+    mass, limit = (float(group.replace(" ", "")) for group in match.groups())
+    return mass, limit
 
 
 def tare_below_gross(tare_kg: float, gross_kg: float) -> bool:

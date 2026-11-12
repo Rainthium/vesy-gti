@@ -231,6 +231,8 @@ def create_api_v1_router(
                 await asyncio.to_thread(
                     _db, lambda s: repo.record_scale_alert(s, scale.id, alert, kind="tare_rejected")
                 )
+                # отказ для таможенной системы (weighing.rejected) пишет только v2:
+                # v1 закрыт в nginx, и в его команде нет номера документа АИС
             return _error(code, result.record.message or code.value)
 
         response = await asyncio.to_thread(_build_success_response, request, result)

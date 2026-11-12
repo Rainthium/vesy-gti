@@ -504,7 +504,9 @@ class TestMassReport:
                 )
             )
             session.commit()
-            m = reports.mass_report(session, PERIOD)
+            # «сейчас» фиксировано: свежая тара от 11.08 действует 3 месяца, и по
+            # настоящим часам тест начал падать 12.11.2026
+            m = reports.mass_report(session, PERIOD, now=datetime(2026, 8, 12, tzinfo=UTC))
         assert {r.vehicle_number for r in m.retare} == {"V3", "V7"}
         # причина у взвешивания V2 03.08 не меняется — тогда тары не было
         assert m.reasons["none"] == 2

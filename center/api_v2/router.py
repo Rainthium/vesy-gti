@@ -207,6 +207,18 @@ def create_api_v2_router(
                 await asyncio.to_thread(
                     _db, lambda s: repo.record_scale_alert(s, scale.id, alert, kind="tare_rejected")
                 )
+                refusal = result.record
+                try:
+                    # отказ для таможенной системы (weighing.rejected, контракт
+                    # customs-events-v1 5.5); ответ АИС от него не зависит
+                    await asyncio.to_thread(
+                        _db,
+                        lambda s: repo.record_tare_rejection(
+                            s, scale.id, refusal, operator=command.operator, ais_ref=command.ais_ref
+                        ),
+                    )
+                except Exception:
+                    logger.exception("отказ тарирования %s не записан для таможни", refusal.uuid)
             # отказ — только {code, message}: ничего не записано (решение 10.08.2026)
             return {"code": code.value, "message": result.record.message or code.value}
 

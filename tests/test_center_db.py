@@ -82,9 +82,11 @@ ALL_TABLES = (
     "weighing_photos",
     "weighing_ais_refs",
     "weighing_events",
+    "tare_rejections",
+    "customs_events",
 )
 
-HEAD_REVISION = "d6e7f8a9b0c1"  # одно сторно на запись — уникальный индекс storno_of (04.09.2026)
+HEAD_REVISION = "e7f8a9b0c1d2"  # таможенная интеграция: отказы и outbox (12.11.2026)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64

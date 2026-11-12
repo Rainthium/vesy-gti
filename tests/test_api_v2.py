@@ -54,10 +54,12 @@ from center.api_v2.schemas import WeighV2Request, validation_details
 from center.db import repo
 from center.db.models import (
     AuditLog,
+    CustomsEvent,
     MonitoringEvent,
     Scale,
     ScaleKind,
     Site,
+    TareRejection,
     Weighing,
     WeighingAisRef,
 )
@@ -985,6 +987,17 @@ class TestTarePlausibility:
         second = _post(api_env, ais_ref="TAR000012929", operation="taring").json()
         assert second["code"] == "OK" and len(link.requests) == 2
         assert _audit_rows(api_env)[0]["code"] == "ERR_TARE_TOO_HEAVY"
+        # отказ записан для таможенной системы (weighing.rejected) с номером
+        # документа АИС и массой из текста; в поток АИС он не идёт
+        with api_env.factory() as session:
+            rejection = session.execute(select(TareRejection)).scalar_one()
+            assert rejection.ais_ref == "TAR000012929"
+            assert rejection.vehicle_number == "01KG777AAA"
+            assert rejection.massa_kg == 37120.0 and rejection.tare_limit_kg == 25000.0
+            types = session.execute(
+                select(CustomsEvent.event_type).order_by(CustomsEvent.id)
+            ).scalars()
+            assert list(types) == ["weighing.rejected", "weighing.completed"]
 
     def test_not_applied_because_tare_not_below_gross(self, api_env: ApiEnv) -> None:
         """Действующая тара не меньше брутто, агент 0.4.29 её не подставил:
