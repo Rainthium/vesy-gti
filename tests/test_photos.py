@@ -532,20 +532,25 @@ class TestServePhotoAuth:
     def test_no_token_401(self, photo_env: PhotoEnv) -> None:
         """Без токена раздача закрыта."""
         client, record, _ = _uploaded_env(photo_env)
-        assert client.get(_db_url_of(record)).status_code == 401
+        response = client.get(_db_url_of(record))
+        assert response.status_code == 401
+        assert response.json()["code"] == "ERR_UNAUTHORIZED"
 
     def test_wrong_token_401(self, photo_env: PhotoEnv) -> None:
         """Неизвестный сервисный токен → 401."""
         client, record, _ = _uploaded_env(photo_env)
         response = client.get(_db_url_of(record), headers={"Authorization": "Bearer wrong-token"})
         assert response.status_code == 401
+        assert response.json()["code"] == "ERR_UNAUTHORIZED"
 
     def test_ip_not_in_allowlist_403(self, photo_env: PhotoEnv) -> None:
         """Токен верный, но IP не в allowlist → 403 (TestClient ходит с
         адреса testclient)."""
         _, record, _ = _uploaded_env(photo_env)
         client = _make_client(photo_env, allowed_ips=frozenset({"10.0.0.1"}))
-        assert client.get(_db_url_of(record), headers=SERVICE_AUTH).status_code == 403
+        response = client.get(_db_url_of(record), headers=SERVICE_AUTH)
+        assert response.status_code == 403
+        assert response.json()["code"] == "ERR_FORBIDDEN"
 
     def test_ip_in_allowlist_ok(self, photo_env: PhotoEnv) -> None:
         """IP из allowlist пропускается."""

@@ -22,7 +22,7 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -49,6 +49,16 @@ class PhotosConfig:
     service_tokens: dict[str, str] = field(default_factory=dict)
     # None — allowlist выключен (dev); в проде задаётся списком IP серверов
     allowed_ips: frozenset[str] | None = None
+
+
+def _denied(status: int) -> JSONResponse:
+    """Отказ интегратору в доступе к фото — тем же телом, что у API v2
+    (контракты: `{"code": …, "message": …}`)."""
+    if status == 401:
+        body = {"code": "ERR_UNAUTHORIZED", "message": "нет или неверный сервисный токен"}
+    else:
+        body = {"code": "ERR_FORBIDDEN", "message": "адрес не в списке разрешённых"}
+    return JSONResponse(body, status_code=status)
 
 
 def create_photos_router(session_factory: SessionFactory, config: PhotosConfig) -> APIRouter:
@@ -202,11 +212,11 @@ def create_photos_router(session_factory: SessionFactory, config: PhotosConfig) 
         token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
         integrator = config.service_tokens.get(token) if token else None
         if integrator is None:
-            return Response(status_code=401)
+            return _denied(401)
         client_ip = request.client.host if request.client else ""
         if config.allowed_ips is not None and client_ip not in config.allowed_ips:
             logger.warning("фото: запрос с непозволенного IP %s (%s)", client_ip, integrator)
-            return Response(status_code=403)
+            return _denied(403)
 
         try:
             full = _file_path(f"/vesy/{file_path}")
