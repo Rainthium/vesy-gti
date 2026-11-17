@@ -41,8 +41,7 @@ PACKET_LEN = 12
 STX = 0x02
 ETX = 0x03
 
-# цифры кадра — десятые кг (Кара-Суу, Алтын): делитель 10; семейство
-# XK3190 шлёт целые кг (делитель 1) — см. agent/drivers/xk3190.py
+# цифры кадра — десятые кг (Кара-Суу, Алтын, семейство XK3190): делитель 10
 WEIGHT_DIVISOR = 10.0
 # дискретность индикатора: табло показывает кратно 10 кг (85,0 в потоке =
 # «80» на табло, подтверждено 20.08.2026). Оба параметра переопределяются
@@ -62,16 +61,21 @@ DEFAULT_REOPEN_DELAY_S = 2.0
 
 @dataclass(frozen=True)
 class VesarPacket:
-    """Разобранный пакет: вес в кг с точностью протокола (десятые)."""
+    """Разобранный пакет: вес в кг с точностью протокола (десятые).
+
+    ``display`` — вес уже в виде табло (кадр «=» семейства XK3190 —
+    копия показаний индикатора): драйвер его к дискрете не приводит.
+    """
 
     raw_weight_kg: float
+    display: bool = False
 
 
 def parse_packet(pkt: bytes, *, divisor: float = WEIGHT_DIVISOR) -> VesarPacket | None:
     """Разобрать один 12-байтовый пакет; None — пакет не прошёл проверку.
 
-    ``divisor`` — во что превращать 7 цифр: 10 — десятые кг (VESAR),
-    1 — целые кг (XK3190).
+    ``divisor`` — во что превращать 7 цифр: 10 — десятые кг (VESAR и
+    XK3190), 1 — целые кг.
 
     Проверяются рамки STX/ETX, знак, 7 цифр массы и контрольная сумма
     (XOR байтов знака и массы, две ASCII-hex цифры в верхнем регистре —
@@ -157,9 +161,14 @@ class StabilityTracker:
         *,
         window_s: float = STABILITY_WINDOW_S,
         amplitude_kg: float = STABILITY_AMPLITUDE_KG,
+        keep_anchor: bool = False,
     ) -> None:
         self._window_s = window_s
         self._amplitude_kg = amplitude_kg
+        # для редких потоков (XK3190-D2+ шлёт ~2 кадра/с): последнее показание
+        # СТАРШЕ окна остаётся опорным — иначе при шаге кадров 0,5 с окно в 1 с
+        # никогда не считалось бы набранным и вес не становился бы стабильным
+        self._keep_anchor = keep_anchor
         self._samples: deque[tuple[float, float]] = deque()
 
     def update(self, raw_weight_kg: float, now: float) -> bool:
@@ -167,6 +176,17 @@ class StabilityTracker:
         self._samples.append((now, raw_weight_kg))
         floor = now - self._window_s
         while self._samples and self._samples[0][0] < floor:
+            if (
+                self._keep_anchor
+                and len(self._samples) >= 2
+                and self._samples[1][0] > floor
+                and self._samples[1][0] - self._samples[0][0] <= self._window_s
+            ):
+                # опорное показание: следующее уже внутри окна. Разрыв между
+                # опорой и следующим кадром — не больше окна: после паузы в потоке
+                # окно набирается заново, а не подтверждается одним свежим кадром
+                # (находки qa-tester и reviewer 17.11.2026)
+                break
             self._samples.popleft()
         if not self._samples or self._samples[0][0] > floor + 0.2 * self._window_s:
             return False  # окно ещё не набрано
@@ -323,11 +343,24 @@ class VesarDriver:
         port.open()
         return port
 
+    def _make_assembler(self) -> PacketAssembler:
+        """Сборщик кадров потока; наследники семейства подменяют формат."""
+        return PacketAssembler(divisor=self._weight_divisor)
+
+    def _make_stability(self) -> StabilityTracker:
+        """Программная стабильность — 3 дискреты за секунду (как UniServer)."""
+        return StabilityTracker(amplitude_kg=3 * self._discrete_kg)
+
+    def _shown_weight(self, packet: VesarPacket) -> float:
+        """Вес для состояния: к дискрете табло, если кадр точнее табло."""
+        if packet.display:
+            return packet.raw_weight_kg
+        return quantize(packet.raw_weight_kg, self._discrete_kg)
+
     def _read_loop(self, port: serial.Serial, stop_event: threading.Event) -> None:
         """Читать поток, разбирать пакеты, обновлять состояние."""
-        assembler = PacketAssembler(divisor=self._weight_divisor)
-        # программная стабильность — 3 дискреты за секунду (как UniServer)
-        stability = StabilityTracker(amplitude_kg=3 * self._discrete_kg)
+        assembler = self._make_assembler()
+        stability = self._make_stability()
         last_packet_at: float | None = None
         started_at = time.monotonic()
 
@@ -349,7 +382,7 @@ class VesarDriver:
                     self._set_state(
                         ScaleState(
                             status=ScaleStatus.OK,
-                            weight_kg=quantize(packets[-1].raw_weight_kg, self._discrete_kg),
+                            weight_kg=self._shown_weight(packets[-1]),
                             stable=stable,
                             overload=False,
                             last_packet_at=now,
