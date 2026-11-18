@@ -20,7 +20,7 @@
 import asyncio
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Awaitable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
+from center import events as events_module
 from center.db import repo
 from center.db.models import Scale, ScaleKind, Site, Weighing, WeighingEvent
 from center.db.session import database_url, make_session_factory
@@ -419,3 +420,184 @@ class TestRabbitBroker:
         assert [e.id for e in pending] == [first_id]
         assert pending[0].attempts == 1 and "битые данные" in (pending[0].last_error or "")
         assert len(broker.published) == 1
+
+
+class _HungExchange:
+    """exchange, чей publish не возвращается никогда (инцидент 17–18.11.2026)."""
+
+    async def publish(self, *args: Any, **kwargs: Any) -> None:
+        await asyncio.Event().wait()
+
+
+class _FakeConnection:
+    is_closed = False
+
+    def __init__(self, *, hang: bool = False, fail: bool = False) -> None:
+        self.hang = hang
+        self.fail = fail
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        if self.hang:
+            await asyncio.Event().wait()
+        if self.fail:
+            raise RuntimeError("соединение уже разорвано")
+
+
+class TestBrokerDeadlines:
+    """Вызов брокера, который не возвращается вовсе, не должен останавливать публикатор."""
+
+    def test_with_deadline_interrupts_hung_call(self) -> None:
+        async def hang() -> None:
+            await asyncio.Event().wait()
+
+        with pytest.raises(TimeoutError, match=r"брокер: нет ответа за .* — вызов прерван"):
+            asyncio.run(events_module.with_deadline(hang(), 0.05, "брокер"))
+
+    def test_with_deadline_keeps_inner_timeout_and_result(self) -> None:
+        async def inner_timeout() -> None:
+            raise TimeoutError("подтверждение брокера не пришло")
+
+        async def fine() -> int:
+            return 7
+
+        with pytest.raises(TimeoutError, match="подтверждение брокера не пришло"):
+            asyncio.run(events_module.with_deadline(inner_timeout(), 5.0, "брокер"))
+        assert asyncio.run(events_module.with_deadline(fine(), 5.0, "брокер")) == 7
+
+    def test_hung_publish_is_interrupted_and_connection_dropped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(events_module, "BROKER_CALL_TIMEOUT_S", 0.05)
+        broker = RabbitBroker("amqp://x:y@localhost/vesy")
+        connection = _FakeConnection()
+        broker._connection = connection
+
+        async def ensure() -> Any:
+            return _HungExchange()
+
+        monkeypatch.setattr(broker, "_ensure", ensure)
+        event = OutgoingEvent(
+            outbox_id=1,
+            event_id="b3f6c2a1-9d0e-4c7b-8a5f-2e1d3c4b5a69",
+            event_type="weighing.completed",
+            routing_key="weighing.completed.0013",
+            body={},
+        )
+        with pytest.raises(TimeoutError, match="брокер АИС: нет ответа"):
+            asyncio.run(broker.publish(event))
+        # зависшему соединению больше не верим: закрыто и забыто
+        assert connection.close_calls == 1
+        assert broker._connection is None and broker._exchange is None
+
+    def test_hung_topology_is_interrupted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(events_module, "BROKER_CALL_TIMEOUT_S", 0.05)
+        broker = RabbitBroker("amqp://x:y@localhost/vesy")
+
+        async def ensure() -> Any:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(broker, "_ensure", ensure)
+        with pytest.raises(TimeoutError, match="брокер АИС: нет ответа"):
+            asyncio.run(broker.ensure_topology())
+
+    @pytest.mark.parametrize("mode", ["hang", "fail"])
+    def test_close_never_blocks_or_raises(self, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+        monkeypatch.setattr(events_module, "BROKER_CLOSE_TIMEOUT_S", 0.05)
+        broker = RabbitBroker("amqp://x:y@localhost/vesy")
+        connection = _FakeConnection(hang=mode == "hang", fail=mode == "fail")
+        broker._connection = connection
+        asyncio.run(broker.close())
+        assert connection.close_calls == 1 and broker._connection is None
+
+    def test_run_survives_hung_pass(
+        self, factory: sessionmaker[Session], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Проход, зависший целиком, прерывается сторожем; цикл идёт дальше."""
+        monkeypatch.setattr(events_module, "PASS_TIMEOUT_S", 0.05)
+        broker = FakeBroker()
+        publisher = _publisher(factory, broker, tmp_path)
+        passes: list[int] = []
+
+        async def publish_pending() -> tuple[int, int]:
+            passes.append(1)
+            if len(passes) == 1:
+                await asyncio.Event().wait()
+            return 0, 0
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleeps.append(delay)
+            if len(sleeps) >= 2:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(publisher, "publish_pending", publish_pending)
+        publisher.sleep = fake_sleep
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(publisher.run())
+        # зависший проход засчитан как ошибка (пауза 2 → 4), следующий прошёл штатно
+        assert sleeps == [4.0, 2.0] and len(passes) == 2
+        # соединение, на котором проход завис, сброшено
+        assert broker.closed is True
+
+    def test_limits_invariant(self) -> None:
+        """Предел вызова больше подключения + отправки — иначе осиротевшее соединение."""
+        assert events_module.BROKER_CALL_TIMEOUT_S > (
+            events_module.CONNECT_TIMEOUT_S + events_module.PUBLISH_TIMEOUT_S
+        )
+        assert events_module.PASS_TIMEOUT_S > events_module.BROKER_CALL_TIMEOUT_S
+
+    def test_library_timeout_also_drops_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Свой TimeoutError библиотеки (нет подтверждения): соединение тоже закрываем."""
+
+        class SilentExchange:
+            async def publish(self, *args: Any, **kwargs: Any) -> None:
+                raise TimeoutError("подтверждение не пришло")
+
+        broker = RabbitBroker("amqp://x:y@localhost/vesy")
+        connection = _FakeConnection()
+        broker._connection = connection
+
+        async def ensure() -> Any:
+            return SilentExchange()
+
+        monkeypatch.setattr(broker, "_ensure", ensure)
+        event = OutgoingEvent(
+            outbox_id=1,
+            event_id="b3f6c2a1-9d0e-4c7b-8a5f-2e1d3c4b5a69",
+            event_type="weighing.completed",
+            routing_key="weighing.completed.0013",
+            body={},
+        )
+        with pytest.raises(TimeoutError, match="подтверждение не пришло"):
+            asyncio.run(broker.publish(event))
+        assert connection.close_calls == 1 and broker._connection is None
+
+    def test_shutdown_cancellation_passes_through(self) -> None:
+        """Остановка центра: отмена не превращается в TimeoutError и не глотается."""
+
+        async def scenario() -> list[str]:
+            outcomes: list[str] = []
+
+            async def hang() -> None:
+                await asyncio.Event().wait()
+
+            calls: list[Awaitable[None]] = [
+                events_module.with_deadline(hang(), 30.0, "брокер"),
+                events_module.close_quietly(_FakeConnection(hang=True), "брокер"),
+            ]
+            for call in calls:
+                task = asyncio.ensure_future(call)
+                await asyncio.sleep(0.01)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    outcomes.append("cancelled")
+                except Exception as exc:  # pragma: no cover — провал теста
+                    outcomes.append(repr(exc))
+            return outcomes
+
+        assert asyncio.run(scenario()) == ["cancelled", "cancelled"]

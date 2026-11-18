@@ -16,6 +16,7 @@
 """
 
 import asyncio
+import contextlib
 import logging
 import ssl
 from collections.abc import Awaitable, Callable
@@ -26,10 +27,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from center import events as broker_limits  # пределы читаются в момент вызова
 from center.customs.events import PRODUCER, build_customs_event
 from center.db import repo
 from center.db.models import CustomsEvent
-from center.events import EventBroker, OutgoingEvent
+from center.events import EventBroker, OutgoingEvent, close_quietly, with_deadline
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +111,13 @@ class CustomsBroker:
 
     async def ensure_topology(self) -> None:
         """Только подключиться: топологию у таможни центр не объявляет."""
-        await self._ensure()
+        try:
+            await with_deadline(
+                self._ensure(), broker_limits.BROKER_CALL_TIMEOUT_S, "брокер таможни"
+            )
+        except TimeoutError:
+            await self.close()
+            raise
 
     async def publish(self, event: OutgoingEvent) -> None:
         import aio_pika
@@ -119,7 +127,6 @@ class CustomsBroker:
             raise UndeliverableEvent(
                 f"сообщение {len(payload)} байт больше предела {MAX_MESSAGE_BYTES} — не отправлено"
             )
-        exchange = await self._ensure()
         message = aio_pika.Message(
             payload,
             content_type="application/json",
@@ -129,12 +136,21 @@ class CustomsBroker:
             timestamp=datetime.now(UTC),
             app_id=PRODUCER,
         )
-        try:
+
+        async def send() -> None:
+            exchange = await self._ensure()
             await exchange.publish(
                 message, routing_key=event.routing_key, mandatory=True, timeout=PUBLISH_TIMEOUT_S
             )
+
+        try:
+            # жёсткий предел на весь вызов: 17.11.2026 ``exchange.publish`` не
+            # вернулся вовсе (соединение умерло во время отправки), и публикатор
+            # простоял 19 часов — ``timeout=`` библиотеки на это ожидание не действует
+            await with_deadline(send(), broker_limits.BROKER_CALL_TIMEOUT_S, "брокер таможни")
         except Exception:
-            # отказ брокера (нет exchange, нет прав) закрывает канал — следующая
+            # отказ брокера (нет exchange, нет прав) закрывает канал, истёкший
+            # предел означает зависшее соединение — в обоих случаях следующая
             # попытка должна начать с чистого подключения
             await self.close()
             raise
@@ -144,7 +160,7 @@ class CustomsBroker:
         self._channel = None
         self._exchange = None
         if connection is not None:
-            await connection.close()
+            await close_quietly(connection, "брокер таможни")
 
 
 @dataclass
@@ -174,9 +190,21 @@ class CustomsPublisher:
         logger.info("публикатор событий таможни запущен (интервал %.0f с)", self.interval_s)
         while True:
             try:
-                published, failed = await self.publish_pending()
+                published, failed = await with_deadline(
+                    self.publish_pending(),
+                    broker_limits.PASS_TIMEOUT_S,
+                    "проход публикатора таможни",
+                )
             except asyncio.CancelledError:
                 raise
+            except TimeoutError as exc:
+                # сторож прохода: отмена могла застать вызов брокера на полпути —
+                # соединению больше не верим, следующий проход начнёт с нового
+                logger.error("публикатор событий таможни: %s — соединение с брокером сброшено", exc)
+                if self.broker is not None:
+                    with contextlib.suppress(Exception):
+                        await self.broker.close()
+                published, failed = 0, 1
             except Exception:
                 logger.exception("публикатор событий таможни: проход не удался")
                 published, failed = 0, 1

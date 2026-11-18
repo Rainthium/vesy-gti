@@ -456,6 +456,123 @@ class TestBroker:
             asyncio.run(broker.publish(self._event()))
         assert closed == [True]
 
+    def test_hung_publish_is_interrupted_and_connection_dropped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Инцидент 17–18.11.2026: publish не вернулся вовсе — предел прерывает вызов."""
+
+        class HungExchange:
+            async def publish(self, *args: Any, **kwargs: Any) -> None:
+                await asyncio.Event().wait()
+
+        class FakeConnection:
+            is_closed = False
+            close_calls = 0
+
+            async def close(self) -> None:
+                self.close_calls += 1
+                await asyncio.Event().wait()  # и закрытие виснет тоже
+
+        monkeypatch.setattr("center.events.BROKER_CALL_TIMEOUT_S", 0.05)
+        monkeypatch.setattr("center.events.BROKER_CLOSE_TIMEOUT_S", 0.05)
+        broker = CustomsBroker("amqp://x:y@localhost/v", "vesy.events.test")
+        connection = FakeConnection()
+        broker._connection = connection
+
+        async def ensure() -> Any:
+            return HungExchange()
+
+        monkeypatch.setattr(broker, "_ensure", ensure)
+        with pytest.raises(TimeoutError, match="брокер таможни: нет ответа"):
+            asyncio.run(broker.publish(self._event()))
+        assert connection.close_calls == 1
+        assert broker._connection is None and broker._exchange is None
+
+    def test_publisher_recovers_after_hung_publish(
+        self,
+        factory: sessionmaker[Session],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Зависшая отправка — обычная неудачная попытка: пометка на строке, затем досылка."""
+        published: list[str] = []
+
+        class FlakyExchange:
+            calls = 0
+
+            async def publish(self, message: Any, routing_key: str, **kwargs: Any) -> None:
+                FlakyExchange.calls += 1
+                if FlakyExchange.calls == 1:
+                    await asyncio.Event().wait()
+                published.append(routing_key)
+
+        monkeypatch.setattr("center.events.BROKER_CALL_TIMEOUT_S", 0.05)
+        broker = CustomsBroker("amqp://x:y@localhost/v", "vesy.events.test")
+        exchange = FlakyExchange()
+
+        async def ensure() -> Any:
+            return exchange
+
+        monkeypatch.setattr(broker, "_ensure", ensure)
+        scale_id = _seed_scale(factory)
+        with factory() as session:
+            repo.save_weighing_record(session, scale_id, _record())
+        publisher = CustomsPublisher(factory, broker, photos_dir=tmp_path, now=lambda: NOW)
+        assert asyncio.run(publisher.publish_pending()) == (0, 1)
+        (row,) = _outbox(factory)
+        assert row.published_at is None and row.attempts == 1
+        assert row.last_error is not None and "нет ответа" in row.last_error
+        assert asyncio.run(publisher.publish_pending()) == (1, 0)
+        (row,) = _outbox(factory)
+        assert row.published_at == NOW and published == ["weighing.completed.kokcho-koz"]
+
+    def test_hung_connect_is_interrupted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("center.events.BROKER_CALL_TIMEOUT_S", 0.05)
+        broker = CustomsBroker("amqp://x:y@localhost/v", "vesy.events.test")
+
+        async def ensure() -> Any:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(broker, "_ensure", ensure)
+        with pytest.raises(TimeoutError, match="брокер таможни: нет ответа"):
+            asyncio.run(broker.ensure_topology())
+
+    def test_run_survives_hung_pass_and_drops_connection(
+        self,
+        factory: sessionmaker[Session],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Сторож прохода: зависший проход прерван, соединение сброшено, цикл идёт дальше."""
+        monkeypatch.setattr("center.events.PASS_TIMEOUT_S", 0.05)
+        closed: list[bool] = []
+
+        class Broker(FakeBroker):
+            async def close(self) -> None:
+                closed.append(True)
+
+        publisher = _publisher(factory, Broker(), tmp_path)
+        passes: list[int] = []
+
+        async def publish_pending() -> tuple[int, int]:
+            passes.append(1)
+            if len(passes) == 1:
+                await asyncio.Event().wait()
+            return 0, 0
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleeps.append(delay)
+            if len(sleeps) >= 2:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(publisher, "publish_pending", publish_pending)
+        publisher.sleep = fake_sleep
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(publisher.run())
+        assert sleeps == [4.0, 2.0] and len(passes) == 2 and closed == [True]
+
 
 class TestPanelSide:
     def test_site_customs_code_with_audit(self, factory: sessionmaker[Session]) -> None:

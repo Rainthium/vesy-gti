@@ -16,6 +16,7 @@
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
@@ -41,6 +42,21 @@ EVENT_VERSION = 1
 APP_ID = "vesy-center"
 CONNECT_TIMEOUT_S = 15.0
 PUBLISH_TIMEOUT_S = 30.0  # ожидание подтверждения брокера одним сообщением
+# Жёсткие пределы поверх таймаутов библиотеки (инцидент 17–18.11.2026: публикатор
+# таможни 19 часов простоял на одном ``exchange.publish`` — соединение умерло
+# между проверкой и отправкой, aio-pika переподключилась сама, а вызов так и не
+# вернулся: внутри aiormq есть ожидания, на которые ``timeout=`` не действует).
+# Один вызов брокера целиком — подключение, канал, отправка, подтверждение.
+# ИНВАРИАНТ: больше CONNECT_TIMEOUT_S + PUBLISH_TIMEOUT_S. Иначе предел может
+# сработать внутри ``connect_robust`` — объект соединения ещё не записан в
+# брокер, закрыть его некому, и он переподключается в фоне до конца процесса
+# (проверено reviewer на живом брокере 18.11.2026; тест стережёт неравенство).
+BROKER_CALL_TIMEOUT_S = 60.0
+# закрытие соединения, которое могло зависнуть вместе с вызовом:
+BROKER_CLOSE_TIMEOUT_S = 10.0
+# один проход публикатора (порция до 50 событий, обычно доли секунды) — сторож
+# на случай зависания вне брокера:
+PASS_TIMEOUT_S = 300.0
 # event_id детерминирован по операции и типу: повторная публикация несёт тот
 # же идентификатор (контракт 7.3), АИС схлопывает дубли
 EVENT_NAMESPACE = uuid.UUID("5d0f9c8a-6b3e-4b0e-9a1c-2f4e7d8b9c01")
@@ -83,6 +99,42 @@ class EventBroker(Protocol):
     async def publish(self, event: OutgoingEvent) -> None: ...
 
     async def close(self) -> None: ...
+
+
+async def with_deadline[T](call: Awaitable[T], timeout_s: float, what: str) -> T:
+    """Дождаться ``call`` не дольше ``timeout_s``; по истечении — прервать вызов.
+
+    Свой ``TimeoutError`` вызова (например, ожидание подтверждения брокера
+    внутри aiormq) проходит наружу как есть; истёкший предел даёт
+    ``TimeoutError`` с понятным текстом — он попадёт в ``last_error`` строки
+    outbox и в лог.
+    """
+    scope = asyncio.timeout(timeout_s)
+    try:
+        async with scope:
+            return await call
+    except TimeoutError:
+        if scope.expired():
+            raise TimeoutError(f"{what}: нет ответа за {timeout_s:.0f} с — вызов прерван") from None
+        raise
+
+
+async def close_quietly(connection: Any, what: str) -> None:
+    """Закрыть соединение с брокером, не дольше BROKER_CLOSE_TIMEOUT_S и без ошибок наружу.
+
+    Зовётся и на пути ошибки: исключение или зависание закрытия не должны
+    ни подменить исходную причину, ни остановить публикатор. Незакрывшееся
+    соединение бросаем — следующая попытка откроет новое.
+    """
+    try:
+        async with asyncio.timeout(BROKER_CLOSE_TIMEOUT_S):
+            await connection.close()
+    except TimeoutError:
+        logger.warning(
+            "%s: соединение не закрылось за %.0f с — брошено", what, BROKER_CLOSE_TIMEOUT_S
+        )
+    except Exception as exc:
+        logger.warning("%s: соединение не закрылось штатно (%r) — брошено", what, exc)
 
 
 class RabbitBroker:
@@ -135,12 +187,15 @@ class RabbitBroker:
         """Подключиться и объявить exchange/очередь, не дожидаясь первого события:
         консьюмер АИС не имеет права объявлять очередь — она должна существовать
         с момента старта центра."""
-        await self._ensure()
+        try:
+            await with_deadline(self._ensure(), BROKER_CALL_TIMEOUT_S, "брокер АИС")
+        except TimeoutError:
+            await self.close()
+            raise
 
     async def publish(self, event: OutgoingEvent) -> None:
         import aio_pika
 
-        exchange = await self._ensure()
         message = aio_pika.Message(
             event.payload(),
             content_type="application/json",
@@ -150,14 +205,27 @@ class RabbitBroker:
             timestamp=datetime.now(UTC),
             app_id=APP_ID,
         )
-        await exchange.publish(message, routing_key=event.routing_key, timeout=PUBLISH_TIMEOUT_S)
+
+        async def send() -> None:
+            exchange = await self._ensure()
+            await exchange.publish(
+                message, routing_key=event.routing_key, timeout=PUBLISH_TIMEOUT_S
+            )
+
+        try:
+            await with_deadline(send(), BROKER_CALL_TIMEOUT_S, "брокер АИС")
+        except TimeoutError:
+            # брокер молчит или вызов завис: соединению больше не верим —
+            # следующая попытка начнёт с чистого подключения
+            await self.close()
+            raise
 
     async def close(self) -> None:
         connection, self._connection = self._connection, None
         self._channel = None
         self._exchange = None
         if connection is not None:
-            await connection.close()
+            await close_quietly(connection, "брокер АИС")
 
 
 def build_event(
@@ -218,9 +286,19 @@ class EventPublisher:
                 if not topology_ready and self.broker is not None:
                     await self.broker.ensure_topology()
                     topology_ready = True
-                published, failed = await self.publish_pending()
+                published, failed = await with_deadline(
+                    self.publish_pending(), PASS_TIMEOUT_S, "проход публикатора АИС"
+                )
             except asyncio.CancelledError:
                 raise
+            except TimeoutError as exc:
+                # сторож прохода (или предел объявления топологии): отмена могла
+                # застать вызов брокера на полпути — соединению больше не верим
+                logger.error("публикатор событий АИС: %s — соединение с брокером сброшено", exc)
+                if self.broker is not None:
+                    with contextlib.suppress(Exception):
+                        await self.broker.close()
+                published, failed = 0, 1
             except Exception:
                 logger.exception("публикатор событий АИС: проход не удался")
                 published, failed = 0, 1
